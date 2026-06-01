@@ -107,7 +107,7 @@ export function ChatWindow() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId: "9eba1881-f6aa-4d0e-a85d-ec67458b8a76",
+           userId: localStorage.getItem("userId"),
           content: userText,
         }),
         signal: abortControllerRef.current.signal,
