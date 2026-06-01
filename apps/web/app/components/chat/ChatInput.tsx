@@ -3,7 +3,6 @@
 import { useEffect, useCallback, useState } from "react";
 import { StopCircle, ArrowUp, Plus, Expand, Shrink, Mic } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Tooltip } from "../ui/Tooltip";
 
 interface ChatInputProps {
   input: string;
