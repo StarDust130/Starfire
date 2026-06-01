@@ -16,7 +16,7 @@ const router: ExpressRouter = Router();
 router.post(
   "/",
 
-  // validate(chatSchema),
+  validate(chatSchema),
 
   chatController
 );
