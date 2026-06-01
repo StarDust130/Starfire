@@ -12,6 +12,7 @@ import { resumeRouter } from "./modules/resume/resume.route.js";
 import { emailRouter } from "./modules/email/email.route.js";
 import { jobRouter } from "./modules/jobs/jobs.route.js";
 import { telegramRouter } from "./modules/telegram/telegram.route.js";
+import authRouter from "./modules/auth/auth.route.js";
 
 export const app: Express = express();
 
@@ -28,6 +29,9 @@ app.use(express.json());
 //! Routers 🪼📍
 app.use("/api/v1/health", healthRouter);
 app.use("/api/v1/chat", chatRouter);
+// 🔐 Auth routes
+app.use(
+  "/api/v1/auth", authRouter);
 
 // Worker routes 🍼
 app.use("/api/email", emailRouter);
