@@ -15,9 +15,7 @@ const router: ExpressRouter = Router();
 // 💬 Chat route
 router.post(
   "/",
-
-  // validate(chatSchema),
-
+  validate(chatSchema),
   chatController
 );
 

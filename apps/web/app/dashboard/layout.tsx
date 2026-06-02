@@ -3,6 +3,8 @@ import { useState } from "react";
 import { Sidebar, MobileHeader } from "../components/Sidebar";
 import AIChatWidget from "./chat/AIChatWidget";
 import { ChatDrawerProvider, useChatDrawer } from "./chat/ChatDrawerContext";
+import { useAuthSync } from "../hooks/use-auth-sync";
+
 
 export default function DashboardLayout({
   children,
@@ -49,6 +51,7 @@ function DashboardLayoutContent({
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden relative custom-scrollbar z-0">
           <div className="p-4 md:p-8 lg:p-10 w-full mx-auto min-h-max max-w-[1600px]">
+            <AuthProvider />
             {children}
             <AIChatWidget />
           </div>
@@ -56,4 +59,10 @@ function DashboardLayoutContent({
       </main>
     </div>
   );
+}
+
+function AuthProvider() {
+  useAuthSync();
+
+  return null;
 }
