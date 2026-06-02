@@ -1,92 +1,217 @@
 import { Role } from "../../../../../prisma/generated/client/enums.js";
-import { createMessage, getRecentMessages } from "./chat.repository.js";
-import { generateAIResponse } from "./chat.ai.js";
-import { buildConversationContext } from "./chat.memory.js";
+
+import type { Response } from "express";
+
+import { logger } from "../../lib/logger.js";
+
+import { memoryQueue } from "../../queue/memory.queue.js";
+
 import {
   getRandomInjectionReply,
   isPromptInjection,
 } from "../../security/prompt-injection.js";
-import { buildUserProfileContext } from "../memory/memory.context.js";
-import { getLongTermMemories } from "../memory/memory.repository.js";
-import { searchRelevantMemories } from "../memory/memory.vector.js";
-import { buildSemanticMemoryContext } from "../memory/memory.semantic.js";
-import { memoryQueue } from "../../queue/memory.queue.js";
-import type { Response } from "express";
 
-//! Core chat service handling the streaming flow 🗣️🤖
+import { createMessage, getRecentMessages } from "./chat.repository.js";
+
+import { buildConversationContext } from "./chat.memory.js";
+
+import { generateAIResponse } from "./chat.ai.js";
+
+import { getLongTermMemories } from "../memory/memory.repository.js";
+
+import { buildUserProfileContext } from "../memory/memory.context.js";
+
+import { searchRelevantMemories } from "../memory/memory.vector.js";
+
+import { buildSemanticMemoryContext } from "../memory/memory.semantic.js";
+
+import { executeAgent } from "../agents/agent.service.js";
+
+import { AgentAction } from "../agents/agent.types.js";
+
+//! Core chat service handling chat + agents 🗣️🤖
 export async function chatService(
-  data: { userId: string; content: string },
+  data: {
+    userId: string;
+
+    content: string;
+  },
+
   res: Response,
 ) {
-  console.log(`🔍 [Service] Processing input for user: ${data.userId}`);
+  logger.info(`🗣️ Processing message for user: ${data.userId}`);
 
-  // 1️⃣ Check for prompt injection 🚨
+  //===========================================================
+  // 1️⃣ Security Check 🚨
+  //===========================================================
+
   if (isPromptInjection(data.content)) {
-    console.warn("⚠️ [Security] Prompt injection detected!");
+    logger.warn("⚠️ Prompt injection detected");
+
     res.write(
-      `data: ${JSON.stringify({ reply: getRandomInjectionReply() })}\n\n`,
+      `data: ${JSON.stringify({
+        reply: getRandomInjectionReply(),
+      })}\n\n`,
     );
+
+    res.write("data: [DONE]\n\n");
+
     res.end();
+
     return;
   }
 
-  // 2️⃣ Execute all DB and Vector Search operations SIMULTANEOUSLY ⚡
-  console.log("💾 [DB] Initiating parallel context gathering...");
+  //===========================================================
+  // 2️⃣ Save User Message 💾
+  //===========================================================
+
+  await createMessage({
+    userId: data.userId,
+
+    content: data.content,
+
+    role: Role.user,
+  });
+
+  //===========================================================
+  // 3️⃣ Agent Planner 🤖
+  //===========================================================
+
+  const agentResult = await executeAgent(
+    data.userId,
+
+    data.content,
+  );
+
+  //===========================================================
+  // 4️⃣ Worker Action Detected ⚡
+  //===========================================================
+
+  if (agentResult.action !== AgentAction.CHAT) {
+    logger.info(`🤖 Agent Action: ${agentResult.action}`);
+
+    res.write(
+      `data: ${JSON.stringify({
+        reply: agentResult.reply,
+      })}\n\n`,
+    );
+
+    res.write("data: [DONE]\n\n");
+
+    res.end();
+
+    return;
+  }
+
+  //===========================================================
+  // 5️⃣ Load Context In Parallel 🧠
+  //===========================================================
+
   const [recentMessages, memories, semanticMemories] = await Promise.all([
     getRecentMessages(data.userId),
+
     getLongTermMemories(data.userId),
-    searchRelevantMemories(data.content, data.userId),
-    // Save the incoming user message concurrently but we don't need the result here
-    createMessage({
-      userId: data.userId,
-      content: data.content,
-      role: Role.user,
-    }),
+
+    searchRelevantMemories(
+      data.content,
+
+      data.userId,
+    ),
   ]);
 
-  // 3️⃣ Build AI context 🧩
+  //===========================================================
+  // 6️⃣ Build AI Context 🧩
+  //===========================================================
+
   const context = buildConversationContext(recentMessages);
 
-  // Because we fetched recentMessages in parallel with saving the new message,
-  // the new message is NOT in the recentMessages array. We manually append it here.
-  context.push({ role: "user", content: data.content });
-
   const userProfile = buildUserProfileContext(memories);
+
   const semanticContext = buildSemanticMemoryContext(semanticMemories);
 
-  console.log("🧠 [AI] Context built, initiating stream...");
+  logger.info("🧠 Context ready");
 
-  // 4️⃣ Generate AI Stream ✨
+  //===========================================================
+  // 7️⃣ Generate Streaming Response ✨
+  //===========================================================
+
   const stream = await generateAIResponse(
     context,
+
     userProfile,
+
     semanticContext,
   );
 
   let accumulatedReply = "";
 
-  // 5️⃣ Stream chunks live 🚀
+  //===========================================================
+  // 8️⃣ Stream Chunks Live 🚀
+  //===========================================================
+
   for await (const chunk of stream) {
     const text = chunk.choices[0]?.delta?.content || "";
-    if (text) {
-      accumulatedReply += text;
-      res.write(`data: ${JSON.stringify({ reply: text })}\n\n`);
+
+    if (!text) {
+      continue;
     }
+
+    accumulatedReply += text;
+
+    res.write(
+      `data: ${JSON.stringify({
+        reply: text,
+      })}\n\n`,
+    );
   }
 
-  // Signal completion
-  res.write("data: [DONE]\n\n");
-  res.end();
-  console.log("✅ [Stream] Response complete.");
+  //===========================================================
+  // 9️⃣ End Stream ✅
+  //===========================================================
 
-  // 6️⃣ Async Post-processing ⚡ (Non-blocking)
+  res.write("data: [DONE]\n\n");
+
+  res.end();
+
+  logger.info("✅ Stream complete");
+
+  //===========================================================
+  // 🔟 Save Assistant Reply 💾
+  //===========================================================
+
   createMessage({
     userId: data.userId,
+
     content: accumulatedReply,
+
     role: Role.assistant,
-  }).catch((e) => console.error("❌ [DB] Error saving reply:", e));
+  }).catch((error) =>
+    logger.error(
+      "❌ Failed to save assistant reply",
+
+      error,
+    ),
+  );
+
+  //===========================================================
+  // 1️⃣1️⃣ Queue Memory Processing 🧠
+  //===========================================================
 
   memoryQueue
-    .add("process-memory", { userId: data.userId, message: data.content })
-    .catch((e) => console.error("❌ [Queue] Memory error:", e));
+    .add(
+      "process-memory",
+
+      {
+        userId: data.userId,
+
+        message: data.content,
+      },
+    )
+    .catch((error) =>
+      logger.error(
+        "❌ Failed to queue memory",
+
+        error,
+      ),
+    );
 }
