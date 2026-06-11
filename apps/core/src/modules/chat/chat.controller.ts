@@ -15,6 +15,21 @@ export const chatController = asyncHandler(
     // CRITICAL: Force Express to establish the connection instantly
     res.flushHeaders(); 
 
-    await chatService(req.body, res);
+    try {
+      await chatService(req.body, res);
+    } catch (error) {
+      console.error("Chat stream failed", error);
+
+      if (!res.writableEnded) {
+        res.write(
+          `data: ${JSON.stringify({
+            reply: "Sorry, the chat service hit an error. Please try again.",
+          })}\n\n`,
+        );
+
+        res.write("data: [DONE]\n\n");
+        res.end();
+      }
+    }
   },
 );
