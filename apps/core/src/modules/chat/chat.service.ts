@@ -116,7 +116,15 @@ export async function chatService(
       data.content,
 
       data.userId,
-    ),
+    ).catch((error) => {
+      logger.warn(
+        "Semantic memory search failed; continuing chat without vector memories",
+
+        error,
+      );
+
+      return [];
+    }),
   ]);
 
   //===========================================================
