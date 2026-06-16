@@ -2,6 +2,7 @@
 
 # ✨ StarFire ✨
 
+
   <div align="center">
   <img src="public/banner.png" alt="Event Flow Diagram" width="800" />
 </div>
