@@ -1,6 +1,6 @@
 # 🌟 Starfire
 
-![Starfire](https://c.tenor.com/qF9D6mvsdukAAAAd/tenor.gif)
+![Starfire](https://media.tenor.com/tPfCnUEDWMQAAAAi/frieren-frieren-dance.gif)
 
 **A little AI companion for your desktop.** 🤖✨
 
