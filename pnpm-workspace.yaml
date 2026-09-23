@@ -3,3 +3,4 @@ packages:
   - "packages/*"
 allowBuilds:
   esbuild: false
+  lefthook: set this to true or false

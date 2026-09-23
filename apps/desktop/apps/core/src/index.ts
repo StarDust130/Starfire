@@ -1,5 +1,5 @@
-import { logger } from "./lib/logger.js";
 import { handleError } from "./lib/error-handler.js";
+import { logger } from "./lib/logger.js";
 
 process.on("uncaughtException", (error) => {
   handleError(error, {

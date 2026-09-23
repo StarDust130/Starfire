@@ -1,5 +1,5 @@
-import { logger } from "./logger.js";
 import { StarfireError } from "../errors/starfire-error.js";
+import { logger } from "./logger.js";
 
 export function normalizeError(error: unknown): StarfireError {
   if (error instanceof StarfireError) {

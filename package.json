@@ -8,13 +8,16 @@
     "format:check": "biome format .",
     "lint": "biome lint .",
     "check": "biome check .",
-    "test": "vitest run",
+    "typecheck": "pnpm --filter @starfire/core exec tsc --noEmit && pnpm --filter desktop exec tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
     "rust:fmt": "cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml",
+    "rust:fmt:check": "cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --check",
     "rust:clippy": "cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features -- -D warnings"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",
+    "lefthook": "^2.1.14",
     "vitest": "^5.0.1"
   }
 }
