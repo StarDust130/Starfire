@@ -1,5 +1,7 @@
-🌟 Starfire is Back Again
+# 🌟 Starfire
 
-Your personal AI desktop assistant 🤖✨
+![Starfire](https://c.tenor.com/qF9D6mvsdukAAAAd/tenor.gif)
 
-Starfire is a local-first, voice-first AI assistant that can understand you, think, and control your computer.
+**A little AI companion for your desktop.** 🤖✨
+
+She listens. She thinks. She gets things done. 💫
