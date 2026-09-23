@@ -7,10 +7,10 @@
     "format": "biome format --write .",
     "format:check": "biome format .",
     "lint": "biome lint .",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
-    "typecheck": "pnpm --filter @starfire/core exec tsc --noEmit && pnpm -C apps/desktop exec tsc --noEmit",
-    "test": "pnpm --filter @starfire/core test",
+    "typecheck": "pnpm --filter @starfire/core exec tsc --noEmit && pnpm --filter desktop exec tsc --noEmit",
+    "test": "pnpm -r --if-present test",
     "test:watch": "vitest",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
     "rust:fmt": "cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml",
     "rust:fmt:check": "cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --check",
     "rust:clippy": "cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features -- -D warnings"
