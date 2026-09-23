@@ -13,7 +13,9 @@
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
     "rust:fmt": "cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml",
     "rust:fmt:check": "cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --check",
-    "rust:clippy": "cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features -- -D warnings"
+    "rust:clippy": "cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features -- -D warnings",
+    "build": "pnpm -r --if-present build",
+    "verify": "pnpm check && pnpm build && pnpm rust:fmt:check && pnpm rust:clippy"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",
