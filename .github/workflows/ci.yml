@@ -3,18 +3,36 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   check:
+    name: Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-      - name: Checkout
+      - name: 📥 Checkout
         uses: actions/checkout@v6
 
-      - name: Setup pnpm + Node
+      - name: 📦 Setup pnpm + Node
         uses: pnpm/setup@v3
         with:
           version: 12.6.0
@@ -23,13 +41,13 @@ jobs:
           install: false
           require-lockfile: true
 
-      - name: Install dependencies
+      - name: 📦 Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      - name: Run TypeScript checks
+      - name: 🔷 TypeScript checks
         run: pnpm check
 
-      - name: Install Tauri Linux dependencies
+      - name: 🐧 Install Tauri Linux dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -44,16 +62,16 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev
 
-      - name: Setup Rust
+      - name: 🦀 Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: stable
           components: rustfmt, clippy
 
-      - name: Rust format
+      - name: 🧹 Rust format
         run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
 
-      - name: Rust clippy
+      - name: 🔍 Rust Clippy
         run: |
           cargo clippy \
             --manifest-path apps/desktop/src-tauri/Cargo.toml \
