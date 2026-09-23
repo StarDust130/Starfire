@@ -29,6 +29,7 @@ temp/
 .cache/
 .turbo/
 .vite/
+*.tsbuildinfo
 
 # Next.js (if used later)
 .next/
