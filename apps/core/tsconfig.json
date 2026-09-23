@@ -4,9 +4,18 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "strict": true,
-    "noEmit": false,
+    "composite": true,
+    "rootDir": "src",
     "outDir": "dist",
     "skipLibCheck": true
   },
+  "references": [
+    {
+      "path": "../../packages/contracts"
+    },
+    {
+      "path": "../../packages/tools"
+    }
+  ],
   "include": ["src"]
 }
