@@ -1,45 +1,13 @@
-# Contributing to Starfire
+# 🦓🤝 Want to Contribute to Starfire?
 
-## Branches
+You don't have to.
 
-Use:
+We've already got enough bugs. 💀
 
-- `feature/<name>`
-- `fix/<name>`
-- `refactor/<name>`
-- `docs/<name>`
-- `test/<name>`
+![Starfire](https://c.tenor.com/qF9D6mvsdukAAAAd/tenor.gif)
 
-## Commits
+But if you're brave enough:
 
-Use Conventional Commit style:
+**Fork → break → fix → PR.** 🚀
 
-- `feat:`
-- `fix:`
-- `refactor:`
-- `test:`
-- `docs:`
-- `chore:`
-- `ci:`
-- `perf:`
-
-Examples:
-
-`feat: add open app tool`
-
-`fix: handle failed app launch`
-
-`test: add tool executor tests`
-
-`chore: configure biome`
-
-## Pull requests
-
-Keep changes focused.
-
-Every PR should pass:
-
-- formatting
-- linting
-- type checking
-- tests
+Just... don't increase the bug count. 😭
