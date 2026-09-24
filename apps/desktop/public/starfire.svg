@@ -1,0 +1,225 @@
+<svg width="512" height="512" viewBox="0 0 512 512"
+     xmlns="http://www.w3.org/2000/svg">
+     <title>Starfire</title>
+
+  <defs>
+    <!-- Hair -->
+    <linearGradient id="hair" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fffaff"/>
+      <stop offset="55%" stop-color="#eee9ff"/>
+      <stop offset="100%" stop-color="#c9c4ff"/>
+    </linearGradient>
+
+    <!-- Skin -->
+    <linearGradient id="skin" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fff7f8"/>
+      <stop offset="100%" stop-color="#f7d9de"/>
+    </linearGradient>
+
+    <!-- Outfit -->
+    <linearGradient id="hoodie" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#25233a"/>
+      <stop offset="100%" stop-color="#11111d"/>
+    </linearGradient>
+
+    <!-- Pink -->
+    <linearGradient id="pink" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff9acb"/>
+      <stop offset="100%" stop-color="#d85cff"/>
+    </linearGradient>
+
+    <!-- Eye -->
+    <radialGradient id="eye">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="35%" stop-color="#dcbcff"/>
+      <stop offset="100%" stop-color="#7650d8"/>
+    </radialGradient>
+
+    <!-- Soft shadow -->
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="10"
+                    flood-opacity=".18"/>
+    </filter>
+  </defs>
+
+  <!-- 🌟 Soft glow -->
+  <circle cx="256" cy="250" r="190" fill="#efe8ff"/>
+  <circle cx="256" cy="250" r="150" fill="#faf7ff"/>
+
+  <!-- 🎧 Headset -->
+  <path d="M118 190 C118 88 394 88 394 190"
+        fill="none"
+        stroke="#242438"
+        stroke-width="22"
+        stroke-linecap="round"/>
+
+  <!-- Cat ears -->
+  <path d="M122 175 L105 125 L155 150 Z"
+        fill="#202034"/>
+  <path d="M390 175 L407 125 L357 150 Z"
+        fill="#202034"/>
+
+  <path d="M116 153 L108 134 L133 150 Z"
+        fill="#ff94ce"/>
+  <path d="M396 153 L404 134 L379 150 Z"
+        fill="#ff94ce"/>
+
+  <!-- Headset side cups -->
+  <rect x="105" y="170" width="38" height="72" rx="18"
+        fill="#292840"/>
+  <rect x="369" y="170" width="38" height="72" rx="18"
+        fill="#292840"/>
+
+  <circle cx="124" cy="206" r="10" fill="#ff8ed1"/>
+  <circle cx="388" cy="206" r="10" fill="#ff8ed1"/>
+
+  <!-- 👤 Head -->
+  <path d="
+    M150 210
+    C150 130 362 130 362 210
+    L362 285
+    C362 355 315 392 256 392
+    C197 392 150 355 150 285
+    Z"
+    fill="url(#skin)"
+    filter="url(#shadow)"
+  />
+
+  <!-- Hair back -->
+  <path d="
+    M152 235
+    C125 150 170 92 258 95
+    C345 98 382 158 358 244
+    C338 218 326 196 320 172
+    C292 195 238 204 184 190
+    C179 217 168 239 152 235
+    Z"
+    fill="url(#hair)"
+  />
+
+  <!-- Hair bangs -->
+  <path d="
+    M155 202
+    C166 138 211 114 256 114
+    C306 114 347 146 357 204
+    C330 185 312 170 301 148
+    C285 173 258 188 225 194
+    C199 200 176 204 155 202
+    Z"
+    fill="url(#hair)"
+  />
+
+  <!-- Side hair -->
+  <path d="M165 210 C126 242 126 316 165 344"
+        fill="none"
+        stroke="#d5cffd"
+        stroke-width="22"
+        stroke-linecap="round"/>
+
+  <path d="M347 210 C386 242 386 316 347 344"
+        fill="none"
+        stroke="#d5cffd"
+        stroke-width="22"
+        stroke-linecap="round"/>
+
+  <!-- 👁️ Left eye -->
+  <ellipse cx="208" cy="260" rx="34" ry="42" fill="#fff"/>
+  <ellipse cx="208" cy="267" rx="25" ry="32" fill="url(#eye)"/>
+  <ellipse cx="216" cy="250" rx="8" ry="10" fill="#fff"/>
+  <circle cx="198" cy="282" r="4" fill="#fff"/>
+
+  <!-- 👁️ Right eye -->
+  <ellipse cx="304" cy="260" rx="34" ry="42" fill="#fff"/>
+  <ellipse cx="304" cy="267" rx="25" ry="32" fill="url(#eye)"/>
+  <ellipse cx="312" cy="250" rx="8" ry="10" fill="#fff"/>
+  <circle cx="294" cy="282" r="4" fill="#fff"/>
+
+  <!-- Eyebrows -->
+  <path d="M180 224 Q208 208 230 224"
+        fill="none" stroke="#8d7ab2" stroke-width="7"
+        stroke-linecap="round"/>
+
+  <path d="M282 224 Q304 208 332 224"
+        fill="none" stroke="#8d7ab2" stroke-width="7"
+        stroke-linecap="round"/>
+
+  <!-- 🌸 Blush -->
+  <ellipse cx="175" cy="308" rx="23" ry="10"
+           fill="#ff91b9" opacity=".45"/>
+  <ellipse cx="337" cy="308" rx="23" ry="10"
+           fill="#ff91b9" opacity=".45"/>
+
+  <!-- Nose -->
+  <path d="M252 292 Q256 298 261 292"
+        fill="none" stroke="#d99eae" stroke-width="3"/>
+
+  <!-- 😊 Mouth -->
+  <path d="M238 317 Q256 335 274 317"
+        fill="none"
+        stroke="#7e4766"
+        stroke-width="6"
+        stroke-linecap="round"/>
+
+  <!-- 🎤 Mic -->
+  <path d="M350 225 C377 230 382 247 379 265"
+        fill="none"
+        stroke="#242438"
+        stroke-width="7"
+        stroke-linecap="round"/>
+
+  <circle cx="380" cy="268" r="9" fill="#ff83c7"/>
+
+  <!-- 👕 Body -->
+  <path d="
+    M173 372
+    C129 382 110 422 102 485
+    L410 485
+    C402 422 383 382 339 372
+    C312 362 282 351 256 351
+    C230 351 200 362 173 372
+    Z"
+    fill="url(#hoodie)"
+  />
+
+  <!-- Hoodie pink accent -->
+  <path d="
+    M176 382
+    Q256 420 336 382
+    L353 410
+    Q256 455 159 410
+    Z"
+    fill="url(#pink)"
+  />
+
+  <!-- Hoodie strings -->
+  <path d="M230 387 L220 430"
+        stroke="#fff" stroke-width="5" stroke-linecap="round"/>
+  <path d="M282 387 L292 430"
+        stroke="#fff" stroke-width="5" stroke-linecap="round"/>
+
+  <circle cx="219" cy="432" r="7" fill="#ff9bd1"/>
+  <circle cx="293" cy="432" r="7" fill="#ff9bd1"/>
+
+  <!-- ⭐ Star -->
+  <path d="
+    M256 392
+    L263 408
+    L281 410
+    L267 422
+    L271 440
+    L256 431
+    L241 440
+    L245 422
+    L231 410
+    L249 408
+    Z"
+    fill="#ff8fd1"
+  />
+
+  <!-- Little sparkles -->
+  <g fill="#ffffff">
+    <path d="M95 210 l5 12 12 5-12 5-5 12-5-12-12-5 12-5z"/>
+    <path d="M415 300 l4 10 10 4-10 4-4 10-4-10-10-4 10-4z"/>
+    <path d="M115 380 l4 10 10 4-10 4-4 10-4-10-10-4 10-4z"/>
+  </g>
+</svg>
