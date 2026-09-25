@@ -217,7 +217,7 @@ export default function StarfireScene() {
     loader.register((parser) => new VRMLoaderPlugin(parser));
 
     loader.load(
-      "/models/starfire.vrm",
+      "/models/starfire-2.vrm",
 
       (gltf) => {
         const vrm = gltf.userData.vrm as VRM | undefined;
