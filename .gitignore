@@ -36,12 +36,10 @@ temp/
 .vercel/
 
 # -------------------------
-# 🦀 Rust / Tauri
 # -------------------------
 target/
 **/target/
 
-# Tauri generated bundles
 src-tauri/target/
 src-tauri/gen/
 src-tauri/.cargo/
