@@ -36,9 +36,21 @@ async function waitForVite() {
   throw new Error("Vite did not start on port 1420.");
 }
 
+function getElectronArgs() {
+  const args = ["."];
+  const isWayland =
+    process.platform === "linux" && process.env.XDG_SESSION_TYPE === "wayland";
+
+  if (isWayland) {
+    args.unshift("--ozone-platform=x11");
+  }
+
+  return args;
+}
+
 await waitForVite();
 
-const electron = spawn("pnpm", ["exec", "electron", "."], {
+const electron = spawn("pnpm", ["exec", "electron", ...getElectronArgs()], {
   stdio: "inherit",
   env: {
     ...process.env,
@@ -52,6 +64,7 @@ function shutdown() {
 }
 
 process.on("SIGINT", shutdown);
+
 process.on("SIGTERM", shutdown);
 
 electron.on("exit", (code) => {

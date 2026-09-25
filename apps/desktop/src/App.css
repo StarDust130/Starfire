@@ -3,18 +3,77 @@ body,
 #root {
   width: 100%;
   height: 100%;
+
   margin: 0;
   padding: 0;
+
   overflow: hidden;
+
   background: transparent;
 }
 
 body {
   background: transparent;
+
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+* {
+  box-sizing: border-box;
 }
 
 .starfire-root {
+  position: relative;
+
   width: 100%;
   height: 100%;
+
+  overflow: hidden;
+
   background: transparent;
+
+  cursor: grab;
+
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.starfire-root:active {
+  cursor: grabbing;
+}
+
+.starfire-stage {
+  position: absolute;
+
+  inset: 0;
+
+  width: 100%;
+  height: 100%;
+
+  overflow: hidden;
+
+  background: transparent;
+
+  pointer-events: none;
+}
+
+.starfire-canvas {
+  width: 100%;
+  height: 100%;
+
+  background: transparent;
+
+  pointer-events: none;
+}
+
+.starfire-canvas canvas {
+  display: block;
+
+  width: 100%;
+  height: 100%;
+
+  background: transparent;
+
+  pointer-events: none;
 }
