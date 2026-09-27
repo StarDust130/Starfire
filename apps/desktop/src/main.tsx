@@ -9,3 +9,5 @@ if (!root) {
 }
 
 ReactDOM.createRoot(root).render(<App />);
+
+console.log("🌟 Starfire renderer loaded.");
