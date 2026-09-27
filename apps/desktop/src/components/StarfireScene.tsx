@@ -5,6 +5,8 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 type Reaction = "happy" | "curious" | "wave";
 
+type VoiceState = "idle" | "listening" | "thinking" | "speaking";
+
 type ReactionRig = {
   head: THREE.Object3D | null;
 
@@ -20,18 +22,24 @@ type ReactionRig = {
   baseRightLowerArmZ: number;
 };
 
-function getBone(vrm: VRM, name: "head" | "rightUpperArm" | "rightLowerArm") {
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function smoothStep(value: number): number {
+  const t = clamp(value, 0, 1);
+
+  return t * t * (3 - 2 * t);
+}
+
+function getBone(
+  vrm: VRM,
+  name: "head" | "rightUpperArm" | "rightLowerArm",
+): THREE.Object3D | null {
   return vrm.humanoid.getNormalizedBoneNode(name) ?? null;
 }
 
-/**
- * Only removes obvious environment
- * objects. It deliberately does NOT
- * remove normal meshes, because some
- * VRM characters use regular Mesh nodes
- * for parts of the character.
- */
-function removeObviousEnvironment(vrm: VRM) {
+function removeObviousEnvironment(vrm: VRM): void {
   const environmentNames =
     /background|backdrop|stage|studio|environment|billboard|screen|starfield/i;
 
@@ -40,8 +48,6 @@ function removeObviousEnvironment(vrm: VRM) {
 
     if (environmentNames.test(name)) {
       object.visible = false;
-
-      console.log("🫥 Hidden environment:", object.name || "(unnamed)");
     }
 
     if (object instanceof THREE.Sprite) {
@@ -61,7 +67,6 @@ function applyIdlePose(vrm: VRM): ReactionRig {
 
   const leftLowerArm = vrm.humanoid.getNormalizedBoneNode("leftLowerArm");
 
-  // Relax both arms.
   if (leftUpperArm) {
     leftUpperArm.rotation.z = THREE.MathUtils.degToRad(68);
   }
@@ -86,23 +91,26 @@ function applyIdlePose(vrm: VRM): ReactionRig {
     head,
     rightUpperArm,
     rightLowerArm,
-
     baseHeadX: head?.rotation.x ?? 0,
-
     baseHeadY: head?.rotation.y ?? 0,
-
     baseHeadZ: head?.rotation.z ?? 0,
-
     baseRightUpperArmZ: rightUpperArm?.rotation.z ?? 0,
-
     baseRightLowerArmZ: rightLowerArm?.rotation.z ?? 0,
   };
 }
 
-function smoothStep(value: number) {
-  const t = Math.max(0, Math.min(1, value));
+function setExpression(vrm: VRM, name: string, weight: number): void {
+  const manager = vrm.expressionManager;
 
-  return t * t * (3 - 2 * t);
+  if (!manager) {
+    return;
+  }
+
+  if (manager.getExpression(name) === null) {
+    return;
+  }
+
+  manager.setValue(name, clamp(weight, 0, 1));
 }
 
 export default function StarfireScene() {
@@ -115,30 +123,19 @@ export default function StarfireScene() {
       return;
     }
 
-    // ─────────────────────────────
-    // Scene
-    // ─────────────────────────────
+    let disposed = false;
 
     const scene = new THREE.Scene();
 
-    // ─────────────────────────────
-    // Camera
-    // ─────────────────────────────
+    const width = Math.max(container.clientWidth, 1);
 
-    const camera = new THREE.PerspectiveCamera(
-      24,
-      container.clientWidth / container.clientHeight,
-      0.1,
-      20,
-    );
+    const height = Math.max(container.clientHeight, 1);
+
+    const camera = new THREE.PerspectiveCamera(24, width / height, 0.1, 20);
 
     camera.position.set(0, 0.95, 4.5);
 
     camera.lookAt(0, 0.95, 0);
-
-    // ─────────────────────────────
-    // Renderer
-    // ─────────────────────────────
 
     const renderer = new THREE.WebGLRenderer({
       antialias: true,
@@ -148,7 +145,7 @@ export default function StarfireScene() {
 
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
-    renderer.setSize(container.clientWidth, container.clientHeight, false);
+    renderer.setSize(width, height, false);
 
     renderer.setClearColor(0x000000, 0);
 
@@ -159,10 +156,6 @@ export default function StarfireScene() {
     renderer.toneMappingExposure = 1.05;
 
     container.appendChild(renderer.domElement);
-
-    // ─────────────────────────────
-    // Lighting
-    // ─────────────────────────────
 
     const hemisphere = new THREE.HemisphereLight(0xffffff, 0x392d4e, 1.9);
 
@@ -186,19 +179,11 @@ export default function StarfireScene() {
 
     scene.add(rim);
 
-    // ─────────────────────────────
-    // Look target
-    // ─────────────────────────────
-
     const lookTarget = new THREE.Object3D();
 
     lookTarget.position.set(0, 1.25, 4);
 
     scene.add(lookTarget);
-
-    // ─────────────────────────────
-    // Runtime state
-    // ─────────────────────────────
 
     let currentVrm: VRM | null = null;
 
@@ -207,25 +192,50 @@ export default function StarfireScene() {
     let reaction: Reaction | null = null;
 
     let reactionStarted = 0;
-
     let reactionDuration = 1;
 
     let nextReaction = 6 + Math.random() * 7;
+
+    let voiceState: VoiceState = "idle";
+
+    let voiceLevel = 0;
+
+    let mouthExpression: string | null = null;
+
+    const onVoiceState = (event: Event) => {
+      const customEvent = event as CustomEvent<VoiceState>;
+
+      voiceState = customEvent.detail;
+    };
+
+    const onVoiceLevel = (event: Event) => {
+      const customEvent = event as CustomEvent<number>;
+
+      voiceLevel = clamp(customEvent.detail, 0, 1);
+    };
+
+    window.addEventListener("starfire:voice-state", onVoiceState);
+
+    window.addEventListener("starfire:voice-level", onVoiceLevel);
 
     const loader = new GLTFLoader();
 
     loader.register((parser) => new VRMLoaderPlugin(parser));
 
-    loader.load(
-      "/models/starfire-2.vrm",
+    const loadModel = async (): Promise<void> => {
+      try {
+        console.log("🌟 Loading Starfire VRM...");
 
-      (gltf) => {
+        const gltf = await loader.loadAsync("/models/starfire-2.vrm");
+
+        if (disposed) {
+          return;
+        }
+
         const vrm = gltf.userData.vrm as VRM | undefined;
 
         if (!vrm) {
-          console.error("❌ No VRM found.");
-
-          return;
+          throw new Error("The file loaded but contains no VRM.");
         }
 
         VRMUtils.rotateVRM0(vrm);
@@ -240,22 +250,14 @@ export default function StarfireScene() {
           object.frustumCulled = false;
         });
 
-        // Add model FIRST.
-        scene.add(vrm.scene);
-
-        // Remove only obvious
-        // environment content.
         removeObviousEnvironment(vrm);
 
-        // ─────────────────────────
-        // Normalize model size
-        // ─────────────────────────
+        scene.add(vrm.scene);
 
         const bounds = new THREE.Box3().setFromObject(vrm.scene);
 
         const size = bounds.getSize(new THREE.Vector3());
 
-        // Small desktop companion.
         const targetHeight = 1.35;
 
         const scale = targetHeight / Math.max(size.y, 0.001);
@@ -272,35 +274,37 @@ export default function StarfireScene() {
 
         vrm.scene.position.z = 0;
 
-        // Relaxed pose.
         reactionRig = applyIdlePose(vrm);
 
         if (vrm.lookAt) {
           vrm.lookAt.target = lookTarget;
         }
 
+        if (vrm.expressionManager) {
+          const candidates = ["aa", "oh", "ou"];
+
+          mouthExpression =
+            candidates.find(
+              (name) => vrm.expressionManager?.getExpression(name) !== null,
+            ) ?? null;
+        }
+
         currentVrm = vrm;
 
         console.log("🌟 Starfire VRM loaded.");
-      },
 
-      undefined,
-
-      (error) => {
+        console.log("🌸 Mouth expression:", mouthExpression ?? "none");
+      } catch (error) {
         console.error("❌ VRM load failed:", error);
-      },
-    );
+      }
+    };
 
-    // ─────────────────────────────
-    // Animation
-    // ─────────────────────────────
+    void loadModel();
 
     const clock = new THREE.Clock();
 
     let elapsed = 0;
-
     let lookTime = 0;
-
     let blinkStart = -1;
 
     let nextBlink = 2.5 + Math.random() * 3;
@@ -311,7 +315,7 @@ export default function StarfireScene() {
       rotationZ: number;
     } | null = null;
 
-    const startReaction = () => {
+    const startReaction = (): void => {
       const options: Reaction[] = ["happy", "curious", "wave"];
 
       reaction = options[Math.floor(Math.random() * options.length)];
@@ -319,28 +323,18 @@ export default function StarfireScene() {
       reactionStarted = elapsed;
 
       reactionDuration = reaction === "wave" ? 1.7 : 1.15;
-
-      console.log(`✨ Reaction: ${reaction}`);
     };
 
-    // ─────────────────────────────
-    // Resize
-    // ─────────────────────────────
+    const resize = (): void => {
+      const nextWidth = Math.max(container.clientWidth, 1);
 
-    const resize = () => {
-      const width = container.clientWidth;
+      const nextHeight = Math.max(container.clientHeight, 1);
 
-      const height = container.clientHeight;
-
-      if (width <= 0 || height <= 0) {
-        return;
-      }
-
-      camera.aspect = width / height;
+      camera.aspect = nextWidth / nextHeight;
 
       camera.updateProjectionMatrix();
 
-      renderer.setSize(width, height, false);
+      renderer.setSize(nextWidth, nextHeight, false);
     };
 
     const observer = new ResizeObserver(resize);
@@ -351,7 +345,11 @@ export default function StarfireScene() {
 
     let frame = 0;
 
-    const animate = () => {
+    const animate = (): void => {
+      if (disposed) {
+        return;
+      }
+
       frame = requestAnimationFrame(animate);
 
       const delta = Math.min(clock.getDelta(), 0.05);
@@ -362,7 +360,6 @@ export default function StarfireScene() {
       if (currentVrm && reactionRig) {
         const model = currentVrm.scene;
 
-        // Save original transform.
         if (baseTransform === null) {
           baseTransform = {
             y: model.position.y,
@@ -371,102 +368,102 @@ export default function StarfireScene() {
           };
         }
 
-        // Tiny idle breathing.
         model.position.y = baseTransform.y + Math.sin(elapsed * 1.35) * 0.008;
-
-        model.rotation.z =
-          baseTransform.rotationZ + Math.sin(elapsed * 0.65) * 0.006;
 
         model.rotation.y =
           baseTransform.rotationY + Math.sin(elapsed * 0.45) * 0.014;
 
-        // Natural eye/head movement.
+        let headX = reactionRig.baseHeadX;
+
+        let headY = reactionRig.baseHeadY;
+
+        let headZ = reactionRig.baseHeadZ;
+
+        let armZ = reactionRig.baseRightUpperArmZ;
+
+        let lowerArmZ = reactionRig.baseRightLowerArmZ;
+
         lookTarget.position.x = Math.sin(lookTime * 0.42) * 0.28;
 
         lookTarget.position.y = 1.24 + Math.sin(lookTime * 0.3) * 0.05;
 
-        // Random reaction.
-        if (reaction === null && elapsed >= nextReaction) {
+        if (
+          reaction === null &&
+          voiceState === "idle" &&
+          elapsed >= nextReaction
+        ) {
           startReaction();
         }
 
         if (reaction !== null) {
-          const progress = Math.max(
+          const progress = clamp(
+            (elapsed - reactionStarted) / reactionDuration,
             0,
-            Math.min(1, (elapsed - reactionStarted) / reactionDuration),
+            1,
           );
 
           const eased = smoothStep(progress);
 
           const wave = Math.sin(progress * Math.PI);
 
-          // 💗 Happy
           if (reaction === "happy") {
-            if (reactionRig.head) {
-              reactionRig.head.rotation.z =
-                reactionRig.baseHeadZ + wave * THREE.MathUtils.degToRad(9);
+            headZ += wave * THREE.MathUtils.degToRad(9);
 
-              reactionRig.head.rotation.x =
-                reactionRig.baseHeadX - wave * THREE.MathUtils.degToRad(4);
-            }
+            headX -= wave * THREE.MathUtils.degToRad(4);
 
             model.position.y = baseTransform.y + wave * 0.03;
           }
 
-          // 👀 Curious
           if (reaction === "curious") {
-            if (reactionRig.head) {
-              reactionRig.head.rotation.z =
-                reactionRig.baseHeadZ + wave * THREE.MathUtils.degToRad(12);
+            headZ += wave * THREE.MathUtils.degToRad(12);
 
-              reactionRig.head.rotation.y =
-                reactionRig.baseHeadY + wave * THREE.MathUtils.degToRad(7);
-            }
+            headY += wave * THREE.MathUtils.degToRad(7);
           }
 
-          // 👋 Wave
           if (reaction === "wave") {
-            if (reactionRig.rightUpperArm) {
-              reactionRig.rightUpperArm.rotation.z =
-                reactionRig.baseRightUpperArmZ -
-                eased * THREE.MathUtils.degToRad(42);
-            }
+            armZ -= eased * THREE.MathUtils.degToRad(42);
 
-            if (reactionRig.rightLowerArm) {
-              reactionRig.rightLowerArm.rotation.z =
-                reactionRig.baseRightLowerArmZ +
-                Math.sin(progress * Math.PI * 6) *
-                  wave *
-                  THREE.MathUtils.degToRad(18);
-            }
+            lowerArmZ +=
+              Math.sin(progress * Math.PI * 6) *
+              wave *
+              THREE.MathUtils.degToRad(18);
           }
 
           if (progress >= 1) {
             reaction = null;
 
             nextReaction = elapsed + 6 + Math.random() * 8;
-
-            if (reactionRig.head) {
-              reactionRig.head.rotation.x = reactionRig.baseHeadX;
-
-              reactionRig.head.rotation.y = reactionRig.baseHeadY;
-
-              reactionRig.head.rotation.z = reactionRig.baseHeadZ;
-            }
-
-            if (reactionRig.rightUpperArm) {
-              reactionRig.rightUpperArm.rotation.z =
-                reactionRig.baseRightUpperArmZ;
-            }
-
-            if (reactionRig.rightLowerArm) {
-              reactionRig.rightLowerArm.rotation.z =
-                reactionRig.baseRightLowerArmZ;
-            }
           }
         }
 
-        // 😉 Random blink.
+        if (voiceState === "listening") {
+          headZ += THREE.MathUtils.degToRad(4);
+        }
+
+        if (voiceState === "thinking") {
+          headZ -= THREE.MathUtils.degToRad(3);
+        }
+
+        if (voiceState === "speaking") {
+          headZ += Math.sin(elapsed * 7) * 0.012;
+        }
+
+        if (reactionRig.head) {
+          reactionRig.head.rotation.x = headX;
+
+          reactionRig.head.rotation.y = headY;
+
+          reactionRig.head.rotation.z = headZ;
+        }
+
+        if (reactionRig.rightUpperArm) {
+          reactionRig.rightUpperArm.rotation.z = armZ;
+        }
+
+        if (reactionRig.rightLowerArm) {
+          reactionRig.rightLowerArm.rotation.z = lowerArmZ;
+        }
+
         if (blinkStart < 0 && elapsed >= nextBlink) {
           blinkStart = elapsed;
         }
@@ -480,19 +477,35 @@ export default function StarfireScene() {
 
           const value = progress < 0.5 ? progress * 2 : (1 - progress) * 2;
 
-          currentVrm.expressionManager?.setValue("blinkLeft", value);
+          setExpression(currentVrm, "blinkLeft", value);
 
-          currentVrm.expressionManager?.setValue("blinkRight", value);
+          setExpression(currentVrm, "blinkRight", value);
 
           if (blinkTime >= blinkDuration) {
-            currentVrm.expressionManager?.setValue("blinkLeft", 0);
+            setExpression(currentVrm, "blinkLeft", 0);
 
-            currentVrm.expressionManager?.setValue("blinkRight", 0);
+            setExpression(currentVrm, "blinkRight", 0);
 
             blinkStart = -1;
 
             nextBlink = elapsed + 2.5 + Math.random() * 4;
           }
+        }
+
+        if (mouthExpression && currentVrm.expressionManager) {
+          const manager = currentVrm.expressionManager;
+
+          const current = manager.getValue(mouthExpression) ?? 0;
+
+          const target =
+            voiceState === "speaking"
+              ? clamp(0.12 + voiceLevel * 0.88, 0, 1)
+              : 0;
+
+          manager.setValue(
+            mouthExpression,
+            THREE.MathUtils.lerp(current, target, Math.min(1, delta * 18)),
+          );
         }
 
         currentVrm.update(delta);
@@ -504,9 +517,15 @@ export default function StarfireScene() {
     animate();
 
     return () => {
+      disposed = true;
+
       cancelAnimationFrame(frame);
 
       observer.disconnect();
+
+      window.removeEventListener("starfire:voice-state", onVoiceState);
+
+      window.removeEventListener("starfire:voice-level", onVoiceLevel);
 
       if (currentVrm) {
         VRMUtils.deepDispose(currentVrm.scene);
