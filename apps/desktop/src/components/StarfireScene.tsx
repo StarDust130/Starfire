@@ -944,7 +944,7 @@ export default function StarfireScene({
         if (voiceActive) {
           if (vs === "assistant-speaking") {
             const level = mouthSmoother.update(
-              clamp(voiceMouthRef.current.raw, 0, 1),
+              clamp(voiceMouthRef.current.raw * 1.6, 0, 1),
               dt,
             );
 
