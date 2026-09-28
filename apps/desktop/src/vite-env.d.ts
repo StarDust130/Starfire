@@ -25,6 +25,8 @@ type StarfireVoiceRendererEvent = {
   | { kind: "input-transcript"; text: string }
   | { kind: "response-done"; usage: Record<string, number> | null }
   | { kind: "response-cancelled" }
+  | { kind: "tool-call"; name: string }
+  | { kind: "tool-result"; ok: boolean; summary: string }
   | { kind: "error"; message: string; fatal: boolean }
   | { kind: "closed" }
 );
