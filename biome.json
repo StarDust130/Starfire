@@ -8,6 +8,10 @@
     "defaultBranch": "main"
   },
 
+  "files": {
+    "includes": ["**", "!**/dist", "!**/electron-dist"]
+  },
+
   "formatter": {
     "enabled": true,
     "indentStyle": "space",
