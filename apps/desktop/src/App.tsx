@@ -1,273 +1,454 @@
 import {
-  type PointerEvent,
-  useCallback,
   useEffect,
   useRef,
   useState,
 } from "react";
-import StarfireScene from "./components/StarfireScene";
-import { HandsFreeListener } from "./voice/handsFree";
-import { speakWithLfm } from "./voice/lfmAudio";
 
-type StarfireDesktop = {
-  startDrag(screenX: number, screenY: number): void;
+import {
+  chooseMicrophone,
+  getMicrophones,
+  type MicrophoneDevice,
+} from "./voice/microphone";
 
-  moveDrag(screenX: number, screenY: number): void;
+import {
+  createOnnxWakeWord,
+  type WakeEngine,
+} from "./voice/onnxWakeWord";
 
-  endDrag(): void;
-};
-
-type VoiceState = "idle" | "listening" | "thinking" | "speaking";
-
-declare global {
-  interface Window {
-    starfireDesktop?: StarfireDesktop;
-  }
-}
-
-let queuedVoiceLevel = 0;
-let voiceLevelFrame = 0;
-
-function dispatchVoiceState(state: VoiceState): void {
-  window.dispatchEvent(
-    new CustomEvent("starfire:voice-state", {
-      detail: state,
-    }),
-  );
-}
-
-function dispatchVoiceLevel(level: number): void {
-  queuedVoiceLevel = Math.min(1, Math.max(0, level));
-
-  if (voiceLevelFrame !== 0) {
-    return;
-  }
-
-  voiceLevelFrame = window.requestAnimationFrame(() => {
-    voiceLevelFrame = 0;
-
-    window.dispatchEvent(
-      new CustomEvent("starfire:voice-level", {
-        detail: queuedVoiceLevel,
-      }),
-    );
-  });
-}
+type Status =
+  | "idle"
+  | "loading"
+  | "listening"
+  | "detected"
+  | "error";
 
 export default function App() {
-  const dragging = useRef(false);
+  const engineRef =
+    useRef<WakeEngine | null>(
+      null,
+    );
 
-  const [voiceState, setVoiceState] = useState<VoiceState>("idle");
+  const [status, setStatus] =
+    useState<Status>("idle");
 
-  const [micReady, setMicReady] = useState(false);
+  const [mic, setMic] =
+    useState<MicrophoneDevice | null>(
+      null,
+    );
 
-  const [micError, setMicError] = useState(false);
+  const [score, setScore] =
+    useState(0);
 
-  const updateVoiceState = useCallback((state: VoiceState) => {
-    console.log(`[Starfire] STATE -> ${state.toUpperCase()}`);
+  const [hits, setHits] =
+    useState(0);
 
-    setVoiceState(state);
-    dispatchVoiceState(state);
-  }, []);
-
-  const handlePointerDown = useCallback((event: PointerEvent) => {
-    if (event.button !== 0) {
-      return;
-    }
-
-    dragging.current = true;
-
-    event.currentTarget.setPointerCapture(event.pointerId);
-
-    window.starfireDesktop?.startDrag(event.screenX, event.screenY);
-  }, []);
-
-  const handlePointerMove = useCallback((event: PointerEvent) => {
-    if (!dragging.current) {
-      return;
-    }
-
-    window.starfireDesktop?.moveDrag(event.screenX, event.screenY);
-  }, []);
-
-  const stopDragging = useCallback(() => {
-    if (!dragging.current) {
-      return;
-    }
-
-    dragging.current = false;
-
-    window.starfireDesktop?.endDrag();
-  }, []);
+  const [error, setError] =
+    useState<string | null>(
+      null,
+    );
 
   useEffect(() => {
-    window.addEventListener("pointerup", stopDragging);
-
-    window.addEventListener("pointercancel", stopDragging);
-
     return () => {
-      window.removeEventListener("pointerup", stopDragging);
+      void engineRef.current?.stop();
+    };
+  }, []);
 
-      window.removeEventListener("pointercancel", stopDragging);
+  const start =
+    async (): Promise<void> => {
+      try {
+        setError(null);
+        setStatus("loading");
 
-      if (voiceLevelFrame !== 0) {
-        window.cancelAnimationFrame(voiceLevelFrame);
+        const devices =
+          await getMicrophones();
 
-        voiceLevelFrame = 0;
+        const selected =
+          chooseMicrophone(
+            devices,
+          );
+
+        if (!selected) {
+          throw new Error(
+            "No microphone found.",
+          );
+        }
+
+        setMic(selected);
+
+        const engine =
+          await createOnnxWakeWord();
+
+        engineRef.current =
+          engine;
+
+        await engine.load();
+
+        await engine.start(
+          selected.id,
+          (
+            word,
+            probability,
+          ) => {
+            if (
+              word !==
+              "starfire"
+            ) {
+              return;
+            }
+
+            setScore(
+              Math.round(
+                probability * 100,
+              ),
+            );
+
+            setHits(
+              (value) =>
+                value + 1,
+            );
+
+            setStatus(
+              "detected",
+            );
+
+            window.setTimeout(
+              () => {
+                setStatus(
+                  "listening",
+                );
+              },
+              700,
+            );
+
+            window.dispatchEvent(
+              new CustomEvent(
+                "starfire:wake",
+                {
+                  detail: {
+                    word,
+                    probability,
+                  },
+                },
+              ),
+            );
+          },
+        );
+
+        setStatus(
+          "listening",
+        );
+      } catch (cause) {
+        console.error(
+          cause,
+        );
+
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : String(cause),
+        );
+
+        setStatus("error");
       }
     };
-  }, [stopDragging]);
 
-  useEffect(() => {
-    let disposed = false;
+  const stop =
+    async (): Promise<void> => {
+      await engineRef.current?.stop();
 
-    const handsFree = new HandsFreeListener({
-      onReady(microphoneLabel) {
-        if (disposed) {
-          return;
-        }
+      engineRef.current =
+        null;
 
-        console.log("[Starfire] 🎤 microphone ready:", microphoneLabel);
-
-        setMicReady(true);
-        setMicError(false);
-
-        updateVoiceState("idle");
-      },
-
-      onSpeechStart() {
-        if (disposed) {
-          return;
-        }
-
-        console.log("[Starfire] 🎤 HEARD YOU");
-
-        updateVoiceState("listening");
-      },
-
-      onLevel(level) {
-        if (!disposed) {
-          dispatchVoiceLevel(level);
-        }
-      },
-
-      async onSpeech(wav) {
-        if (disposed) {
-          return;
-        }
-
-        console.log("[Starfire] 🧠 THINKING");
-
-        updateVoiceState("thinking");
-
-        let receivedAudio = false;
-
-        try {
-          const text = await speakWithLfm(wav, {
-            onText(delta) {
-              console.log("[Starfire] 🤖", delta);
-            },
-
-            onAudioStart() {
-              receivedAudio = true;
-
-              console.log("[Starfire] 🔊 SPEAKING");
-
-              updateVoiceState("speaking");
-            },
-
-            onAudioLevel(level) {
-              if (!disposed) {
-                dispatchVoiceLevel(level);
-              }
-            },
-          });
-
-          console.log("[Starfire] ✅ RESPONSE:", text);
-
-          if (!receivedAudio) {
-            console.warn("[Starfire] ⚠️ No audio was returned by LFM.");
-          }
-        } catch (error) {
-          console.error("[Starfire] ❌ Voice error:", error);
-
-          setMicError(true);
-        } finally {
-          if (!disposed) {
-            dispatchVoiceLevel(0);
-            updateVoiceState("idle");
-          }
-        }
-      },
-
-      onError(error) {
-        if (disposed) {
-          return;
-        }
-
-        console.error("[Starfire] ❌ Microphone error:", error);
-
-        setMicReady(false);
-        setMicError(true);
-
-        dispatchVoiceLevel(0);
-        updateVoiceState("idle");
-      },
-    });
-
-    console.log("[Starfire] 🎧 Starting hands-free mode");
-
-    void handsFree.start().catch((error: unknown) => {
-      if (disposed) {
-        return;
-      }
-
-      console.error("[Starfire] ❌ Hands-free startup failed:", error);
-
-      setMicReady(false);
-      setMicError(true);
-    });
-
-    return () => {
-      disposed = true;
-
-      console.log("[Starfire] 🎧 Stopping hands-free mode");
-
-      dispatchVoiceLevel(0);
-
-      void handsFree.stop();
+      setStatus("idle");
     };
-  }, [updateVoiceState]);
 
-  const statusText = micError
-    ? "Microphone error"
-    : voiceState === "listening"
-      ? "Listening…"
-      : voiceState === "thinking"
-        ? "Thinking…"
-        : voiceState === "speaking"
-          ? "Speaking…"
-          : micReady
-            ? "Listening for you"
-            : "Starting microphone…";
+  const listening =
+    status === "listening";
 
   return (
-    <main
-      className="starfire-root"
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={stopDragging}
-      onPointerCancel={stopDragging}
+    <div
+      style={{
+        width: "100vw",
+        height: "100vh",
+        display: "grid",
+        placeItems: "center",
+        background: "transparent",
+        color: "white",
+        fontFamily:
+          "Inter, system-ui, sans-serif",
+      }}
     >
-      <StarfireScene />
-
       <div
-        className={`starfire-voice-status state-${voiceState}`}
-        aria-live="polite"
+        style={{
+          width: 280,
+          padding: 14,
+          boxSizing: "border-box",
+          borderRadius: 22,
+          background:
+            "rgba(24,20,31,.97)",
+          border:
+            "1px solid rgba(255,255,255,.1)",
+        }}
       >
-        <span className="starfire-voice-dot" />
-        <span>{statusText}</span>
+        <div
+          style={{
+            display: "flex",
+            gap: 10,
+            alignItems: "center",
+          }}
+        >
+          <div
+            style={{
+              width: 38,
+              height: 38,
+              borderRadius: 12,
+              display: "grid",
+              placeItems: "center",
+              background:
+                "linear-gradient(135deg,#f04db9,#9e5cff)",
+            }}
+          >
+            🎀
+          </div>
+
+          <div>
+            <div
+              style={{
+                fontWeight: 700,
+                fontSize: 15,
+              }}
+            >
+              Starfire
+            </div>
+
+            <div
+              style={{
+                fontSize: 9,
+                color:
+                  "rgba(255,255,255,.45)",
+              }}
+            >
+              Wake-word test
+            </div>
+          </div>
+        </div>
+
+        <div
+          style={{
+            height: 120,
+            display: "grid",
+            placeItems: "center",
+            textAlign: "center",
+          }}
+        >
+          <div>
+            <div
+              style={{
+                fontSize: 30,
+              }}
+            >
+              {status ===
+              "detected"
+                ? "✨"
+                : status ===
+                    "error"
+                  ? "⚠️"
+                  : status ===
+                      "loading"
+                    ? "⏳"
+                    : listening
+                      ? "🎧"
+                      : "💤"}
+            </div>
+
+            <div
+              style={{
+                marginTop: 8,
+                fontWeight: 700,
+              }}
+            >
+              {status ===
+              "detected"
+                ? "Wake detected!"
+                : status ===
+                    "error"
+                  ? "Error"
+                  : status ===
+                      "loading"
+                    ? "Loading..."
+                    : listening
+                      ? "Listening"
+                      : "Wake-word test"}
+            </div>
+
+            <div
+              style={{
+                marginTop: 4,
+                fontSize: 9,
+                color:
+                  "rgba(255,255,255,.4)",
+              }}
+            >
+              {status ===
+              "listening"
+                ? "Say Starfire"
+                : status ===
+                    "detected"
+                  ? "Starfire heard you"
+                  : "Local wake-word detection"}
+            </div>
+          </div>
+        </div>
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns:
+              "1fr 1fr 1fr",
+            gap: 5,
+            marginBottom: 8,
+          }}
+        >
+          <div
+            style={{
+              padding: 8,
+              borderRadius: 9,
+              textAlign: "center",
+              background:
+                "rgba(255,255,255,.04)",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 7,
+                color:
+                  "rgba(255,255,255,.3)",
+              }}
+            >
+              SCORE
+            </div>
+
+            <div
+              style={{
+                marginTop: 3,
+                fontSize: 11,
+                fontWeight: 700,
+              }}
+            >
+              {score}%
+            </div>
+          </div>
+
+          <div
+            style={{
+              padding: 8,
+              borderRadius: 9,
+              textAlign: "center",
+              background:
+                "rgba(255,255,255,.04)",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 7,
+                color:
+                  "rgba(255,255,255,.3)",
+              }}
+            >
+              HITS
+            </div>
+
+            <div
+              style={{
+                marginTop: 3,
+                fontSize: 11,
+                fontWeight: 700,
+              }}
+            >
+              {hits}
+            </div>
+          </div>
+
+          <div
+            style={{
+              padding: 8,
+              borderRadius: 9,
+              textAlign: "center",
+              background:
+                "rgba(255,255,255,.04)",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 7,
+                color:
+                  "rgba(255,255,255,.3)",
+              }}
+            >
+              MIC
+            </div>
+
+            <div
+              style={{
+                marginTop: 3,
+                fontSize: 8,
+                fontWeight: 700,
+                overflow: "hidden",
+                whiteSpace:
+                  "nowrap",
+                textOverflow:
+                  "ellipsis",
+              }}
+            >
+              {mic?.label ??
+                "None"}
+            </div>
+          </div>
+        </div>
+
+        {error && (
+          <div
+            style={{
+              marginBottom: 8,
+              padding: 8,
+              borderRadius: 8,
+              background:
+                "rgba(255,50,80,.12)",
+              color: "#ff9bb7",
+              fontSize: 8,
+              wordBreak:
+                "break-word",
+            }}
+          >
+            {error}
+          </div>
+        )}
+
+        <button
+          onClick={() => {
+            if (listening) {
+              void stop();
+            } else {
+              void start();
+            }
+          }}
+          style={{
+            width: "100%",
+            height: 32,
+            border: 0,
+            borderRadius: 11,
+            background:
+              "linear-gradient(90deg,#ef4fba,#a052ff)",
+            color: "white",
+            fontWeight: 700,
+            cursor: "pointer",
+          }}
+        >
+          {listening
+            ? "🛑 Stop"
+            : "🎤 Start"}
+        </button>
       </div>
-    </main>
+    </div>
   );
 }

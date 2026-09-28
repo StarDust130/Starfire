@@ -12,52 +12,217 @@ body,
 body {
   background: transparent;
   user-select: none;
-  -webkit-user-select: none;
 }
 
 * {
   box-sizing: border-box;
 }
 
-.starfire-root {
-  position: relative;
+.wake-root {
   width: 100%;
   height: 100%;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.wake-card {
+  width: 248px;
+  height: 318px;
+
+  padding: 15px;
+
+  border-radius: 20px;
+
+  background: linear-gradient(
+    180deg,
+    rgba(24, 23, 32, 0.98),
+    rgba(10, 10, 15, 0.98)
+  );
+
+  border: 1px solid rgba(255, 255, 255, 0.08);
+
+  color: white;
+
+  display: flex;
+  flex-direction: column;
+
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.35);
+}
+
+.wake-card.state-listening {
+  border-color: rgba(90, 200, 255, 0.35);
+}
+
+.wake-card.state-detected {
+  border-color: rgba(255, 90, 180, 0.75);
+
+  box-shadow: 0 0 28px rgba(255, 90, 180, 0.2);
+}
+
+.wake-header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.wake-avatar {
+  width: 34px;
+  height: 34px;
+
+  display: grid;
+  place-items: center;
+
+  border-radius: 10px;
+
+  background: rgba(255, 100, 180, 0.1);
+}
+
+.wake-title {
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.wake-subtitle {
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.wake-orb {
+  width: 80px;
+  height: 80px;
+
+  margin: 20px auto 12px;
+
+  display: grid;
+  place-items: center;
+
+  border-radius: 50%;
+
+  background: radial-gradient(
+    circle,
+    rgba(255, 100, 190, 0.18),
+    transparent 70%
+  );
+
+  font-size: 25px;
+}
+
+.wake-message {
+  text-align: center;
+
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.wake-target {
+  margin-top: 3px;
+
+  text-align: center;
+
+  font-size: 9px;
+
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.wake-mic {
+  margin-top: 10px;
+
+  max-width: 100%;
+
   overflow: hidden;
-  background: transparent;
-  cursor: grab;
-  user-select: none;
-  -webkit-user-select: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  font-size: 8px;
+
+  color: rgba(255, 255, 255, 0.38);
+
+  text-align: center;
 }
 
-.starfire-root:active {
-  cursor: grabbing;
+.wake-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+
+  gap: 5px;
+
+  margin-top: 12px;
 }
 
-.starfire-stage {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  background: transparent;
-  pointer-events: none;
+.wake-metric {
+  padding: 7px 3px;
+
+  border-radius: 8px;
+
+  background: rgba(255, 255, 255, 0.04);
+
+  text-align: center;
 }
 
-.starfire-canvas {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  background: transparent;
-  pointer-events: none;
-}
-
-.starfire-canvas canvas {
+.wake-metric span {
   display: block;
+
+  font-size: 8px;
+
+  color: rgba(255, 255, 255, 0.35);
+}
+
+.wake-metric strong {
+  display: block;
+
+  margin-top: 2px;
+
+  font-size: 10px;
+}
+
+.wake-footer {
+  margin-top: 8px;
+
+  text-align: center;
+
+  font-size: 8px;
+
+  color: rgba(255, 255, 255, 0.25);
+}
+
+.wake-button {
   width: 100%;
-  height: 100%;
-  background: transparent;
-  pointer-events: none;
+
+  margin-top: auto;
+
+  padding: 8px;
+
+  border: 0;
+  border-radius: 9px;
+
+  background: linear-gradient(135deg, #ff5aaa, #ad69ff);
+
+  color: white;
+
+  font-size: 11px;
+  font-weight: 800;
+
+  cursor: pointer;
+}
+
+.wake-button.stop {
+  background: rgba(220, 55, 70, 0.9);
+}
+
+.wake-error {
+  margin-top: 6px;
+
+  padding: 5px;
+
+  border-radius: 7px;
+
+  background: rgba(255, 60, 60, 0.1);
+
+  color: #ff9b9b;
+
+  font-size: 8px;
+
+  word-break: break-word;
 }
