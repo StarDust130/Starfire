@@ -262,6 +262,12 @@ export class RealtimeVoiceBridge {
 
       this.audioBytes = 0;
 
+      /*
+       * Forwarded so the renderer knows when a fresh response begins
+       * after an interrupt — stale audio is dropped until this point.
+       */
+      this.emit({ kind: "response-created" });
+
       return;
     }
 
