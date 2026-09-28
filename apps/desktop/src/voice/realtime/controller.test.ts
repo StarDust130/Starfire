@@ -238,9 +238,6 @@ describe("VoiceController", () => {
 
     expect(controller.getState().state).toBe("listening");
 
-    /*
-     * The wake engine was NOT restarted — the conversation continued.
-     */
     expect(deps.onStartWakeEngine).not.toHaveBeenCalled();
   });
 
@@ -359,6 +356,48 @@ describe("VoiceController", () => {
     expect(playback.clear).not.toHaveBeenCalled();
   });
 
+  it("sustained loud speech triggers the local fallback interrupt", async () => {
+    const { deps, playback, bridge, emitChunk, onAudioCall } = makeDeps();
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    onAudioCall()(new ArrayBuffer(64));
+
+    expect(controller.getState().state).toBe("assistant-speaking");
+
+    for (let i = 0; i < 20; i += 1) {
+      emitChunk(0.2);
+    }
+
+    expect(playback.clear).toHaveBeenCalled();
+
+    expect(bridge.interrupt).toHaveBeenCalled();
+  });
+
+  it("sustained echo-level audio does NOT trigger the local fallback", async () => {
+    const { deps, playback, bridge, emitChunk, onAudioCall } = makeDeps();
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    onAudioCall()(new ArrayBuffer(64));
+
+    for (let i = 0; i < 40; i += 1) {
+      emitChunk(0.05);
+    }
+
+    expect(playback.clear).not.toHaveBeenCalled();
+
+    expect(bridge.interrupt).not.toHaveBeenCalled();
+  });
+
   it("response-done waits for playback drain before listening", async () => {
     const { deps, emitEvent, onAudioCall, emitDrained } = makeDeps();
 
@@ -398,10 +437,6 @@ describe("VoiceController", () => {
 
     expect(controller.getState().state).toBe("listening");
 
-    /*
-     * Echo-level frames during the cooldown: not uploaded, no state
-     * churn, and the gate must NOT latch onto them.
-     */
     for (let i = 0; i < 20; i += 1) {
       emitChunk(0.01);
     }
@@ -412,18 +447,12 @@ describe("VoiceController", () => {
 
     await vi.advanceTimersByTimeAsync(1600);
 
-    /*
-     * Quiet room after the cooldown: still no turn.
-     */
     emitChunk(0.0005);
 
     expect(bridge.sendAudio).not.toHaveBeenCalled();
 
     expect(controller.getState().state).toBe("listening");
 
-    /*
-     * Real speech starts a turn cleanly (the gate was never latched).
-     */
     emitChunk(0.3);
 
     expect(controller.getState().state).toBe("user-speaking");
@@ -626,7 +655,7 @@ describe("VoiceController", () => {
     expect(dumped).not.toContain("api_key");
   });
 
-  it("server VAD interrupts instantly; stale audio dropped; next response plays", async () => {
+  it("server VAD interrupt: stale audio stays dropped until response.created", async () => {
     const { deps, playback, emitEvent, onAudioCall } = makeDeps();
 
     const controller = new VoiceController(deps);
@@ -648,20 +677,28 @@ describe("VoiceController", () => {
     expect(controller.getState().state).toBe("user-speaking");
 
     /*
-     * Audio from the interrupted response is dropped (still exactly
-     * one push — the pre-interrupt one).
+     * In-flight audio of the interrupted response: dropped.
      */
     onAudioCall()(new ArrayBuffer(64));
 
     expect(playback.push).toHaveBeenCalledTimes(1);
 
+    /*
+     * The cancel does NOT re-accept the dead response's audio.
+     */
     emitEvent({ conn: 1, kind: "response-cancelled" });
 
     expect(controller.getState().state).toBe("user-speaking");
 
+    onAudioCall()(new ArrayBuffer(64));
+
+    expect(playback.push).toHaveBeenCalledTimes(1);
+
     /*
-     * The next response plays normally.
+     * Only a NEW response.created re-opens the audio path.
      */
+    emitEvent({ conn: 1, kind: "response-created" });
+
     onAudioCall()(new ArrayBuffer(64));
 
     expect(playback.push).toHaveBeenCalledTimes(2);
