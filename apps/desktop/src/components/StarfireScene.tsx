@@ -8,6 +8,10 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 import type { InteractionSource } from "../App";
 
+import { MouthSmoother } from "../voice/realtime/audio";
+
+import type { VoiceStateName } from "../voice/realtime/state";
+
 import {
   type Activity,
   type ActivityKind,
@@ -19,22 +23,28 @@ import {
   chooseActivity,
   startActivity,
 } from "../three/activities";
+
+import {
+  EASTER_EGG_STREAK,
+  EASTER_EGG_WINDOW_S,
+  type EasterEgg,
+  type EasterEggKind,
+  applyEasterEgg,
+  chooseEasterEgg,
+  startEasterEgg,
+} from "../three/easterEgg";
+
 import {
   carryWalk,
   createDragFeelState,
   updateDragFeel,
 } from "../three/dragFeel";
-import {
-  applyEasterEgg,
-  chooseEasterEgg,
-  EASTER_EGG_STREAK,
-  EASTER_EGG_WINDOW_S,
-  type EasterEgg,
-  type EasterEggKind,
-  startEasterEgg,
-} from "../three/easterEgg";
 
 import {
+  STARFIRE_BONES,
+  type HeadAnchor,
+  type Rig,
+  type StarfireBoneName,
   addBone,
   clamp,
   createPoseTarget,
@@ -42,28 +52,26 @@ import {
   dampPoseTarget,
   deg,
   findExpression,
-  type HeadAnchor,
-  type Rig,
   removeObviousEnvironment,
   resetPoseTarget,
-  STARFIRE_BONES,
-  type StarfireBoneName,
   setExpression,
 } from "../three/pose";
 
+import { applyVoiceAnimation } from "../three/voiceAnim";
+
 import {
+  LISTENING_ACTION_S,
+  MICRO_MAX_DELAY,
+  MICRO_MIN_DELAY,
+  type ListeningAction,
+  type ListeningVariant,
+  type MicroKind,
+  type MicroReaction,
   applyListeningAction,
   applyMicroReaction,
   chooseListeningVariant,
   chooseMicro,
-  LISTENING_ACTION_S,
-  type ListeningAction,
-  type ListeningVariant,
   listeningExpression,
-  MICRO_MAX_DELAY,
-  MICRO_MIN_DELAY,
-  type MicroKind,
-  type MicroReaction,
   microDuration,
   microExpression,
 } from "../three/reactions";
@@ -72,6 +80,12 @@ import StarfireZzz from "./StarfireZzz";
 
 type StarfireSceneProps = {
   error: string | null;
+
+  voiceState: VoiceStateName;
+
+  voiceError: string | null;
+
+  voiceMouth: { raw: number };
 
   onActivate: (source: InteractionSource) => void;
 
@@ -103,8 +117,23 @@ const BLINK_DURATION = 0.16;
 
 const POSE_DAMP_RATE = 4.4;
 
+const BUBBLE_TEXT: Partial<Record<VoiceStateName, string>> = {
+  starting: "Connecting…",
+  connecting: "Connecting…",
+  listening: "Listening…",
+  "user-speaking": "Listening…",
+  thinking: "Thinking…",
+};
+
+function isVoiceActive(state: VoiceStateName): boolean {
+  return state !== "idle" && state !== "error" && state !== "closing";
+}
+
 export default function StarfireScene({
   error,
+  voiceState,
+  voiceError,
+  voiceMouth,
   onActivate,
   onDragStart,
   onDragEnd,
@@ -123,13 +152,27 @@ export default function StarfireScene({
 
   const headAnchorRef = useRef<HeadAnchor>({ x: 180, y: 90, r: 30 });
 
+  const voiceStateRef = useRef<VoiceStateName>(voiceState);
+
+  const voiceMouthRef = useRef<{ raw: number }>(voiceMouth);
+
+  voiceStateRef.current = voiceState;
+
+  voiceMouthRef.current = voiceMouth;
+
+  const voiceActive = isVoiceActive(voiceState);
+
   const [showListening, setShowListening] = useState(false);
 
   const [activityKind, setActivityKind] = useState<ActivityKind | null>(null);
 
   /*
-   * Show the bubble and restart the hide timer on every trigger.
+   * The bubble is for listening/thinking/connecting only — while she
+   * is actually talking, her animation says it; no text bubble.
    */
+  const bubbleShown =
+    (voiceActive && voiceState !== "assistant-speaking") || showListening;
+
   useEffect(() => {
     let timer: number | undefined;
 
@@ -153,47 +196,51 @@ export default function StarfireScene({
   }, []);
 
   /*
-   * Place the bubble right beside her actual head bone.
+   * Keep the bubble glued beside her actual head for as long as it
+   * is visible. A continuous rAF loop (cheap: one transform write
+   * per frame) also tracks her breathing/idle motion, and always
+   * positions the bubble no matter whether it appeared via voice
+   * state or the click/listen event.
    */
   useEffect(() => {
-    if (!showListening) {
+    if (!bubbleShown) {
       return;
     }
 
-    const element = bubbleRef.current;
+    let raf = 0;
 
-    if (!element) {
-      return;
-    }
+    const position = (): void => {
+      const element = bubbleRef.current;
 
-    const frame = window.requestAnimationFrame(() => {
+      if (!element) {
+        return;
+      }
+
       const anchor = headAnchorRef.current;
-
-      const bubbleWidth = element.offsetWidth;
-      const bubbleHeight = element.offsetHeight;
-
-      const windowWidth = window.innerWidth;
-      const windowHeight = window.innerHeight;
 
       const x = clamp(
         anchor.x + anchor.r + 2,
         6,
-        Math.max(6, windowWidth - bubbleWidth - 6),
+        Math.max(6, window.innerWidth - element.offsetWidth - 6),
       );
 
       const y = clamp(
-        anchor.y - bubbleHeight * 0.5,
+        anchor.y - element.offsetHeight * 0.5,
         6,
-        Math.max(6, windowHeight - bubbleHeight - 6),
+        Math.max(6, window.innerHeight - element.offsetHeight - 6),
       );
 
       element.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
-    });
+
+      raf = window.requestAnimationFrame(position);
+    };
+
+    position();
 
     return () => {
-      window.cancelAnimationFrame(frame);
+      window.cancelAnimationFrame(raf);
     };
-  }, [showListening]);
+  }, [bubbleShown]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -285,6 +332,7 @@ export default function StarfireScene({
     let blinkLeftName: string | null = null;
     let blinkRightName: string | null = null;
     let surprisedName: string | null = null;
+    let mouthName: string | null = null;
 
     let elapsed = 0;
     let breathePhase = 0;
@@ -318,9 +366,8 @@ export default function StarfireScene({
 
     const dragFeel = createDragFeelState();
 
-    /*
-     * Preallocated pose targets — zero allocation in the render loop.
-     */
+    const mouthSmoother = new MouthSmoother();
+
     const instantAcc = createPoseTarget();
     const damped = createPoseTarget();
     const activityTarget = createPoseTarget();
@@ -354,10 +401,6 @@ export default function StarfireScene({
       eggExpression = null;
     };
 
-    /*
-     * Easter egg: fires after 5 rapid clicks. Pre-empts every other
-     * behaviour and replaces the listening gesture for that click.
-     */
     const triggerEasterEgg = (): void => {
       if (!currentVrm || !rig || dragActive) {
         return;
@@ -392,17 +435,8 @@ export default function StarfireScene({
       console.log(`[Starfire] 🎉 easter egg=${kind}`);
     };
 
-    /*
-     * Listening trigger: cancels whatever she was doing, startles her
-     * awake if she was sleeping, then plays a dedicated gesture.
-     * While an easter egg is playing, only the bubble shows.
-     */
     const handleListen = (): void => {
       if (!currentVrm || !rig) {
-        return;
-      }
-
-      if (easterEgg) {
         return;
       }
 
@@ -443,11 +477,6 @@ export default function StarfireScene({
 
     window.addEventListener("starfire:listen", handleListen);
 
-    /*
-     * ---------------------------------------------------
-     * POSE-FOLLOWING 3D HIT TEST
-     * ---------------------------------------------------
-     */
     const anchorVector = new THREE.Vector3();
 
     const buildHitPoints = (vrm: VRM): HitPoint[] => {
@@ -518,11 +547,6 @@ export default function StarfireScene({
       return false;
     };
 
-    /*
-     * ---------------------------------------------------
-     * POINTER + DRAG
-     * ---------------------------------------------------
-     */
     const handlePointerMove = (event: PointerEvent): void => {
       const drag = dragRef.current;
 
@@ -549,18 +573,12 @@ export default function StarfireScene({
         return;
       }
 
-      /*
-       * Outside Starfire = absolutely nothing happens.
-       */
       if (!isOverStarfire(event)) {
         renderer.domElement.style.cursor = "default";
 
         return;
       }
 
-      /*
-       * Picking her up interrupts whatever she was doing.
-       */
       cancelEasterEgg();
 
       cancelActivity();
@@ -644,11 +662,6 @@ export default function StarfireScene({
 
     renderer.domElement.addEventListener("pointercancel", handlePointerCancel);
 
-    /*
-     * ---------------------------------------------------
-     * LOAD MODEL
-     * ---------------------------------------------------
-     */
     const loadModel = async (): Promise<void> => {
       try {
         console.log("[Starfire] 🌸 loading VRM...");
@@ -699,10 +712,6 @@ export default function StarfireScene({
 
         baseModelX = vrm.scene.position.x;
         baseModelY = vrm.scene.position.y;
-
-        /*
-         * rotateVRM0 may flip VRM 0.x models 180deg — preserve it.
-         */
         baseRotationY = vrm.scene.rotation.y;
 
         rig = createRig(vrm);
@@ -716,6 +725,7 @@ export default function StarfireScene({
         blinkLeftName = findExpression(vrm, ["blinkLeft", "blink"]);
         blinkRightName = findExpression(vrm, ["blinkRight", "blink"]);
         surprisedName = findExpression(vrm, ["surprised"]);
+        mouthName = findExpression(vrm, ["aa", "a", "mouthA", "talk"]);
 
         currentVrm = vrm;
 
@@ -724,7 +734,7 @@ export default function StarfireScene({
         console.log("[Starfire] ✅ VRM loaded.");
 
         console.log(
-          `[Starfire] 🦴 calibrated relaxed pose (armSign=${rig.armSign}).`,
+          `[Starfire] 🦴 calibrated relaxed pose (armSign=${rig.armSign}${mouthName ? `, mouth=${mouthName}` : ", no mouth expression"})`,
         );
       } catch (cause) {
         console.error("[Starfire] ❌ VRM load failed:", cause);
@@ -774,13 +784,12 @@ export default function StarfireScene({
         const s = rig.armSign;
         const fx = rig.forwardX;
 
+        const vs = voiceStateRef.current;
+
+        const voiceActive = isVoiceActive(vs);
+
         let spinYawDeg = 0;
 
-        /*
-         * ---------------------------------------------------
-         * 1. INSTANT LIFE LAYER (reset every frame)
-         * ---------------------------------------------------
-         */
         resetPoseTarget(instantAcc);
 
         let bounce = 0;
@@ -791,9 +800,6 @@ export default function StarfireScene({
 
         const breathe = Math.sin(breathePhase) * 0.0035 * breathing.scale;
 
-        /*
-         * Base idle drift — barely perceptible life.
-         */
         addBone(
           instantAcc,
           "head",
@@ -804,13 +810,15 @@ export default function StarfireScene({
 
         addBone(instantAcc, "spine", 0, 0, Math.sin(elapsed * 0.23) * deg(0.4));
 
-        /*
-         * Idle activity machine.
-         */
+        if (voiceActive && activity) {
+          cancelActivity();
+        }
+
         if (
           !listening &&
           !easterEgg &&
           !activity &&
+          !voiceActive &&
           elapsed >= nextActivityAt
         ) {
           const kind = chooseActivity(lastActivityKind);
@@ -855,15 +863,12 @@ export default function StarfireScene({
           }
         }
 
-        /*
-         * Rare idle micro-reaction (only while standing, never
-         * during an activity, listening, or an easter egg).
-         */
         if (
           !listening &&
           !easterEgg &&
           !activity &&
           !micro &&
+          !voiceActive &&
           elapsed >= nextMicroAt
         ) {
           const kind = chooseMicro(lastMicroKind);
@@ -904,11 +909,6 @@ export default function StarfireScene({
           }
         }
 
-        /*
-         * ---------------------------------------------------
-         * 2. LISTENING GESTURE (instant layer, high priority)
-         * ---------------------------------------------------
-         */
         if (listening) {
           const t = elapsed - listening.startedAt;
 
@@ -936,9 +936,43 @@ export default function StarfireScene({
 
         /*
          * ---------------------------------------------------
-         * 3. EASTER EGG (instant layer, highest priority)
+         * VOICE LAYER — audio-driven mouth + talking motion
          * ---------------------------------------------------
          */
+        let mouthValue = 0;
+
+        if (voiceActive) {
+          if (vs === "assistant-speaking") {
+            const level = mouthSmoother.update(
+              clamp(voiceMouthRef.current.raw, 0, 1),
+              dt,
+            );
+
+            applyVoiceAnimation(
+              instantAcc,
+              "assistant-speaking",
+              elapsed,
+              s,
+              fx,
+              level,
+            );
+
+            mouthValue = level;
+          } else if (vs === "user-speaking") {
+            mouthSmoother.update(0, dt);
+
+            applyVoiceAnimation(instantAcc, "user-speaking", elapsed, s, fx, 0);
+          } else if (vs === "thinking") {
+            mouthSmoother.update(0, dt);
+
+            applyVoiceAnimation(instantAcc, "thinking", elapsed, s, fx, 0);
+          } else {
+            mouthSmoother.update(0, dt);
+          }
+        } else {
+          mouthSmoother.update(0, dt);
+        }
+
         if (easterEgg) {
           const t = elapsed - easterEgg.startedAt;
 
@@ -964,11 +998,6 @@ export default function StarfireScene({
           }
         }
 
-        /*
-         * ---------------------------------------------------
-         * 4. DRAG FEEL — carried inertia, turn, walk gait
-         * ---------------------------------------------------
-         */
         const feel = updateDragFeel(
           dragFeel,
           dt,
@@ -994,21 +1023,26 @@ export default function StarfireScene({
           const walk = carryWalk(elapsed, intensity, fx);
 
           addBone(instantAcc, "leftUpperLeg", walk.leftUpperX, 0, 0);
+
           addBone(instantAcc, "rightUpperLeg", walk.rightUpperX, 0, 0);
+
           addBone(instantAcc, "leftLowerLeg", walk.leftLowerX, 0, 0);
+
           addBone(instantAcc, "rightLowerLeg", walk.rightLowerX, 0, 0);
+
           addBone(instantAcc, "leftUpperArm", walk.leftArmX, 0, 0);
+
           addBone(instantAcc, "rightUpperArm", walk.rightArmX, 0, 0);
+
           addBone(instantAcc, "hips", 0, 0, walk.hipRollZ);
+
           addBone(instantAcc, "spine", walk.leanX, walk.spineYawY, 0);
+
           addBone(instantAcc, "head", walk.headCompX, 0, 0);
 
           bounce += walk.bob;
         }
 
-        /*
-         * Startle pop when woken from sleep.
-         */
         if (startle > 0) {
           bounce += startle * 0.018;
 
@@ -1019,14 +1053,6 @@ export default function StarfireScene({
           startle = Math.max(0, startle - dt * 1.6);
         }
 
-        /*
-         * ---------------------------------------------------
-         * 5. DAMPED POSE LAYER
-         * ---------------------------------------------------
-         *
-         * While carried or performing an easter egg, the posture
-         * returns to standing so the motion reads cleanly.
-         */
         const poseTarget =
           !dragActive && !easterEgg && activity ? activityTarget : zeroTarget;
 
@@ -1034,11 +1060,6 @@ export default function StarfireScene({
 
         dampPoseTarget(damped, poseTarget, dampRate);
 
-        /*
-         * ---------------------------------------------------
-         * 6. APPLY — base + damped + instant, rebuilt every frame
-         * ---------------------------------------------------
-         */
         for (const name of STARFIRE_BONES) {
           const boneRig = rig.bones[name];
 
@@ -1063,21 +1084,22 @@ export default function StarfireScene({
         model.position.y =
           baseModelY + damped.positionY + breathe + bounce + feel.offsetY;
 
-        /*
-         * Carried tilt, direction turn, and easter-egg twirl all
-         * compose additively around the model's base rotation.
-         */
         model.rotation.set(
           feel.offsetY * 1.2,
           baseRotationY + deg(feel.dirYawDeg) + deg(spinYawDeg),
           feel.offsetX * 1.2,
         );
 
-        lookTarget.position.set(damped.lookX, 1.25 + damped.lookY, 4);
+        let lookX = damped.lookX;
+        let lookY = damped.lookY;
 
-        /*
-         * Head anchor for the bubble + Zzz.
-         */
+        if (vs === "thinking") {
+          lookX += Math.sin(elapsed * 0.8) * 0.06;
+          lookY += 0.05 + Math.sin(elapsed * 0.5) * 0.02;
+        }
+
+        lookTarget.position.set(lookX, 1.25 + lookY, 4);
+
         if (rig.head) {
           rig.head.bone.getWorldPosition(anchorVector);
 
@@ -1088,6 +1110,7 @@ export default function StarfireScene({
           const anchor = headAnchorRef.current;
 
           anchor.x = (anchorVector.x * 0.5 + 0.5) * stageWidth;
+
           anchor.y = (-anchorVector.y * 0.5 + 0.5) * stageHeight;
 
           anchor.r =
@@ -1096,13 +1119,13 @@ export default function StarfireScene({
               : (0.16 / (2 * distance * halfFovTan)) * stageHeight + 6;
         }
 
-        /*
-         * Blinking — eyes held closed while sleeping.
-         */
+        setExpression(currentVrm, mouthName, mouthValue);
+
         const sleeping = activity?.kind === "sleep";
 
         if (sleeping) {
           setExpression(currentVrm, blinkLeftName, 1);
+
           setExpression(currentVrm, blinkRightName, 1);
 
           blinkStarted = -1;
@@ -1110,6 +1133,7 @@ export default function StarfireScene({
         } else {
           if (eyesForced) {
             setExpression(currentVrm, blinkLeftName, 0);
+
             setExpression(currentVrm, blinkRightName, 0);
 
             eyesForced = false;
@@ -1129,10 +1153,12 @@ export default function StarfireScene({
             const value = progress < 0.5 ? progress * 2 : (1 - progress) * 2;
 
             setExpression(currentVrm, blinkLeftName, value);
+
             setExpression(currentVrm, blinkRightName, value);
 
             if (blinkTime >= BLINK_DURATION) {
               setExpression(currentVrm, blinkLeftName, 0);
+
               setExpression(currentVrm, blinkRightName, 0);
 
               blinkStarted = -1;
@@ -1185,21 +1211,40 @@ export default function StarfireScene({
     };
   }, [onActivate, onDragStart, onDragEnd]);
 
+  const isThinking = voiceState === "thinking";
+
+  const bubbleText = voiceActive
+    ? (BUBBLE_TEXT[voiceState] ?? "Listening…")
+    : "Listening…";
+
+  const shownError = voiceError ?? error;
+
+  const bubbleVisible = bubbleShown && !shownError;
+
   return (
     <>
       <div className="starfire-stage">
         <div ref={containerRef} className="starfire-canvas" />
       </div>
 
-      {showListening && !error && (
+      {bubbleVisible && !shownError && (
         <div className="starfire-listening" ref={bubbleRef}>
           <div className="starfire-listening-float">
             <div className="starfire-listening-card">
               <div className="starfire-listening-title">
                 <span className="starfire-listening-dot" />
-                Listening…
+                {bubbleText}
               </div>
-              <div className="starfire-listening-sub">I'm right here ♡</div>
+
+              {isThinking ? (
+                <div className="starfire-thinking-dots">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+              ) : (
+                <div className="starfire-listening-sub">I'm right here ♡</div>
+              )}
             </div>
           </div>
         </div>
@@ -1207,9 +1252,9 @@ export default function StarfireScene({
 
       {activityKind === "sleep" && <StarfireZzz anchorRef={headAnchorRef} />}
 
-      {error && (
-        <div className="starfire-error" title={error}>
-          Microphone unavailable
+      {shownError && (
+        <div className="starfire-error" title={shownError}>
+          {shownError}
         </div>
       )}
     </>
