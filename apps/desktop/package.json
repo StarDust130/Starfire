@@ -7,7 +7,8 @@
     "dev": "node scripts/dev-electron.mjs",
     "build": "tsc -p tsconfig.json && vite build",
     "preview": "vite preview",
-    "electron": "electron ."
+    "electron": "electron .",
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@edyrkaj/openwakeword-wasm-browser": "1.0.1",
@@ -24,7 +25,8 @@
     "@vitejs/plugin-react": "^6.0.2",
     "electron": "44.4.5",
     "typescript": "~6.0.3",
-    "vite": "^8.0.16"
+    "vite": "^8.0.16",
+    "vitest": "^5.0.1"
   },
   "main": "electron/main.ts"
 }
