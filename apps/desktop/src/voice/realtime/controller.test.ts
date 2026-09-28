@@ -398,6 +398,10 @@ describe("VoiceController", () => {
 
     expect(controller.getState().state).toBe("listening");
 
+    /*
+     * Echo-level frames during the cooldown: not uploaded, no state
+     * churn, and the gate must NOT latch onto them.
+     */
     for (let i = 0; i < 20; i += 1) {
       emitChunk(0.01);
     }
@@ -408,10 +412,18 @@ describe("VoiceController", () => {
 
     await vi.advanceTimersByTimeAsync(1600);
 
-    emitChunk(0.01);
+    /*
+     * Quiet room after the cooldown: still no turn.
+     */
+    emitChunk(0.0005);
 
     expect(bridge.sendAudio).not.toHaveBeenCalled();
 
+    expect(controller.getState().state).toBe("listening");
+
+    /*
+     * Real speech starts a turn cleanly (the gate was never latched).
+     */
     emitChunk(0.3);
 
     expect(controller.getState().state).toBe("user-speaking");
@@ -627,23 +639,32 @@ describe("VoiceController", () => {
 
     expect(controller.getState().state).toBe("assistant-speaking");
 
+    expect(playback.push).toHaveBeenCalledTimes(1);
+
     emitEvent({ conn: 1, kind: "speech-started" });
 
     expect(playback.clear).toHaveBeenCalled();
 
     expect(controller.getState().state).toBe("user-speaking");
 
+    /*
+     * Audio from the interrupted response is dropped (still exactly
+     * one push — the pre-interrupt one).
+     */
     onAudioCall()(new ArrayBuffer(64));
 
-    expect(playback.push).not.toHaveBeenCalled();
+    expect(playback.push).toHaveBeenCalledTimes(1);
 
     emitEvent({ conn: 1, kind: "response-cancelled" });
 
     expect(controller.getState().state).toBe("user-speaking");
 
+    /*
+     * The next response plays normally.
+     */
     onAudioCall()(new ArrayBuffer(64));
 
-    expect(playback.push).toHaveBeenCalledTimes(1);
+    expect(playback.push).toHaveBeenCalledTimes(2);
 
     expect(controller.getState().state).toBe("assistant-speaking");
   });
