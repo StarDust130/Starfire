@@ -153,4 +153,22 @@ describe("transitionVoiceState", () => {
   it("initial state is idle", () => {
     expect(INITIAL_VOICE_STATE).toBe("idle");
   });
+
+  it("session-ready is accepted from any active state (reconnect path)", () => {
+    expect(
+      transitionVoiceState("assistant-speaking", { type: "session-ready" }),
+    ).toBe("listening");
+
+    expect(
+      transitionVoiceState("user-speaking", { type: "session-ready" }),
+    ).toBe("listening");
+
+    expect(transitionVoiceState("listening", { type: "session-ready" })).toBe(
+      "listening",
+    );
+
+    expect(transitionVoiceState("idle", { type: "session-ready" })).toBe(
+      "idle",
+    );
+  });
 });
