@@ -58,3 +58,10 @@
 * ✨ Polish voice + character
 
 
+
+1. contracts   → tool types + manifest
+2. tools       → registry + 7 tools + tests (fake executors)
+3. core        → agent loop + tests
+4. protocol    → function-call parsing + result builder
+5. electron    → real executors + voice glue
+6. controller  → tolerate tool turns (the "empty response" fix)
