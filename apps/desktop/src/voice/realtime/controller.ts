@@ -25,6 +25,7 @@ export type VoiceRendererEvent = {
   | { kind: "session"; info: Record<string, unknown> }
   | { kind: "speech-started" }
   | { kind: "speech-stopped" }
+  | { kind: "response-created" }
   | { kind: "audio-transcript-delta"; delta: string }
   | { kind: "input-transcript"; text: string }
   | { kind: "response-done"; usage: Record<string, number> | null }
@@ -121,6 +122,21 @@ const CONNECT_RETRY_DELAY_MS = 400;
 
 const RECONNECT_DELAY_MS = 300;
 
+/*
+ * ---------------------------------------------------
+ * LOCAL FALLBACK BARGE-IN
+ * ---------------------------------------------------
+ * Server VAD is the primary interrupter, but if user audio never
+ * reaches it (very quiet speech at the echo floor boundary), she
+ * would otherwise talk on forever. Sustained speech well above the
+ * echo floor (~300ms) clears her playback and cancels the response
+ * server-side. Her own speaker echo cannot sustain this level, so
+ * it cannot false-trigger.
+ */
+const LOCAL_BARGE_FLOOR = 0.09;
+
+const LOCAL_BARGE_FRAMES = 18;
+
 const MIC_VARIANTS: MicVariant[] = [
   { processing: true, useDeviceId: true },
   { processing: false, useDeviceId: true },
@@ -136,6 +152,17 @@ function canSendFrom(state: VoiceStateName): boolean {
   );
 }
 
+/*
+ * Single authoritative voice controller. One state machine, one
+ * generation counter, one connection id — no scattered booleans.
+ *
+ * Interrupt model:
+ *  - Server VAD interrupts (primary, instant).
+ *  - Local fallback interrupts on sustained loud speech.
+ *  - After ANY interrupt, stale audio of the dead response is dropped
+ *    until a NEW response.created arrives. Cancelling or the user
+ *    pausing does NOT re-accept the dead response's in-flight audio.
+ */
 export class VoiceController {
   readonly mouth = { raw: 0 };
 
@@ -205,9 +232,15 @@ export class VoiceController {
 
   private silenceFatal = false;
 
-  private dropStaleAudio = false;
+  /*
+   * True from the moment an interrupt happens until the NEXT
+   * response.created. All assistant audio is dropped while true.
+   */
+  private interruptedResponse = false;
 
   private staleDropLogged = false;
+
+  private loudStreak = 0;
 
   private loggedFirstAudio = false;
 
@@ -311,8 +344,6 @@ export class VoiceController {
     void playback?.stop();
 
     this.mouth.raw = 0;
-
-    this.dropStaleAudio = false;
 
     this.loggedFirstAudio = false;
 
@@ -420,9 +451,11 @@ export class VoiceController {
 
     this.silenceFatal = false;
 
-    this.dropStaleAudio = false;
+    this.interruptedResponse = false;
 
     this.staleDropLogged = false;
+
+    this.loudStreak = 0;
 
     this.loggedFirstAudio = false;
 
@@ -797,30 +830,47 @@ export class VoiceController {
     }
 
     /*
-     * ---------------------------------------------------
-     * ECHO GUARD
-     * ---------------------------------------------------
-     * The speech gate must ONLY ever see audio we would actually
-     * upload. Her speaker echo must never latch it — a latched gate
-     * swallows the `started` edge of the user's real next sentence,
-     * which clipped words and broke turn starts.
+     * While she is audible: stream audio above the echo floor (so the
+     * server VAD can interrupt), and run the local fallback detector.
      */
     if (this.stateName === "assistant-speaking") {
       if (chunk.rms >= ECHO_UPLOAD_FLOOR) {
-        /*
-         * Real user speech over her voice: stream it; the server VAD
-         * performs the authoritative interruption.
-         */
         this.clearIdleTimer();
 
         this.deps.bridge?.sendAudio(b64);
+      }
+
+      if (chunk.rms >= LOCAL_BARGE_FLOOR) {
+        this.loudStreak += 1;
       } else {
-        this.gate = new SpeechGate();
+        this.loudStreak = 0;
+      }
+
+      if (this.loudStreak >= LOCAL_BARGE_FRAMES) {
+        this.loudStreak = 0;
+
+        this.playback?.clear();
+
+        this.mouth.raw = 0;
+
+        this.interruptedResponse = true;
+
+        this.staleDropLogged = false;
+
+        this.deps.bridge?.interrupt();
+
+        this.log(
+          "assistant interrupted (local fallback — sustained loud speech)",
+        );
       }
 
       return;
     }
 
+    /*
+     * Just after she finished: block speaker echo from creating
+     * phantom turns, while real speech passes straight through.
+     */
     if (now < this.echoCooldownUntil) {
       if (chunk.rms >= ECHO_UPLOAD_FLOOR) {
         if (!this.localSpeech) {
@@ -921,9 +971,11 @@ export class VoiceController {
 
           this.mouth.raw = 0;
 
-          this.dropStaleAudio = true;
+          this.interruptedResponse = true;
 
           this.staleDropLogged = false;
+
+          this.loudStreak = 0;
 
           this.log("assistant interrupted (server VAD)");
         }
@@ -950,11 +1002,21 @@ export class VoiceController {
 
         this.localSpeech = false;
 
-        this.dropStaleAudio = false;
-
         this.turnEndAt = Date.now();
 
         this.dispatch({ type: "server-speech-end" });
+
+        break;
+      }
+
+      case "response-created": {
+        if (this.interruptedResponse) {
+          this.interruptedResponse = false;
+
+          this.staleDropLogged = false;
+
+          this.log("new response started — accepting fresh audio");
+        }
 
         break;
       }
@@ -991,8 +1053,6 @@ export class VoiceController {
 
         this.audioBufferedMs = 0;
 
-        this.dropStaleAudio = false;
-
         if (
           buffered > MIN_DRAIN_WAIT_MS &&
           this.stateName === "assistant-speaking"
@@ -1018,10 +1078,18 @@ export class VoiceController {
       case "response-cancelled": {
         this.log("response cancelled by server");
 
-        this.dropStaleAudio = false;
-
+        /*
+         * In-flight audio of the cancelled response can still arrive;
+         * interruptedResponse stays true until response.created.
+         */
         if (this.stateName === "assistant-speaking") {
           this.dispatch({ type: "interrupted" });
+
+          /*
+           * Safety: if the server never produces a follow-up response,
+           * the conversation must still close on inactivity.
+           */
+          this.scheduleIdle(VOICE_IDLE_AFTER_RESPONSE_MS);
         }
 
         break;
@@ -1078,6 +1146,12 @@ export class VoiceController {
 
   private async reconnect(): Promise<void> {
     this.teardownSocketResources();
+
+    this.interruptedResponse = false;
+
+    this.staleDropLogged = false;
+
+    this.loudStreak = 0;
 
     await new Promise((resolve) => {
       setTimeout(resolve, RECONNECT_DELAY_MS);
@@ -1179,7 +1253,7 @@ export class VoiceController {
       return;
     }
 
-    if (this.dropStaleAudio) {
+    if (this.interruptedResponse) {
       if (!this.staleDropLogged) {
         this.staleDropLogged = true;
 
