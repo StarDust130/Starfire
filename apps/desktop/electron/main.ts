@@ -11,6 +11,8 @@ import {
   session,
 } from "electron";
 
+import { RealtimeVoiceBridge } from "./realtimeVoice";
+
 const DEV_SERVER_URL =
   process.env.STARFIRE_DEV_SERVER_URL ?? "http://127.0.0.1:1420";
 
@@ -26,6 +28,8 @@ if (!gotLock) {
 
 let mainWindow: BrowserWindow | null = null;
 
+let voiceBridge: RealtimeVoiceBridge | null = null;
+
 type DragSession = {
   offsetX: number;
   offsetY: number;
@@ -36,11 +40,6 @@ let dragSession: DragSession | null = null;
 
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
-/*
- * Native window drag, owned by the main process.
- * The renderer only signals grab/release; main follows the real
- * OS cursor via polling, so DPI and mid-drag cursor-leave are moot.
- */
 function stopDrag(): void {
   if (!dragSession) {
     return;
@@ -148,10 +147,6 @@ function registerGlobalShortcut(): void {
 
     console.log("[main] ⌨️ Super+Z pressed.");
 
-    /*
-     * Real IPC into the renderer.
-     * Preload forwards this to React via onGlobalListen().
-     */
     mainWindow.webContents.send("starfire:global-listen");
   });
 
@@ -221,10 +216,6 @@ function createWindow(): void {
 
   mainWindow.setVisibleOnAllWorkspaces(true);
 
-  /*
-   * Safety net: a physical mouse-up always ends the drag,
-   * even if the renderer never sees the pointer event.
-   */
   mainWindow.webContents.on("input-event", (_event, input) => {
     if (dragSession && input.type === "mouseUp") {
       stopDrag();
@@ -301,6 +292,10 @@ app.whenReady().then(() => {
   createWindow();
 
   registerGlobalShortcut();
+
+  voiceBridge = new RealtimeVoiceBridge(() => mainWindow);
+
+  voiceBridge.register();
 });
 
 app.on("second-instance", () => {
@@ -316,6 +311,10 @@ app.on("second-instance", () => {
 });
 
 app.on("will-quit", () => {
+  void voiceBridge?.dispose();
+
+  voiceBridge = null;
+
   globalShortcut.unregisterAll();
 
   console.log("[main] 🛑 shortcuts released.");
