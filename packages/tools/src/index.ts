@@ -1,32 +1,16 @@
-import type { ToolRequest, ToolResult } from "@starfire/contracts";
+export { createDefaultRegistry } from "./defaults.js";
+export {
+  type FunctionTool,
+  type ToolDefinition,
+  type ToolHandler,
+  ToolRegistry,
+  type ToolRegistryOptions,
+} from "./registry.js";
+export { ToolError } from "./tool-error.js";
 
-export interface Tool {
-  readonly name: string;
-  readonly description: string;
-
-  execute(request: ToolRequest): Promise<ToolResult>;
-}
-
-export class ToolRegistry {
-  private readonly tools = new Map<string, Tool>();
-
-  register(tool: Tool): void {
-    if (this.tools.has(tool.name)) {
-      throw new Error(`Tool already registered: ${tool.name}`);
-    }
-
-    this.tools.set(tool.name, tool);
-  }
-
-  get(name: string): Tool | undefined {
-    return this.tools.get(name);
-  }
-
-  has(name: string): boolean {
-    return this.tools.has(name);
-  }
-
-  list(): readonly Tool[] {
-    return [...this.tools.values()];
-  }
-}
+export { createDefaultTools } from "./tools/index.js";
+export {
+  type ValidatedArgs,
+  type ValidationResult,
+  validateToolArgs,
+} from "./validate.js";
