@@ -11,6 +11,11 @@
     "outDir": "dist",
     "skipLibCheck": true
   },
-  "references": [{ "path": "../contracts" }],
-  "include": ["src"]
+  "references": [
+    {
+      "path": "../contracts"
+    }
+  ],
+  "include": ["src"],
+  "exclude": ["node_modules", "dist", "src/test"]
 }
