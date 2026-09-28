@@ -15,13 +15,15 @@
     "@pixiv/three-vrm": "3.5.5",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "three": "0.180.0"
+    "three": "0.180.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.3",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@types/three": "0.180.0",
+    "@types/ws": "^8.5.13",
     "@vitejs/plugin-react": "^6.0.2",
     "electron": "44.4.5",
     "typescript": "~6.0.3",
