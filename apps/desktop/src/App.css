@@ -247,6 +247,12 @@ body {
     border-color: rgba(214, 68, 158, 0.28);
   }
 
+  .starfire-thinking-dots span {
+    background: #8a5ccf;
+
+    box-shadow: 0 0 5px rgba(138, 92, 207, 0.5);
+  }
+
   .starfire-listening-sub {
     color: rgba(122, 84, 112, 0.66);
   }
@@ -378,4 +384,54 @@ body {
   color: rgba(150, 60, 120, 0.85);
 
   text-shadow: 0 1px 5px rgba(255, 235, 248, 0.8);
+}
+
+/* =========================================================
+   THINKING DOTS
+   ========================================================= */
+
+.starfire-thinking-dots {
+  display: flex;
+
+  gap: 3px;
+
+  padding-left: 11px;
+
+  margin-top: 2px;
+}
+
+.starfire-thinking-dots span {
+  width: 4px;
+  height: 4px;
+
+  border-radius: 50%;
+
+  background: #c9a6ff;
+
+  box-shadow: 0 0 6px rgba(201, 166, 255, 0.7);
+
+  animation: starfire-think 1.2s ease-in-out infinite;
+}
+
+.starfire-thinking-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.starfire-thinking-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes starfire-think {
+  0%,
+  100% {
+    opacity: 0.35;
+
+    transform: translateY(0);
+  }
+
+  50% {
+    opacity: 1;
+
+    transform: translateY(-3px);
+  }
 }
