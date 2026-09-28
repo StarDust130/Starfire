@@ -28,6 +28,19 @@ class StarfirePlayProcessor extends AudioWorkletProcessor {
 
     this.wasPlaying = false;
 
+    /*
+     * Output metering: the mouth must follow the AUDIBLE audio for
+     * the whole reply, not the arrival burst. RMS is measured on the
+     * actual output and reported ~every 16ms while playing.
+     */
+    this.levelSumsq = 0;
+
+    this.levelSamples = 0;
+
+    this.levelBlocks = 0;
+
+    this.levelInterval = 6;
+
     this.port.onmessage = (event) => {
       const data = event.data;
 
@@ -41,6 +54,12 @@ class StarfirePlayProcessor extends AudioWorkletProcessor {
         this.primed = false;
 
         this.wasPlaying = false;
+
+        this.levelSumsq = 0;
+
+        this.levelSamples = 0;
+
+        this.levelBlocks = 0;
 
         return;
       }
@@ -75,20 +94,40 @@ class StarfirePlayProcessor extends AudioWorkletProcessor {
 
     if (this.primed) {
       for (let i = 0; i < output.length; i += 1) {
+        let value = 0;
+
         if (this.count > 0) {
-          output[i] = this.queue[this.read];
+          value = this.queue[this.read];
 
           this.read = (this.read + 1) % this.capacity;
 
           this.count -= 1;
 
           played = true;
-        } else {
-          output[i] = 0;
         }
+
+        output[i] = value;
+
+        this.levelSumsq += value * value;
+
+        this.levelSamples += 1;
       }
     } else {
       output.fill(0);
+    }
+
+    this.levelBlocks += 1;
+
+    if (played && this.levelBlocks >= this.levelInterval) {
+      const rms = Math.sqrt(this.levelSumsq / Math.max(1, this.levelSamples));
+
+      this.port.postMessage({ type: "level", rms });
+
+      this.levelSumsq = 0;
+
+      this.levelSamples = 0;
+
+      this.levelBlocks = 0;
     }
 
     if (played) {
@@ -97,6 +136,12 @@ class StarfirePlayProcessor extends AudioWorkletProcessor {
       this.wasPlaying = false;
 
       this.primed = false;
+
+      /*
+       * One final zero-level report so the mouth settles closed, then
+       * the drained event advances her state.
+       */
+      this.port.postMessage({ type: "level", rms: 0 });
 
       this.port.postMessage({ type: "drained" });
     }
