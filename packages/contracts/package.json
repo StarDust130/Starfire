@@ -12,8 +12,8 @@
     }
   },
   "scripts": {
-    "build": "tsc -b",
-    "typecheck": "tsc -b --pretty false"
+    "typecheck": "tsc -b --pretty false",
+    "build": "tsc -b --force"
   },
   "dependencies": {
     "zod": "^4.6.5"
