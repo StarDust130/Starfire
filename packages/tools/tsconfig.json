@@ -1,21 +1,17 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
+    "lib": ["ES2022"],
+    "module": "node16",
+    "moduleResolution": "node16",
+    "types": ["node"],
     "declaration": true,
-    "declarationMap": true,
-    "composite": true,
-    "rootDir": "src",
     "outDir": "dist",
-    "skipLibCheck": true
+    "rootDir": "src",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true
   },
-  "references": [
-    {
-      "path": "../contracts"
-    }
-  ],
   "include": ["src"],
   "exclude": ["node_modules", "dist", "src/test"]
 }
