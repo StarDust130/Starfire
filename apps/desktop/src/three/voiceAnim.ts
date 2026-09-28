@@ -9,12 +9,11 @@ export type VoiceAnimState =
  * VOICE ANIMATION LAYER (instant layer, additive; the scene resets
  * its accumulator every frame, so nothing accumulates).
  *
- * assistant-speaking: audio-level-driven head bob, gentle body sway,
- * shoulder life, small alternating forearm gestures (like a person
- * emphasising words), an occasional tiny nod.
- * user-speaking: attentive tilt + occasional micro-nod, calm mouth.
- * thinking: slow wandering head, a thoughtful tilt, gaze handled by
- * the scene (looks up and away).
+ * assistant-speaking: audio-level-driven head bob, lean-in, gentle
+ * sway, shoulder life, ALTERNATING HAND RAISES emphasised by a
+ * syllable-ish pulse, all scaling with loudness.
+ * user-speaking: attentive tilt + occasional micro-nod.
+ * thinking: chin-hand pose, thoughtful head wander, gentle rock.
  */
 export function applyVoiceAnimation(
   acc: PoseTarget,
@@ -27,21 +26,32 @@ export function applyVoiceAnimation(
   const lv = clamp(Number.isFinite(level) ? level : 0, 0, 1);
 
   if (state === "assistant-speaking") {
-    const bob = Math.sin(t * 7.3) * deg(0.6 + 1.6 * lv);
+    /*
+     * Syllable-ish beat: rhythmic emphasis pulses tied to talking.
+     */
+    const pulse = Math.max(0, Math.sin(t * 6.4)) ** 3;
 
-    const sway = Math.sin(t * 1.1) * deg(0.9);
+    const bob = Math.sin(t * 7.3) * deg(0.8 + 1.8 * lv);
 
     const nod = Math.max(0, Math.sin(t * 0.9)) ** 24;
 
-    const shoulder = Math.sin(t * 3.1) * deg(0.9 + 1.4 * lv);
+    const sway = Math.sin(t * 1.1) * deg(1.0);
+
+    const shoulder = Math.sin(t * 3.1) * deg(1.0 + 1.6 * lv);
 
     /*
-     * Slow alternating hand gestures, emphasised with loudness —
-     * the way people move their hands while talking.
+     * Alternating hand raises: every ~2.4s the active hand switches;
+     * lift amount grows with loudness, elbow accentuated by the beat.
      */
-    const gesture = Math.sin(t * 2.3);
+    const cycle = Math.sin((t * Math.PI * 2) / 2.4);
 
-    const gestureAmount = deg(2.2 + 2.2 * lv);
+    const leftPhase = Math.max(0, cycle);
+
+    const rightPhase = Math.max(0, -cycle);
+
+    const lift = deg(1.2) + deg(3.2) * lv;
+
+    const elbow = (deg(3.5) + deg(3.5) * lv) * (0.35 + 0.65 * pulse);
 
     addBone(
       acc,
@@ -51,26 +61,36 @@ export function applyVoiceAnimation(
       sway,
     );
 
-    addBone(acc, "spine", 0, Math.sin(t * 0.7) * deg(0.9) * lv, sway * 0.5);
+    addBone(
+      acc,
+      "spine",
+      fx * deg(1.5) * lv,
+      Math.sin(t * 0.7) * deg(0.9) * lv,
+      sway * 0.5,
+    );
 
     addBone(acc, "leftShoulder", 0, 0, -s * shoulder);
 
     addBone(acc, "rightShoulder", 0, 0, s * shoulder);
 
+    addBone(acc, "leftUpperArm", 0, 0, s * lift * leftPhase);
+
     addBone(
       acc,
       "leftLowerArm",
-      fx * deg(1.5) * Math.max(0, gesture) * lv,
+      fx * deg(1.2) * leftPhase * lv,
       0,
-      s * gestureAmount * Math.max(0, gesture),
+      s * elbow * leftPhase,
     );
+
+    addBone(acc, "rightUpperArm", 0, 0, -s * lift * rightPhase);
 
     addBone(
       acc,
       "rightLowerArm",
-      fx * deg(1.5) * Math.max(0, -gesture) * lv,
+      fx * deg(1.2) * rightPhase * lv,
       0,
-      -s * gestureAmount * Math.max(0, -gesture),
+      -s * elbow * rightPhase,
     );
 
     return;
@@ -89,17 +109,26 @@ export function applyVoiceAnimation(
   }
 
   /*
-   * thinking — slow, thoughtful; the scene also lifts her gaze.
+   * thinking — chin-hand pose, thoughtful head wander, gentle rock.
+   * The scene also lifts her gaze up and away.
    */
   const thinkNod = Math.max(0, Math.sin(t * 0.35)) ** 24;
+
+  const rock = Math.sin(t * 0.55);
 
   addBone(
     acc,
     "head",
     Math.sin(t * 0.5) * deg(1.2) + thinkNod * deg(2),
     Math.sin(t * 0.6) * deg(2),
-    Math.sin(t * 0.7) * deg(2.2),
+    fx * deg(2.5) * Math.sin(t * 0.4),
   );
 
-  addBone(acc, "spine", fx * deg(0.6), 0, 0);
+  addBone(acc, "spine", fx * deg(0.8), 0, rock * deg(0.5));
+
+  addBone(acc, "rightUpperArm", 0, 0, -s * deg(2.5));
+
+  addBone(acc, "rightLowerArm", fx * deg(1.5), 0, -s * deg(8.5 + rock * 0.8));
+
+  addBone(acc, "leftLowerArm", 0, 0, s * deg(1.5));
 }
