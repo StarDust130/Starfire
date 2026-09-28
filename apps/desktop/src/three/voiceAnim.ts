@@ -9,15 +9,13 @@ export type VoiceAnimState =
  * ---------------------------------------------------
  * SEEDED VARIETY ENGINE
  * ---------------------------------------------------
- * Every voice episode (a reply, a thinking pause, a listening
- * stretch) gets one random seed chosen by the scene. The seed
- * deterministically derives gesture phase, which hand leads, the
- * energy personality, gesture frequency, and two-hand affinity —
- * so every reply gestures differently, while remaining a pure,
- * testable function of (state, t, level, seed).
+ * Every voice episode gets one random seed chosen by the scene. The
+ * seed deterministically derives gesture phase, lead hand, energy,
+ * frequency, two-hand affinity and shrug affinity — every reply
+ * gestures differently, as a pure testable function.
  *
- * The scene resets its accumulator every frame, so nothing here
- * can accumulate. All offsets stay under 10 degrees.
+ * All motion is built from continuous sinusoids, so poses never pop.
+ * The scene resets its accumulator every frame; offsets stay <10deg.
  */
 function hashToUnit(seed: number, salt: number): number {
   const x = Math.sin(seed * 127.1 + salt * 311.7) * 43758.5453;
@@ -30,11 +28,10 @@ function hashToUnit(seed: number, salt: number): number {
  * ASSISTANT SPEAKING
  * ---------------------------------------------------
  * Natural conversational gesturing:
- *  - audio-level-driven head bob and lean-in
- *  - alternating hand raises with beat-pulsed elbow accents
- *  - random two-hand emphasis beats ("and then THIS big")
- *  - weight shift on the hips and torso yaw toward the active hand
- *  - occasional tiny nods on emphasis
+ *  - audio-level head bob, lean-in, occasional tiny nods
+ *  - alternating hand raises, beat-pulsed elbows, wrist accents
+ *  - random two-hand emphasis beats and quick shrug beats
+ *  - weight shift (hips) and torso yaw toward the active hand
  */
 function talkPose(
   acc: PoseTarget,
@@ -54,6 +51,8 @@ function talkPose(
 
   const bothHandsAffinity = hashToUnit(seed, 5);
 
+  const shrugAffinity = hashToUnit(seed, 6);
+
   const tt = t * freq + phase0;
 
   const pulse = Math.max(0, Math.sin(tt * 6.4)) ** 3;
@@ -64,11 +63,6 @@ function talkPose(
 
   const sway = Math.sin(tt * 1.1) * deg(1.0 * energy);
 
-  /*
-   * Gesture cycle: every ~2.4s (jittered by phase) the active hand
-   * switches. Near the switch both hands lift a little — a natural
-   * two-handed emphasis — more often for high-affinity seeds.
-   */
   const cycle = Math.sin((t * Math.PI * 2) / 2.4 + phase0);
 
   const leftPhase = Math.max(0, cycle);
@@ -77,24 +71,38 @@ function talkPose(
 
   const bothBeat = (1 - Math.abs(cycle)) ** 2 * bothHandsAffinity;
 
-  const lift = deg(1.0) + deg(3.4) * lv * energy;
+  const lift = deg(1.2) + deg(3.8) * lv * energy;
 
   const elbow = (deg(3.2) + deg(3.6) * lv) * (0.35 + 0.65 * pulse);
 
-  const leftAmount = leftPhase * (leadHand > 0 ? 1 : 0.55) + bothBeat * 0.7;
+  const leftAmount = Math.min(
+    1,
+    leftPhase * (leadHand > 0 ? 1 : 0.55) + bothBeat * 0.7,
+  );
 
-  const rightAmount = rightPhase * (leadHand < 0 ? 1 : 0.55) + bothBeat * 0.7;
+  const rightAmount = Math.min(
+    1,
+    rightPhase * (leadHand < 0 ? 1 : 0.55) + bothBeat * 0.7,
+  );
 
   const gestureSide = cycle >= 0 ? -1 : 1;
 
-  const shoulderLife = deg((1.0 + 1.6 * lv) * energy) * 0.6 + sway * 0.4;
+  /*
+   * Shrug beats: quick both-shoulder lifts on some phrase starts,
+   * only for shruggy personalities.
+   */
+  const shrug =
+    Math.max(0, Math.sin(tt * 1.05 + 1.2)) ** 10 * shrugAffinity * lv;
+
+  const shoulderLife =
+    deg((1.0 + 1.6 * lv) * energy) * 0.6 + sway * 0.4 + deg(3.2) * shrug;
 
   addBone(
     acc,
     "head",
     bob + nod * deg(2.6),
     Math.sin(tt * 1.7) * deg(1.1) * lv,
-    sway,
+    sway - gestureSide * deg(1.2) * pulse * lv,
   );
 
   addBone(
@@ -105,7 +113,13 @@ function talkPose(
     sway * 0.5,
   );
 
-  addBone(acc, "hips", 0, 0, -gestureSide * deg(1.2) * lv);
+  addBone(
+    acc,
+    "hips",
+    0,
+    Math.sin(tt * 0.55) * deg(1.0) * lv,
+    -gestureSide * deg(1.2) * lv,
+  );
 
   addBone(acc, "leftShoulder", 0, 0, -s * shoulderLife);
 
@@ -113,26 +127,25 @@ function talkPose(
 
   /*
    * Raising the LEFT upper arm rotates -s; raising the RIGHT is +s.
-   * (Getting this sign backwards makes hands sink instead of lift.)
    */
-  addBone(acc, "leftUpperArm", 0, 0, -s * lift * Math.min(1, leftAmount));
+  addBone(acc, "leftUpperArm", 0, 0, -s * lift * leftAmount);
 
   addBone(
     acc,
     "leftLowerArm",
-    fx * deg(1.2) * Math.min(1, leftAmount) * lv,
-    0,
-    s * elbow * Math.min(1, leftAmount),
+    fx * deg(1.2) * leftAmount * lv,
+    s * deg(1.4) * pulse * leftAmount * lv,
+    s * elbow * leftAmount,
   );
 
-  addBone(acc, "rightUpperArm", 0, 0, s * lift * Math.min(1, rightAmount));
+  addBone(acc, "rightUpperArm", 0, 0, s * lift * rightAmount);
 
   addBone(
     acc,
     "rightLowerArm",
-    fx * deg(1.2) * Math.min(1, rightAmount) * lv,
-    0,
-    -s * elbow * Math.min(1, rightAmount),
+    fx * deg(1.2) * rightAmount * lv,
+    -s * deg(1.4) * pulse * rightAmount * lv,
+    -s * elbow * rightAmount,
   );
 }
 
@@ -140,11 +153,9 @@ function talkPose(
  * ---------------------------------------------------
  * THINKING
  * ---------------------------------------------------
- * Seed picks one of four poses per episode:
- *  chin-hand  — hand up near the chin, head tilted, slow wander
- *  look-away  — slow big head scan, relaxed body (gaze handled by scene)
- *  hmm-tilt   — held head tilt with a slow "hmm" nod
- *  still      — nearly still, just thoughtful micro motion
+ * One base pose per episode (seed): chin-hand, look-away, hmm-tilt
+ * or still — with a continuous gentle rock so she never freezes.
+ * The scene adds wandering gaze and a soft thinking murmur.
  */
 function thinkPose(
   acc: PoseTarget,
@@ -160,9 +171,6 @@ function thinkPose(
   const rock = Math.sin(t * 0.55);
 
   if (roll < 0.35) {
-    /*
-     * chin-hand: raise the right hand toward the chin and hold it.
-     */
     addBone(
       acc,
       "head",
@@ -183,9 +191,6 @@ function thinkPose(
   }
 
   if (roll < 0.6) {
-    /*
-     * look-away: slow curious scan, hands relaxed.
-     */
     addBone(
       acc,
       "head",
@@ -194,15 +199,12 @@ function thinkPose(
       -Math.sin(t * 0.5) * deg(1.4),
     );
 
-    addBone(acc, "spine", 0, Math.sin(t * 0.5) * deg(0.8), 0);
+    addBone(acc, "spine", 0, Math.sin(t * 0.5) * deg(0.8), rock * deg(0.4));
 
     return;
   }
 
   if (roll < 0.85) {
-    /*
-     * hmm-tilt: a held tilt with a slow thoughtful nod.
-     */
     const holdTilt = Math.sin(t * 0.3 + hashToUnit(seed, 11) * Math.PI);
 
     addBone(
@@ -218,12 +220,9 @@ function thinkPose(
     return;
   }
 
-  /*
-   * still: quiet, composed thinking.
-   */
-  addBone(acc, "head", Math.sin(t * 0.4) * deg(0.6), 0, 0);
+  addBone(acc, "head", Math.sin(t * 0.4) * deg(0.6), rock * deg(0.4), 0);
 
-  addBone(acc, "spine", fx * deg(0.4), 0, 0);
+  addBone(acc, "spine", fx * deg(0.4), 0, rock * deg(0.3));
 }
 
 /*
