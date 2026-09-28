@@ -30,20 +30,25 @@ export function startActivity(kind: ActivityKind, startedAt: number): Activity {
   };
 }
 
+// ⏱️ Decide how long Starfire stays in each activity before changing
 function holdFor(kind: ActivityKind): number {
+  // 😴 Sleep longer so Starfire feels calm and relaxed
   if (kind === "sleep") {
-    return 9 + Math.random() * 6;
+    return 20 + Math.random() * 30; // ⏱️ 20–50 sec (avg ~35 sec)
   }
 
+  // 🪑 Sit for a short random time
   if (kind === "sit") {
-    return 6 + Math.random() * 4;
+    return 6 + Math.random() * 4; // ⏱️ 6–10 sec (avg ~8 sec)
   }
 
+  // 👀 Look around briefly before doing something else
   if (kind === "look-around") {
-    return 3.5 + Math.random() * 2;
+    return 3.5 + Math.random() * 2; // ⏱️ 3.5–5.5 sec (avg ~4.5 sec)
   }
 
-  return 3 + Math.random() * 1.2;
+  // ✨ Default activity duration
+  return 3 + Math.random() * 1.2; // ⏱️ 3–4.2 sec (avg ~3.6 sec)
 }
 
 export function chooseActivity(previous: ActivityKind | null): ActivityKind {

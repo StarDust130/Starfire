@@ -44,12 +44,12 @@ describe("chooseActivity", () => {
 });
 
 describe("startActivity", () => {
-  it("holds sleep for 9-15s and marks zzz", () => {
+  it("holds sleep for 20-50s and marks zzz", () => {
     for (let i = 0; i < 20; i += 1) {
       const activity = startActivity("sleep", 0);
 
-      expect(activity.hold).toBeGreaterThanOrEqual(9);
-      expect(activity.hold).toBeLessThanOrEqual(15);
+      expect(activity.hold).toBeGreaterThanOrEqual(20);
+      expect(activity.hold).toBeLessThanOrEqual(50);
       expect(activity.zzz).toBe(true);
     }
   });
