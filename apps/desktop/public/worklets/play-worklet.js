@@ -3,11 +3,9 @@ class StarfirePlayProcessor extends AudioWorkletProcessor {
     super();
 
     /*
-     * ~60 s of headroom at the device rate. The server streams audio
-     * much faster than realtime, so the queue holds the whole
-     * response; it must NEVER overwrite samples that are currently
-     * playing (that corrupts audio mid-word). When full, incoming
-     * samples are dropped instead.
+     * ~60 s capacity. The server streams audio much faster than
+     * realtime, so the queue holds the whole response. When full,
+     * INCOMING samples are dropped — never the ones playing.
      */
     this.capacity = sampleRate * 60;
 
@@ -18,6 +16,15 @@ class StarfirePlayProcessor extends AudioWorkletProcessor {
     this.write = 0;
 
     this.count = 0;
+
+    /*
+     * Jitter prime: hold ~60ms of audio before starting playback so
+     * slow chunk delivery never gaps the sound at response start or
+     * after a clear().
+     */
+    this.prime = Math.round(sampleRate * 0.06);
+
+    this.primed = false;
 
     this.wasPlaying = false;
 
@@ -31,6 +38,10 @@ class StarfirePlayProcessor extends AudioWorkletProcessor {
 
         this.count = 0;
 
+        this.primed = false;
+
+        this.wasPlaying = false;
+
         return;
       }
 
@@ -40,10 +51,6 @@ class StarfirePlayProcessor extends AudioWorkletProcessor {
       if (incoming) {
         for (let i = 0; i < incoming.length; i += 1) {
           if (this.count >= this.capacity) {
-            /*
-             * Queue full: drop the INCOMING sample, never the one
-             * currently playing.
-             */
             continue;
           }
 
@@ -60,26 +67,36 @@ class StarfirePlayProcessor extends AudioWorkletProcessor {
   process(_inputs, outputs) {
     const output = outputs[0][0];
 
-    for (let i = 0; i < output.length; i += 1) {
-      if (this.count > 0) {
-        output[i] = this.queue[this.read];
+    let played = false;
 
-        this.read = (this.read + 1) % this.capacity;
-
-        this.count -= 1;
-      } else {
-        output[i] = 0;
-      }
+    if (!this.primed && this.count >= this.prime) {
+      this.primed = true;
     }
 
-    /*
-     * Tell the main thread when playback actually finished draining,
-     * so her animation/state can follow the audible tail precisely.
-     */
-    if (this.count > 0) {
+    if (this.primed) {
+      for (let i = 0; i < output.length; i += 1) {
+        if (this.count > 0) {
+          output[i] = this.queue[this.read];
+
+          this.read = (this.read + 1) % this.capacity;
+
+          this.count -= 1;
+
+          played = true;
+        } else {
+          output[i] = 0;
+        }
+      }
+    } else {
+      output.fill(0);
+    }
+
+    if (played) {
       this.wasPlaying = true;
     } else if (this.wasPlaying) {
       this.wasPlaying = false;
+
+      this.primed = false;
 
       this.port.postMessage({ type: "drained" });
     }
