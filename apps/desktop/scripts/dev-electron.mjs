@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 
+import { existsSync } from "node:fs";
+
 import { mkdir, stat, writeFile } from "node:fs/promises";
 
 import path from "node:path";
@@ -11,6 +13,31 @@ const PORT = 1420;
 const URL = `http://${HOST}:${PORT}/`;
 
 const ELECTRON_DIST = "electron-dist";
+
+/*
+ * Load apps/desktop/.env (gitignored) into the environment before
+ * anything spawns. Shell-exported variables always win over the file.
+ */
+function loadEnvFile() {
+  const envPath = path.resolve(process.cwd(), ".env");
+
+  if (!existsSync(envPath)) {
+    return;
+  }
+
+  try {
+    process.loadEnvFile(envPath);
+
+    console.log("[dev] 🔑 loaded apps/desktop/.env");
+  } catch (error) {
+    console.warn(
+      "[dev] ⚠️ could not parse .env:",
+      error instanceof Error ? error.message : error,
+    );
+  }
+}
+
+loadEnvFile();
 
 function sleep(ms) {
   return new Promise((resolve) => {
@@ -60,20 +87,6 @@ async function waitForVite() {
   throw new Error("Vite did not start on port 1420.");
 }
 
-/*
- * ---------------------------------------------------
- * COMPILE ELECTRON MAIN + PRELOAD (CommonJS)
- * ---------------------------------------------------
- *
- * This is critical. The renderer is served fresh by Vite,
- * but Electron runs compiled JavaScript. Without this step
- * Electron silently keeps running a stale bundle, which is
- * exactly why dragging and the Super+Z bridge appeared dead.
- *
- * electron-dist/package.json with type=commonjs guarantees the
- * emitted .js files are always loaded as CommonJS, which the
- * sandboxed preload requires.
- */
 async function buildElectron() {
   console.log("[dev] 📦 compiling electron main + preload...");
 
@@ -98,10 +111,6 @@ async function buildElectron() {
 }
 
 function getElectronArgs() {
-  /*
-   * Launch the freshly compiled entry file directly so no stale
-   * package.json main bundle can ever be picked up.
-   */
   const args = [path.join(ELECTRON_DIST, "main.js")];
 
   const isWayland =
