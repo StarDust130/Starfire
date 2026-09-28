@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "node16",
+    "moduleResolution": "node16",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "sourceMap": false,
+    "outDir": "electron-dist",
+    "rootDir": "electron",
+    "types": ["node"]
+  },
+  "include": ["electron/main.ts", "electron/preload.ts"]
+}
