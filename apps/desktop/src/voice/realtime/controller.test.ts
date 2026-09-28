@@ -174,6 +174,102 @@ describe("VoiceController", () => {
     expect(deps.createMic).toHaveBeenCalledTimes(1);
   });
 
+  it("connect retries once on transient failure", async () => {
+    const { deps, bridge } = makeDeps();
+
+    bridge.start = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        error: "Realtime connection timed out.",
+        fatal: false,
+      })
+      .mockResolvedValueOnce({ ok: true, conn: 1 });
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(bridge.start).toHaveBeenCalledTimes(2);
+
+    expect(controller.getState().state).toBe("listening");
+  });
+
+  it("auth failures never retry", async () => {
+    const { deps, bridge } = makeDeps();
+
+    bridge.start = vi.fn(async () => ({
+      ok: false as const,
+      error: "EmpirioLabs API key is not configured.",
+      fatal: true,
+    }));
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    expect(bridge.start).toHaveBeenCalledTimes(1);
+
+    expect(controller.getState().state).toBe("error");
+  });
+
+  it("unexpected close mid-conversation auto-reconnects once", async () => {
+    const { deps, bridge, emitEvent, onAudioCall } = makeDeps();
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    onAudioCall()(new ArrayBuffer(64));
+
+    expect(controller.getState().state).toBe("assistant-speaking");
+
+    emitEvent({ conn: 1, kind: "closed" });
+
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect(bridge.start).toHaveBeenCalledTimes(2);
+
+    expect(controller.getState().state).toBe("listening");
+
+    /*
+     * The wake engine was NOT restarted — the conversation continued.
+     */
+    expect(deps.onStartWakeEngine).not.toHaveBeenCalled();
+  });
+
+  it("a second unexpected close gives up cleanly and restores wake", async () => {
+    const { deps, emitEvent } = makeDeps();
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    emitEvent({ conn: 1, kind: "closed" });
+
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect(controller.getState().state).toBe("listening");
+
+    emitEvent({ conn: 1, kind: "closed" });
+
+    expect(controller.getState().message).toContain("closed");
+
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(controller.getState().state).toBe("idle");
+
+    expect(deps.onStartWakeEngine).toHaveBeenCalled();
+  });
+
   it("first capture attempt uses the wake engine's device", async () => {
     const { deps } = makeDeps();
 
@@ -260,9 +356,6 @@ describe("VoiceController", () => {
 
     expect(bridge.sendAudio).toHaveBeenCalled();
 
-    /*
-     * Local path never cuts playback — only the server VAD does.
-     */
     expect(playback.clear).not.toHaveBeenCalled();
   });
 
@@ -279,10 +372,6 @@ describe("VoiceController", () => {
 
     emitEvent({ conn: 1, kind: "speech-stopped" });
 
-    /*
-     * 48 bytes per millisecond -> 960 bytes = 20ms per chunk; send
-     * enough for > 300ms buffered.
-     */
     onAudioCall()(new ArrayBuffer(48 * 400));
 
     expect(controller.getState().state).toBe("assistant-speaking");
@@ -309,10 +398,6 @@ describe("VoiceController", () => {
 
     expect(controller.getState().state).toBe("listening");
 
-    /*
-     * Echo-level frames right after her turn: not uploaded, no state
-     * churn, no phantom user-speaking.
-     */
     for (let i = 0; i < 20; i += 1) {
       emitChunk(0.01);
     }
@@ -321,10 +406,6 @@ describe("VoiceController", () => {
 
     expect(controller.getState().state).toBe("listening");
 
-    /*
-     * After the cooldown, echo-level audio still does not start a
-     * turn, and real speech does.
-     */
     await vi.advanceTimersByTimeAsync(1600);
 
     emitChunk(0.01);
@@ -462,7 +543,7 @@ describe("VoiceController", () => {
 
     void controller.start();
 
-    await flush();
+    await vi.advanceTimersByTimeAsync(1000);
 
     await vi.advanceTimersByTimeAsync(400);
 
@@ -552,9 +633,6 @@ describe("VoiceController", () => {
 
     expect(controller.getState().state).toBe("user-speaking");
 
-    /*
-     * Audio from the interrupted response is dropped.
-     */
     onAudioCall()(new ArrayBuffer(64));
 
     expect(playback.push).not.toHaveBeenCalled();
@@ -563,9 +641,6 @@ describe("VoiceController", () => {
 
     expect(controller.getState().state).toBe("user-speaking");
 
-    /*
-     * The next response plays normally.
-     */
     onAudioCall()(new ArrayBuffer(64));
 
     expect(playback.push).toHaveBeenCalledTimes(1);
