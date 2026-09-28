@@ -162,8 +162,7 @@ export default function StarfireScene({
 
   /*
    * ALL state hooks are declared BEFORE any value that reads them —
-   * referencing a const before its declaration is a runtime crash,
-   * not just a lint warning.
+   * referencing a const before its declaration is a runtime crash.
    */
   const [showListening, setShowListening] = useState(false);
 
@@ -202,10 +201,7 @@ export default function StarfireScene({
 
   /*
    * Keep the bubble glued beside her actual head for as long as it
-   * is visible. A continuous rAF loop (cheap: one transform write
-   * per frame) also tracks her breathing/idle motion, and always
-   * positions the bubble no matter whether it appeared via voice
-   * state or the click/listen event.
+   * is visible (continuous rAF loop: one transform write per frame).
    */
   useEffect(() => {
     if (!bubbleShown) {
@@ -339,6 +335,7 @@ export default function StarfireScene({
     let surprisedName: string | null = null;
     let mouthName: string | null = null;
     let mouthSecondaryName: string | null = null;
+    let moodName: string | null = null;
 
     let elapsed = 0;
     let breathePhase = 0;
@@ -374,14 +371,11 @@ export default function StarfireScene({
 
     const mouthSmoother = new MouthSmoother();
 
-    /*
-     * Voice episode variety: every transition into talking, thinking,
-     * or listening picks a fresh seed that drives this episode's
-     * gesture personality.
-     */
     let voiceSeed = 42;
 
     let lastVoiceState: VoiceStateName = "idle";
+
+    let moodLevel = 0;
 
     const instantAcc = createPoseTarget();
     const damped = createPoseTarget();
@@ -742,6 +736,7 @@ export default function StarfireScene({
         surprisedName = findExpression(vrm, ["surprised"]);
         mouthName = findExpression(vrm, ["aa", "a", "mouthA", "talk"]);
         mouthSecondaryName = findExpression(vrm, ["oh", "ou", "o", "mouthO"]);
+        moodName = findExpression(vrm, ["happy", "relaxed"]);
 
         currentVrm = vrm;
 
@@ -751,7 +746,8 @@ export default function StarfireScene({
 
         console.log(
           `[Starfire] 🦴 calibrated relaxed pose (armSign=${rig.armSign}, ` +
-            `mouth=${mouthName ?? "none"}, mouth2=${mouthSecondaryName ?? "none"})`,
+            `mouth=${mouthName ?? "none"}, mouth2=${mouthSecondaryName ?? "none"}, ` +
+            `mood=${moodName ?? "none"})`,
         );
       } catch (cause) {
         console.error("[Starfire] ❌ VRM load failed:", cause);
@@ -968,8 +964,11 @@ export default function StarfireScene({
 
         /*
          * ---------------------------------------------------
-         * VOICE LAYER — audio-driven mouth + seeded gestures
+         * VOICE LAYER — play-time mouth + seeded gestures
          * ---------------------------------------------------
+         * mouth level now comes from the worklet's OUTPUT meter, so
+         * her mouth moves with every audible word for the whole
+         * reply, closing naturally between phrases.
          */
         let mouthValue = 0;
         let mouthSecondaryValue = 0;
@@ -993,11 +992,6 @@ export default function StarfireScene({
 
             mouthValue = level;
 
-            /*
-             * Dual-mouth realism: the secondary shape (oh/ou) morphs
-             * on a per-episode phase so her mouth cycles real shapes
-             * instead of holding one static open.
-             */
             if (mouthSecondaryName) {
               const shape =
                 0.5 + 0.5 * Math.sin(elapsed * 9.1 + voiceSeed * 0.013);
@@ -1028,6 +1022,13 @@ export default function StarfireScene({
               0,
               voiceSeed,
             );
+
+            /*
+             * Thinking murmur: tiny lip motion, like quiet "hmm"ing.
+             */
+            mouthValue =
+              0.05 *
+              Math.max(0, Math.sin(elapsed * 1.4 + voiceSeed * 0.01)) ** 8;
           } else {
             mouthSmoother.update(0, dt);
           }
@@ -1145,8 +1146,8 @@ export default function StarfireScene({
         );
 
         /*
-         * Gaze: thinking looks up and toward a seed-chosen side; other
-         * states follow the damped look target.
+         * Gaze: thinking wanders up/sideways; talking glances around
+         * naturally with the audio level; otherwise damped target.
          */
         let lookX = damped.lookX;
         let lookY = damped.lookY;
@@ -1156,6 +1157,10 @@ export default function StarfireScene({
 
           lookX += gazeSide * (0.03 + Math.sin(elapsed * 0.7) * 0.03);
           lookY += 0.05 + Math.sin(elapsed * 0.5) * 0.02;
+        } else if (vs === "assistant-speaking") {
+          lookX +=
+            Math.sin(elapsed * 0.9 + voiceSeed * 0.011) * 0.035 * mouthValue;
+          lookY += Math.sin(elapsed * 0.6) * 0.012 * mouthValue;
         }
 
         lookTarget.position.set(lookX, 1.25 + lookY, 4);
@@ -1181,6 +1186,19 @@ export default function StarfireScene({
         setExpression(currentVrm, mouthName, mouthValue);
 
         setExpression(currentVrm, mouthSecondaryName, mouthSecondaryValue);
+
+        /*
+         * Emotional color: a soft per-episode smile while she talks,
+         * eased in/out so it never pops.
+         */
+        const moodTarget =
+          vs === "assistant-speaking" && moodName
+            ? 0.06 + ((voiceSeed % 13) / 13) * 0.12
+            : 0;
+
+        moodLevel += (moodTarget - moodLevel) * Math.min(1, dt * 4);
+
+        setExpression(currentVrm, moodName, moodLevel);
 
         const sleeping = activity?.kind === "sleep";
 
