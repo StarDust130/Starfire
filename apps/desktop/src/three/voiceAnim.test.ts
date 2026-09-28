@@ -5,7 +5,7 @@ import { applyVoiceAnimation } from "./voiceAnim";
 import { createPoseTarget, deg, resetPoseTarget } from "./pose";
 
 describe("applyVoiceAnimation", () => {
-  it("never produces NaN and stays tiny", () => {
+  it("never produces NaN and stays within tasteful bounds", () => {
     const acc = createPoseTarget();
 
     for (const state of [
@@ -25,9 +25,9 @@ describe("applyVoiceAnimation", () => {
           expect(Number.isNaN(offset.y)).toBe(false);
           expect(Number.isNaN(offset.z)).toBe(false);
 
-          expect(Math.abs(offset.x)).toBeLessThan(deg(5));
-          expect(Math.abs(offset.y)).toBeLessThan(deg(5));
-          expect(Math.abs(offset.z)).toBeLessThan(deg(5));
+          expect(Math.abs(offset.x)).toBeLessThan(deg(10));
+          expect(Math.abs(offset.y)).toBeLessThan(deg(10));
+          expect(Math.abs(offset.z)).toBeLessThan(deg(10));
         }
       }
     }
@@ -41,12 +41,6 @@ describe("applyVoiceAnimation", () => {
     for (let frame = 0; frame < 200; frame += 1) {
       resetPoseTarget(acc);
 
-      /*
-       * The animation is a pure function of t — feeding the SAME t
-       * every frame must yield the identical offset. (Feeding
-       * increasing t is supposed to change the value; that is the
-       * bob, not accumulation.)
-       */
       applyVoiceAnimation(acc, "assistant-speaking", 0.5, 1, -1, 1);
 
       if (reference === null) {
@@ -57,7 +51,7 @@ describe("applyVoiceAnimation", () => {
     }
   });
 
-  it("talking motion scales with audio level and calms to zero-ish after", () => {
+  it("talking motion scales with audio level", () => {
     const quiet = createPoseTarget();
 
     const loud = createPoseTarget();
@@ -71,5 +65,33 @@ describe("applyVoiceAnimation", () => {
     ).toBeGreaterThanOrEqual(
       Math.abs(quiet.bones.head.x) + Math.abs(quiet.bones.head.y),
     );
+  });
+
+  it("talking raises alternating hands", () => {
+    const acc = createPoseTarget();
+
+    /*
+     * Cycle is sin(2*pi*t/2.4): at t=0.3 left is active, at t=1.5
+     * right is active.
+     */
+    applyVoiceAnimation(acc, "assistant-speaking", 0.3, 1, -1, 1);
+
+    expect(acc.bones.leftLowerArm.z).not.toBe(0);
+
+    resetPoseTarget(acc);
+
+    applyVoiceAnimation(acc, "assistant-speaking", 1.5, 1, -1, 1);
+
+    expect(acc.bones.rightLowerArm.z).not.toBe(0);
+  });
+
+  it("thinking lifts one hand toward the chin", () => {
+    const acc = createPoseTarget();
+
+    applyVoiceAnimation(acc, "thinking", 1.0, 1, -1, 0);
+
+    expect(acc.bones.rightLowerArm.z).not.toBe(0);
+
+    expect(Math.abs(acc.bones.rightLowerArm.z)).toBeGreaterThan(deg(5));
   });
 });
