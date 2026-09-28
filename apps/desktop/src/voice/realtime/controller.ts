@@ -117,17 +117,8 @@ const DRAIN_TIMEOUT_MS = 6000;
 
 const MIN_DRAIN_WAIT_MS = 300;
 
-/*
- * Transient connect failures (timeouts, network blips) get one
- * automatic retry. Auth failures never retry.
- */
 const CONNECT_RETRY_DELAY_MS = 400;
 
-/*
- * One automatic reconnect when the socket dies mid-conversation
- * (server 1011, network blip). The mic stays open; only the socket
- * and playback pipeline are rebuilt.
- */
 const RECONNECT_DELAY_MS = 300;
 
 const MIC_VARIANTS: MicVariant[] = [
@@ -221,8 +212,6 @@ export class VoiceController {
   private loggedFirstAudio = false;
 
   private turnEndAt = 0;
-
-  private turnLatencyLogged = false;
 
   private audioChunks = 0;
 
@@ -336,10 +325,6 @@ export class VoiceController {
     }
   }
 
-  /*
-   * Connect with one automatic retry for transient failures.
-   * Authentication failures never retry.
-   */
   private async connectBridge(): Promise<VoiceStartResult> {
     const bridge = this.deps.bridge;
 
@@ -443,8 +428,6 @@ export class VoiceController {
 
     this.turnEndAt = 0;
 
-    this.turnLatencyLogged = false;
-
     this.audioChunks = 0;
 
     this.audioBufferedMs = 0;
@@ -483,7 +466,7 @@ export class VoiceController {
 
     /*
      * PARALLEL STARTUP: mic, output pipeline, and the websocket all
-     * start at once. Nothing waits for anything it does not need.
+     * start at once.
      */
     const micPromise = mic.start().then(
       (rate) => {
@@ -801,14 +784,6 @@ export class VoiceController {
 
     this.lastChunkAt = now;
 
-    const gate = this.gate.update(chunk.rms, dt);
-
-    if (gate.started) {
-      this.gateEverStarted = true;
-
-      this.clearIdleTimer();
-    }
-
     const resampled = this.resampler
       ? this.resampler.process(chunk.samples)
       : chunk.samples;
@@ -822,22 +797,30 @@ export class VoiceController {
     }
 
     /*
-     * While she is audible: upload ONLY audio above the echo floor so
-     * the server VAD can interrupt on real speech but never on her
-     * own voice.
+     * ---------------------------------------------------
+     * ECHO GUARD
+     * ---------------------------------------------------
+     * The speech gate must ONLY ever see audio we would actually
+     * upload. Her speaker echo must never latch it — a latched gate
+     * swallows the `started` edge of the user's real next sentence,
+     * which clipped words and broke turn starts.
      */
     if (this.stateName === "assistant-speaking") {
       if (chunk.rms >= ECHO_UPLOAD_FLOOR) {
+        /*
+         * Real user speech over her voice: stream it; the server VAD
+         * performs the authoritative interruption.
+         */
+        this.clearIdleTimer();
+
         this.deps.bridge?.sendAudio(b64);
+      } else {
+        this.gate = new SpeechGate();
       }
 
       return;
     }
 
-    /*
-     * Just after she finished: block speaker echo from creating
-     * phantom turns, while real speech passes straight through.
-     */
     if (now < this.echoCooldownUntil) {
       if (chunk.rms >= ECHO_UPLOAD_FLOOR) {
         if (!this.localSpeech) {
@@ -848,10 +831,27 @@ export class VoiceController {
           this.dispatch({ type: "local-speech-start" });
         }
 
+        this.clearIdleTimer();
+
+        this.gate = new SpeechGate();
+
         this.deps.bridge?.sendAudio(b64);
+      } else {
+        this.gate = new SpeechGate();
       }
 
       return;
+    }
+
+    /*
+     * Normal path: the gate sees clean, non-echo audio.
+     */
+    const gate = this.gate.update(chunk.rms, dt);
+
+    if (gate.started) {
+      this.gateEverStarted = true;
+
+      this.clearIdleTimer();
     }
 
     if (gate.started) {
@@ -954,8 +954,6 @@ export class VoiceController {
 
         this.turnEndAt = Date.now();
 
-        this.turnLatencyLogged = false;
-
         this.dispatch({ type: "server-speech-end" });
 
         break;
@@ -978,10 +976,16 @@ export class VoiceController {
       case "response-done": {
         const buffered = this.audioBufferedMs;
 
-        this.log(
-          `⏱ assistant buffered: ${this.audioChunks} chunks, ` +
-            `${Math.round(buffered)}ms of audio`,
-        );
+        if (this.audioChunks === 0) {
+          this.log(
+            "model returned an empty response (no audio) — likely a garbled turn; just speak again",
+          );
+        } else {
+          this.log(
+            `⏱ assistant buffered: ${this.audioChunks} chunks, ` +
+              `${Math.round(buffered)}ms of audio`,
+          );
+        }
 
         this.audioChunks = 0;
 
@@ -1072,10 +1076,6 @@ export class VoiceController {
     }
   }
 
-  /*
-   * One-shot mid-conversation reconnect: keeps the mic alive, rebuilds
-   * only the socket and the playback pipeline.
-   */
   private async reconnect(): Promise<void> {
     this.teardownSocketResources();
 
@@ -1134,8 +1134,6 @@ export class VoiceController {
     this.audioBufferedMs = 0;
 
     this.turnEndAt = 0;
-
-    this.turnLatencyLogged = false;
 
     this.dispatch({ type: "session-ready" });
 
@@ -1196,9 +1194,7 @@ export class VoiceController {
 
       this.log("playback: assistant audio streaming (24 kHz PCM)");
 
-      if (this.turnEndAt > 0 && !this.turnLatencyLogged) {
-        this.turnLatencyLogged = true;
-
+      if (this.turnEndAt > 0) {
         const sample = Date.now() - this.turnEndAt;
 
         this.latencySamples.push(sample);
