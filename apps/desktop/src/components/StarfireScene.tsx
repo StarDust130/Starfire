@@ -57,7 +57,7 @@ import {
   setExpression,
 } from "../three/pose";
 
-import { applyVoiceAnimation } from "../three/voiceAnim";
+import { applyVoiceAnimation, talkingWanderX } from "../three/voiceAnim";
 
 import {
   LISTENING_ACTION_S,
@@ -964,11 +964,8 @@ export default function StarfireScene({
 
         /*
          * ---------------------------------------------------
-         * VOICE LAYER — play-time mouth + seeded gestures
+         * VOICE LAYER — play-time mouth + behavior sequencer
          * ---------------------------------------------------
-         * mouth level now comes from the worklet's OUTPUT meter, so
-         * her mouth moves with every audible word for the whole
-         * reply, closing naturally between phrases.
          */
         let mouthValue = 0;
         let mouthSecondaryValue = 0;
@@ -1023,9 +1020,6 @@ export default function StarfireScene({
               voiceSeed,
             );
 
-            /*
-             * Thinking murmur: tiny lip motion, like quiet "hmm"ing.
-             */
             mouthValue =
               0.05 *
               Math.max(0, Math.sin(elapsed * 1.4 + voiceSeed * 0.01)) ** 8;
@@ -1134,7 +1128,20 @@ export default function StarfireScene({
 
         bounce += instantAcc.bounce;
 
-        model.position.x = baseModelX + feel.offsetX;
+        /*
+         * Position: drag spring + a slow seeded wander while talking
+         * (faint while thinking) — she visibly shifts her spot like a
+         * person changing position during a conversation.
+         */
+        let wanderX = 0;
+
+        if (vs === "assistant-speaking") {
+          wanderX = talkingWanderX(elapsed, voiceSeed);
+        } else if (vs === "thinking") {
+          wanderX = talkingWanderX(elapsed, voiceSeed) * 0.4;
+        }
+
+        model.position.x = baseModelX + feel.offsetX + wanderX;
 
         model.position.y =
           baseModelY + damped.positionY + breathe + bounce + feel.offsetY;
