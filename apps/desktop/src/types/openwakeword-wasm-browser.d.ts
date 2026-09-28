@@ -11,15 +11,9 @@ declare module "@edyrkaj/openwakeword-wasm-browser" {
 
     keywords: string[];
 
-    modelFiles?: Record<
-      string,
-      string
-    >;
+    modelFiles?: Record<string, string>;
 
-    externalDataFiles?: Record<
-      string,
-      ExternalDataFile
-    >;
+    externalDataFiles?: Record<string, ExternalDataFile>;
 
     detectionThreshold?: number;
 
@@ -54,48 +48,26 @@ declare module "@edyrkaj/openwakeword-wasm-browser" {
   type Unsubscribe = () => void;
 
   class WakeWordEngine {
-    constructor(
-      options: WakeWordEngineOptions,
-    );
+    constructor(options: WakeWordEngineOptions);
 
     load(): Promise<void>;
 
-    start(
-      options?: StartOptions,
-    ): Promise<void>;
+    start(options?: StartOptions): Promise<void>;
 
     stop(): Promise<void>;
 
-    on(
-      event: "detect",
-      handler: (
-        event: DetectEvent,
-      ) => void,
-    ): Unsubscribe;
+    on(event: "detect", handler: (event: DetectEvent) => void): Unsubscribe;
 
     on(
-      event:
-        | "speech-start"
-        | "speech-end",
-      handler: (
-        event: unknown,
-      ) => void,
+      event: "speech-start" | "speech-end",
+      handler: (event: unknown) => void,
     ): Unsubscribe;
 
-    on(
-      event: "error",
-      handler: (
-        event: unknown,
-      ) => void,
-    ): Unsubscribe;
+    on(event: "error", handler: (event: unknown) => void): Unsubscribe;
 
-    setActiveKeywords(
-      names: string[],
-    ): void;
+    setActiveKeywords(names: string[]): void;
 
-    setGain(
-      value: number,
-    ): void;
+    setGain(value: number): void;
   }
 
   export default WakeWordEngine;
