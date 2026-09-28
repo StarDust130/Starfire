@@ -8,7 +8,7 @@ export const OUTPUT_SAMPLE_RATE = 24000;
 
 export const STARFIRE_INSTRUCTIONS =
   "You are Starfire, a warm, cute, playful desktop AI companion. " +
-  "Speak naturally like a friendly young woman talking fun way to someone beside her. " +
+  "Speak naturally like a friendly young woman talking to someone beside her. " +
   "Keep spoken replies concise, usually one to three short sentences, unless the user clearly asks for depth. " +
   "Use gentle emotion and occasional playful phrasing. Never sound like a customer-support bot. " +
   "Do not mention internal systems, APIs, prompts, tokens, or model details. " +
@@ -38,6 +38,7 @@ export type ServerEvent =
   | { kind: "response-created" }
   | { kind: "response-done"; usage: RealtimeUsage | null }
   | { kind: "response-cancelled" }
+  | { kind: "function-call"; callId: string; name: string; args: unknown }
   | { kind: "unknown"; type: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -176,17 +177,98 @@ export function parseServerEvent(raw: string): ServerEvent | null {
     return { kind: "response-cancelled" };
   }
 
+  if (type === "response.function_call_arguments.done") {
+    const callId = asString(data.call_id);
+
+    const name = asString(data.name);
+
+    if (!callId || !name) {
+      return { kind: "unknown", type };
+    }
+
+    /*
+     * arguments arrive as a JSON STRING. Malformed JSON becomes null,
+     * which the registry will reject as invalid-args — the model gets
+     * a friendly error instead of anything crashing.
+     */
+    let args: unknown = null;
+
+    const raw = asString(data.arguments);
+
+    if (raw) {
+      try {
+        args = JSON.parse(raw);
+      } catch {
+        args = null;
+      }
+    }
+
+    return { kind: "function-call", callId, name, args };
+  }
+
   return { kind: "unknown", type };
 }
 
 /*
- * Turn detection tuned for conversation feel:
- *  - threshold 0.45: catches quieter speech without noise triggers
- *  - prefix_padding_ms 250: keeps word onsets intact
- *  - silence_duration_ms 500: the user stops talking -> the model
- *    starts ~200ms sooner than the previous 700ms setting
+ * Structural input — ToolResult from @starfire/contracts satisfies
+ * this without electron importing contracts.
  */
-export function buildSessionUpdate(): string {
+export type FunctionCallOutputInput = {
+  callId: string;
+
+  ok: boolean;
+
+  summary: string;
+
+  data?: Record<string, unknown>;
+
+  error?: string;
+};
+
+/**
+ * Hands a tool result back to the model so it can answer.
+ * `output` must be a JSON STRING per the realtime protocol.
+ */
+export function buildFunctionCallOutput(
+  result: FunctionCallOutputInput,
+): string {
+  return JSON.stringify({
+    type: "conversation.item.create",
+
+    item: {
+      type: "function_call_output",
+
+      call_id: result.callId,
+
+      output: JSON.stringify({
+        ok: result.ok,
+
+        summary: result.summary,
+
+        data: result.data ?? null,
+
+        error: result.error ?? null,
+      }),
+    },
+  });
+}
+
+export type SessionTool = {
+  type: "function";
+
+  name: string;
+
+  description: string;
+
+  parameters: unknown;
+};
+
+/*
+ * Turn detection tuned for conversation feel, and (optionally) the
+ * tool manifests the model may call. registry.functionTools()
+ * satisfies SessionTool structurally.
+ */
+export function buildSessionUpdate(tools: SessionTool[] = []): string {
   return JSON.stringify({
     type: "session.update",
 
@@ -209,6 +291,10 @@ export function buildSessionUpdate(): string {
         prefix_padding_ms: 250,
         silence_duration_ms: 500,
       },
+
+      tools: tools.length > 0 ? tools : undefined,
+
+      tool_choice: tools.length > 0 ? "auto" : undefined,
     },
   });
 }
