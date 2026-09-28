@@ -1,14 +1,22 @@
 import { execFile } from "node:child_process";
+
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
-import { app, BrowserWindow, ipcMain, screen, session } from "electron";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import {
+  app,
+  BrowserWindow,
+  globalShortcut,
+  ipcMain,
+  screen,
+  session,
+} from "electron";
 
 const DEV_SERVER_URL =
   process.env.STARFIRE_DEV_SERVER_URL ?? "http://127.0.0.1:1420";
+
+const GLOBAL_SHORTCUT = "Super+Z";
+
+const DRAG_POLL_MS = 16;
 
 const gotLock = app.requestSingleInstanceLock();
 
@@ -16,33 +24,74 @@ if (!gotLock) {
   app.quit();
 }
 
-interface DragPayload {
-  screenX: number;
-  screenY: number;
-}
-
-interface DragState {
-  startX: number;
-  startY: number;
-  windowX: number;
-  windowY: number;
-}
-
 let mainWindow: BrowserWindow | null = null;
-let dragState: DragState | null = null;
+
+type DragSession = {
+  offsetX: number;
+  offsetY: number;
+  timer: ReturnType<typeof setInterval>;
+};
+
+let dragSession: DragSession | null = null;
 
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
-function isDragPayload(value: unknown): value is DragPayload {
-  if (!value || typeof value !== "object") {
-    return false;
+/*
+ * Native window drag, owned by the main process.
+ * The renderer only signals grab/release; main follows the real
+ * OS cursor via polling, so DPI and mid-drag cursor-leave are moot.
+ */
+function stopDrag(): void {
+  if (!dragSession) {
+    return;
   }
 
-  const payload = value as Record<string, unknown>;
+  clearInterval(dragSession.timer);
 
-  return (
-    typeof payload.screenX === "number" && typeof payload.screenY === "number"
-  );
+  dragSession = null;
+}
+
+function startDrag(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  if (dragSession) {
+    return;
+  }
+
+  const cursor = screen.getCursorScreenPoint();
+
+  const position = mainWindow.getPosition();
+
+  const windowX = position[0] ?? 0;
+  const windowY = position[1] ?? 0;
+
+  const session: DragSession = {
+    offsetX: cursor.x - windowX,
+    offsetY: cursor.y - windowY,
+
+    timer: setInterval(() => {
+      if (!mainWindow || mainWindow.isDestroyed() || !dragSession) {
+        stopDrag();
+
+        return;
+      }
+
+      const point = screen.getCursorScreenPoint();
+
+      const nextX = point.x - dragSession.offsetX;
+      const nextY = point.y - dragSession.offsetY;
+
+      const current = mainWindow.getPosition();
+
+      if (nextX !== current[0] || nextY !== current[1]) {
+        mainWindow.setPosition(nextX, nextY, false);
+      }
+    }, DRAG_POLL_MS),
+  };
+
+  dragSession = session;
 }
 
 function hideFromTaskbar(): void {
@@ -80,7 +129,7 @@ function hideFromTaskbar(): void {
         return;
       }
 
-      const windowId = line.trim().split(/\s+/)[0];
+      const windowId = line.trim().split(/\s+/)[0] ?? "";
 
       execFile("wmctrl", ["-i", "-r", windowId, "-b", "add,skip_taskbar"]);
     });
@@ -89,8 +138,35 @@ function hideFromTaskbar(): void {
   apply();
 }
 
+function registerGlobalShortcut(): void {
+  globalShortcut.unregister(GLOBAL_SHORTCUT);
+
+  const registered = globalShortcut.register(GLOBAL_SHORTCUT, () => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return;
+    }
+
+    console.log("[main] ⌨️ Super+Z pressed.");
+
+    /*
+     * Real IPC into the renderer.
+     * Preload forwards this to React via onGlobalListen().
+     */
+    mainWindow.webContents.send("starfire:global-listen");
+  });
+
+  if (!registered) {
+    console.error(`[main] ❌ failed to register ${GLOBAL_SHORTCUT}`);
+
+    return;
+  }
+
+  console.log(`[main] ✅ Global shortcut registered: ${GLOBAL_SHORTCUT}`);
+}
+
 function createWindow(): void {
   const display = screen.getPrimaryDisplay();
+
   const workArea = display.workArea;
 
   const width = 280;
@@ -102,38 +178,67 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     width,
     height,
+
     x,
     y,
 
     frame: false,
+
     transparent: true,
+
     hasShadow: false,
+
     roundedCorners: false,
+
     backgroundColor: "#00000000",
 
     focusable: true,
+
     skipTaskbar: true,
+
     alwaysOnTop: true,
+
     resizable: false,
+
     movable: true,
 
     show: false,
 
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
+
       contextIsolation: true,
+
       nodeIntegration: false,
+
       sandbox: true,
+
       backgroundThrottling: false,
     },
   });
 
   mainWindow.setAlwaysOnTop(true, "floating");
+
   mainWindow.setVisibleOnAllWorkspaces(true);
+
+  /*
+   * Safety net: a physical mouse-up always ends the drag,
+   * even if the renderer never sees the pointer event.
+   */
+  mainWindow.webContents.on("input-event", (_event, input) => {
+    if (dragSession && input.type === "mouseUp") {
+      stopDrag();
+    }
+  });
+
+  mainWindow.on("blur", () => {
+    stopDrag();
+  });
 
   mainWindow.on("closed", () => {
     mainWindow = null;
-    dragState = null;
+
+    stopDrag();
   });
 
   mainWindow.webContents.on("did-finish-load", () => {
@@ -142,16 +247,17 @@ function createWindow(): void {
     }
 
     mainWindow.show();
+
     hideFromTaskbar();
 
-    console.log("[main] Starfire window shown.");
+    console.log("[main] 🌟 Starfire window shown.");
   });
 
   mainWindow.webContents.on(
     "did-fail-load",
     (_event, errorCode, errorDescription) => {
       console.error(
-        "[main] renderer load failed:",
+        "[main] ❌ renderer load failed:",
         errorCode,
         errorDescription,
       );
@@ -167,38 +273,21 @@ function createWindow(): void {
   setTimeout(hideFromTaskbar, 1200);
 }
 
-ipcMain.on("starfire:drag-start", (_event, payload: unknown) => {
-  if (!mainWindow || !isDragPayload(payload)) {
-    return;
-  }
-
-  const [windowX, windowY] = mainWindow.getPosition();
-
-  dragState = {
-    startX: payload.screenX,
-    startY: payload.screenY,
-    windowX,
-    windowY,
-  };
-});
-
-ipcMain.on("starfire:drag-move", (_event, payload: unknown) => {
-  if (!mainWindow || !dragState || !isDragPayload(payload)) {
-    return;
-  }
-
-  const x = dragState.windowX + payload.screenX - dragState.startX;
-
-  const y = dragState.windowY + payload.screenY - dragState.startY;
-
-  mainWindow.setPosition(Math.round(x), Math.round(y), false);
+ipcMain.on("starfire:drag-start", () => {
+  startDrag();
 });
 
 ipcMain.on("starfire:drag-end", () => {
-  dragState = null;
+  stopDrag();
 });
 
 app.whenReady().then(() => {
+  console.log(`[main] 🖥 platform: ${process.platform}`);
+
+  console.log(
+    `[main] 🪟 session: ${process.env.XDG_SESSION_TYPE ?? "unknown"}`,
+  );
+
   session.defaultSession.setPermissionRequestHandler(
     (_webContents, permission, callback) => {
       callback(permission === "media");
@@ -210,6 +299,8 @@ app.whenReady().then(() => {
   );
 
   createWindow();
+
+  registerGlobalShortcut();
 });
 
 app.on("second-instance", () => {
@@ -224,6 +315,12 @@ app.on("second-instance", () => {
   mainWindow.focus();
 });
 
+app.on("will-quit", () => {
+  globalShortcut.unregisterAll();
+
+  console.log("[main] 🛑 shortcuts released.");
+});
+
 app.on("window-all-closed", () => {
   app.quit();
 });
@@ -233,4 +330,5 @@ function shutdown(): void {
 }
 
 process.on("SIGINT", shutdown);
+
 process.on("SIGTERM", shutdown);
