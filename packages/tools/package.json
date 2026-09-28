@@ -13,12 +13,14 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc -b --pretty false"
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run --passWithNoTests"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vitest": "^5.0.1"
   },
   "dependencies": {
     "@starfire/contracts": "workspace:*"
-  },
-  "devDependencies": {
-    "typescript": "7.0.2"
   }
 }
