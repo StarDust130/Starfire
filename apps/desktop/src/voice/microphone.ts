@@ -3,24 +3,12 @@ export type MicrophoneDevice = {
   label: string;
 };
 
-function isProbablyRealMicrophone(
-  device: MicrophoneDevice,
-): boolean {
+function isProbablyRealMicrophone(device: MicrophoneDevice): boolean {
   const label = device.label.toLowerCase();
 
-  const blockedWords = [
-    "loopback",
-    "monitor",
-    "speaker",
-    "output",
-    "hdmi",
-  ];
+  const blockedWords = ["loopback", "monitor", "speaker", "output", "hdmi"];
 
-  if (
-    blockedWords.some((word) =>
-      label.includes(word),
-    )
-  ) {
+  if (blockedWords.some((word) => label.includes(word))) {
     return false;
   }
 
@@ -35,47 +23,34 @@ function isProbablyRealMicrophone(
     "built-in",
   ];
 
-  return microphoneWords.some((word) =>
-    label.includes(word),
-  );
+  return microphoneWords.some((word) => label.includes(word));
 }
 
-export async function getMicrophones(): Promise<
-  MicrophoneDevice[]
-> {
-  const permissionStream =
-    await navigator.mediaDevices.getUserMedia({
-      audio: true,
-    });
+export async function getMicrophones(): Promise<MicrophoneDevice[]> {
+  const permissionStream = await navigator.mediaDevices.getUserMedia({
+    audio: true,
+  });
 
   for (const track of permissionStream.getTracks()) {
     track.stop();
   }
 
-  const devices =
-    await navigator.mediaDevices.enumerateDevices();
+  const devices = await navigator.mediaDevices.enumerateDevices();
 
   return devices
     .filter(
-      (device) =>
-        device.kind === "audioinput" &&
-        device.deviceId.length > 0,
+      (device) => device.kind === "audioinput" && device.deviceId.length > 0,
     )
     .map((device) => ({
       id: device.deviceId,
-      label:
-        device.label ||
-        "Unknown microphone",
+      label: device.label || "Unknown microphone",
     }));
 }
 
 export function chooseMicrophone(
   devices: MicrophoneDevice[],
 ): MicrophoneDevice | null {
-  const preferred = devices.find(
-    (device) =>
-      isProbablyRealMicrophone(device),
-  );
+  const preferred = devices.find((device) => isProbablyRealMicrophone(device));
 
   return preferred ?? devices[0] ?? null;
 }
