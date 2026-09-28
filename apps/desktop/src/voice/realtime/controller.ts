@@ -109,34 +109,26 @@ const SILENT_RMS_THRESHOLD = 1e-6;
 
 const SILENT_CHUNK_LIMIT = 40;
 
-/*
- * ---------------------------------------------------
- * ECHO GUARD
- * ---------------------------------------------------
- * Chromium's echo cancellation only cancels WebRTC audio, NOT
- * AudioContext playback, so her voice leaks into the mic. While she
- * is speaking and for a short cooldown after she finishes, mic
- * audio below this RMS floor is NOT uploaded — the server never
- * hears her echo, so it can never commit a phantom turn, interrupt
- * itself, or answer silence. Real speech near the mic is far above
- * this floor.
- */
 const ECHO_UPLOAD_FLOOR = 0.045;
 
 const ECHO_COOLDOWN_MS = 1500;
 
-/*
- * After response.done, stay "assistant-speaking" until the playback
- * queue actually drains (her audible tail), bounded by this timeout.
- */
 const DRAIN_TIMEOUT_MS = 6000;
 
-/*
- * Only wait for drain when there is a meaningful tail left.
- */
 const MIN_DRAIN_WAIT_MS = 300;
 
-const FAIL_OPEN_SPEECH_FLOOR = 0.02;
+/*
+ * Transient connect failures (timeouts, network blips) get one
+ * automatic retry. Auth failures never retry.
+ */
+const CONNECT_RETRY_DELAY_MS = 400;
+
+/*
+ * One automatic reconnect when the socket dies mid-conversation
+ * (server 1011, network blip). The mic stays open; only the socket
+ * and playback pipeline are rebuilt.
+ */
+const RECONNECT_DELAY_MS = 300;
 
 const MIC_VARIANTS: MicVariant[] = [
   { processing: true, useDeviceId: true },
@@ -153,15 +145,6 @@ function canSendFrom(state: VoiceStateName): boolean {
   );
 }
 
-/*
- * Single authoritative voice controller. One state machine, one
- * generation counter, one connection id — no scattered booleans.
- *
- * Interruption model: ONLY the server VAD interrupts her (it hears
- * echo-free audio thanks to the upload floor, so its decisions are
- * trustworthy and instant). The local gate only drives state UI and
- * cost gating, never playback cuts.
- */
 export class VoiceController {
   readonly mouth = { raw: 0 };
 
@@ -188,6 +171,8 @@ export class VoiceController {
   private playback: PlaybackPipeline | null = null;
 
   private resampler: LinearResampler | null = null;
+
+  private captureReady = false;
 
   private gate = new SpeechGate();
 
@@ -247,6 +232,10 @@ export class VoiceController {
 
   private echoCooldownUntil = 0;
 
+  private reconnectUsed = false;
+
+  private latencySamples: number[] = [];
+
   constructor(private readonly deps: VoiceControllerDeps) {}
 
   getState(): VoiceSnapshot {
@@ -305,6 +294,80 @@ export class VoiceController {
       this.stateName === "closing" ||
       this.stateName === "idle"
     );
+  }
+
+  private subscribeBridge(): void {
+    const bridge = this.deps.bridge;
+
+    if (!bridge) {
+      return;
+    }
+
+    this.unsubs.push(bridge.onEvent((event) => this.handleBridgeEvent(event)));
+
+    this.unsubs.push(bridge.onAudio((pcm) => this.handlePcm(pcm)));
+  }
+
+  private teardownSocketResources(): void {
+    for (const unsub of this.unsubs) {
+      unsub();
+    }
+
+    this.unsubs = [];
+
+    const playback = this.playback;
+
+    this.playback = null;
+
+    void playback?.stop();
+
+    this.mouth.raw = 0;
+
+    this.dropStaleAudio = false;
+
+    this.loggedFirstAudio = false;
+
+    this.awaitingDrain = false;
+
+    if (this.drainTimer) {
+      clearTimeout(this.drainTimer);
+
+      this.drainTimer = null;
+    }
+  }
+
+  /*
+   * Connect with one automatic retry for transient failures.
+   * Authentication failures never retry.
+   */
+  private async connectBridge(): Promise<VoiceStartResult> {
+    const bridge = this.deps.bridge;
+
+    if (!bridge) {
+      return {
+        ok: false,
+        error: "Voice bridge is unavailable.",
+        fatal: true,
+      };
+    }
+
+    let result = await bridge.start();
+
+    if (!result.ok && !result.fatal) {
+      this.log(`connect failed (${result.error}) — retrying once...`);
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, CONNECT_RETRY_DELAY_MS);
+      });
+
+      if (this.aborted()) {
+        return result;
+      }
+
+      result = await bridge.start();
+    }
+
+    return result;
   }
 
   async start(source?: string): Promise<void> {
@@ -390,6 +453,12 @@ export class VoiceController {
 
     this.echoCooldownUntil = 0;
 
+    this.reconnectUsed = false;
+
+    this.latencySamples = [];
+
+    this.captureReady = false;
+
     this.chosenDeviceId = this.deps.getDeviceId?.();
 
     if (this.chosenDeviceId) {
@@ -399,6 +468,8 @@ export class VoiceController {
     }
 
     let inputRate = VOICE_INPUT_RATE;
+
+    let micFailed = false;
 
     const mic = this.deps.createMic(
       {
@@ -410,11 +481,46 @@ export class VoiceController {
       this.chosenDeviceId,
     );
 
-    try {
-      inputRate = await mic.start();
-    } catch (error) {
-      console.error("[Starfire Voice] microphone failed:", error);
+    /*
+     * PARALLEL STARTUP: mic, output pipeline, and the websocket all
+     * start at once. Nothing waits for anything it does not need.
+     */
+    const micPromise = mic.start().then(
+      (rate) => {
+        inputRate = rate;
+      },
+      (error) => {
+        micFailed = true;
 
+        console.error("[Starfire Voice] microphone failed:", error);
+      },
+    );
+
+    this.playback = this.deps.createPlayback({
+      onLevel: (rms) => {
+        this.mouth.raw = mouthFromRms(rms);
+      },
+
+      onDiagnostic: (message) => this.log(message),
+
+      onDrained: () => this.handlePlaybackDrained(),
+    });
+
+    void this.playback.warmup();
+
+    this.subscribeBridge();
+
+    const connect = await this.connectBridge();
+
+    await micPromise;
+
+    if (this.aborted()) {
+      void mic.stop();
+
+      return;
+    }
+
+    if (micFailed) {
       void mic.stop();
 
       this.message = "Microphone is unavailable.";
@@ -426,8 +532,20 @@ export class VoiceController {
       return;
     }
 
-    if (this.aborted()) {
+    if (!connect.ok) {
       void mic.stop();
+
+      this.message = connect.error;
+
+      this.log(`start failed: ${connect.error}`);
+
+      if (connect.fatal) {
+        this.dispatch({ type: "fatal-error" });
+      } else {
+        this.dispatch({ type: "stop" });
+      }
+
+      this.cleanup();
 
       return;
     }
@@ -438,6 +556,8 @@ export class VoiceController {
       inputRate === VOICE_INPUT_RATE
         ? null
         : new LinearResampler(inputRate, VOICE_INPUT_RATE);
+
+    this.captureReady = true;
 
     this.log(
       `capture rate=${inputRate}Hz` +
@@ -460,65 +580,7 @@ export class VoiceController {
 
     this.dispatch({ type: "mic-ready" });
 
-    this.playback = this.deps.createPlayback({
-      onLevel: (rms) => {
-        this.mouth.raw = mouthFromRms(rms);
-      },
-
-      onDiagnostic: (message) => this.log(message),
-
-      onDrained: () => this.handlePlaybackDrained(),
-    });
-
-    /*
-     * Pre-warm the output graph DURING connection so her first word
-     * is not delayed by AudioContext/worklet startup.
-     */
-    void this.playback.warmup();
-
-    const bridge = this.deps.bridge;
-
-    this.unsubs.push(bridge.onEvent((event) => this.handleBridgeEvent(event)));
-
-    this.unsubs.push(bridge.onAudio((pcm) => this.handlePcm(pcm)));
-
-    let result: VoiceStartResult;
-
-    try {
-      result = await bridge.start();
-    } catch (error) {
-      console.error("[Starfire Voice] start failed:", error);
-
-      this.message = "Voice connection failed.";
-
-      this.dispatch({ type: "stop" });
-
-      this.cleanup();
-
-      return;
-    }
-
-    if (this.aborted()) {
-      return;
-    }
-
-    if (!result.ok) {
-      this.message = result.error;
-
-      this.log(`start failed: ${result.error}`);
-
-      if (result.fatal) {
-        this.dispatch({ type: "fatal-error" });
-      } else {
-        this.dispatch({ type: "stop" });
-      }
-
-      this.cleanup();
-
-      return;
-    }
-
-    this.conn = result.conn;
+    this.conn = connect.conn;
 
     this.dispatch({ type: "session-ready" });
 
@@ -672,7 +734,7 @@ export class VoiceController {
   }
 
   private handleMicChunk(chunk: { samples: Float32Array; rms: number }): void {
-    if (this.disposed) {
+    if (this.disposed || !this.captureReady) {
       return;
     }
 
@@ -762,8 +824,7 @@ export class VoiceController {
     /*
      * While she is audible: upload ONLY audio above the echo floor so
      * the server VAD can interrupt on real speech but never on her
-     * own voice. Local playback is never touched here — the server
-     * VAD is the sole interrupter.
+     * own voice.
      */
     if (this.stateName === "assistant-speaking") {
       if (chunk.rms >= ECHO_UPLOAD_FLOOR) {
@@ -774,7 +835,7 @@ export class VoiceController {
     }
 
     /*
-     * Just after she finished: block her speaker echo from creating
+     * Just after she finished: block speaker echo from creating
      * phantom turns, while real speech passes straight through.
      */
     if (now < this.echoCooldownUntil) {
@@ -932,10 +993,6 @@ export class VoiceController {
           buffered > MIN_DRAIN_WAIT_MS &&
           this.stateName === "assistant-speaking"
         ) {
-          /*
-           * She is still audibly playing her tail: stay in
-           * assistant-speaking until the queue drains.
-           */
           this.awaitingDrain = true;
 
           this.log("response complete — waiting for playback to drain");
@@ -985,14 +1042,26 @@ export class VoiceController {
       }
 
       case "closed": {
+        if (this.disposed || this.stopRequested) {
+          break;
+        }
+
         if (canSendFrom(this.stateName) || this.stateName === "starting") {
-          this.message = "Voice connection closed.";
+          if (!this.reconnectUsed) {
+            this.reconnectUsed = true;
 
-          this.log("connection lost");
+            this.log("connection lost — reconnecting automatically (1/1)");
 
-          this.dispatch({ type: "stop" });
+            void this.reconnect();
+          } else {
+            this.message = "Voice connection closed.";
 
-          this.cleanup();
+            this.log("connection lost (reconnect already used)");
+
+            this.dispatch({ type: "stop" });
+
+            this.cleanup();
+          }
         }
 
         break;
@@ -1001,6 +1070,78 @@ export class VoiceController {
       default:
         break;
     }
+  }
+
+  /*
+   * One-shot mid-conversation reconnect: keeps the mic alive, rebuilds
+   * only the socket and the playback pipeline.
+   */
+  private async reconnect(): Promise<void> {
+    this.teardownSocketResources();
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, RECONNECT_DELAY_MS);
+    });
+
+    if (this.disposed || this.stopRequested) {
+      this.dispatch({ type: "stop" });
+
+      this.cleanup();
+
+      return;
+    }
+
+    const connect = await this.connectBridge();
+
+    if (this.disposed || this.stopRequested) {
+      this.dispatch({ type: "stop" });
+
+      this.cleanup();
+
+      return;
+    }
+
+    if (!connect.ok) {
+      this.message = connect.error;
+
+      this.log(`reconnect failed: ${connect.error}`);
+
+      this.dispatch({ type: "stop" });
+
+      this.cleanup();
+
+      return;
+    }
+
+    this.playback = this.deps.createPlayback({
+      onLevel: (rms) => {
+        this.mouth.raw = mouthFromRms(rms);
+      },
+
+      onDiagnostic: (message) => this.log(message),
+
+      onDrained: () => this.handlePlaybackDrained(),
+    });
+
+    void this.playback.warmup();
+
+    this.subscribeBridge();
+
+    this.conn = connect.conn;
+
+    this.audioChunks = 0;
+
+    this.audioBufferedMs = 0;
+
+    this.turnEndAt = 0;
+
+    this.turnLatencyLogged = false;
+
+    this.dispatch({ type: "session-ready" });
+
+    this.scheduleIdle(VOICE_IDLE_AFTER_ACTIVATION_MS);
+
+    this.log("reconnected — session ready (listening)");
   }
 
   private handlePlaybackDrained(): void {
@@ -1022,16 +1163,8 @@ export class VoiceController {
 
     this.awaitingDrain = false;
 
-    /*
-     * Echo cooldown starts when her audio ACTUALLY stops (drain), not
-     * when generation finished.
-     */
     this.echoCooldownUntil = Date.now() + ECHO_COOLDOWN_MS;
 
-    /*
-     * Fresh gate after her turn: the adaptive floor spent her speech
-     * absorbing echo; a clean slate keeps quiet speech responsive.
-     */
     this.gate = new SpeechGate();
 
     this.dispatch({ type: "response-done" });
@@ -1062,12 +1195,16 @@ export class VoiceController {
       this.loggedFirstAudio = true;
 
       this.log("playback: assistant audio streaming (24 kHz PCM)");
-    }
 
-    if (this.turnEndAt > 0 && !this.turnLatencyLogged) {
-      this.turnLatencyLogged = true;
+      if (this.turnEndAt > 0 && !this.turnLatencyLogged) {
+        this.turnLatencyLogged = true;
 
-      this.log(`⏱ turn -> first audio: ${Date.now() - this.turnEndAt}ms`);
+        const sample = Date.now() - this.turnEndAt;
+
+        this.latencySamples.push(sample);
+
+        this.log(`⏱ turn -> first audio: ${sample}ms`);
+      }
     }
 
     this.audioChunks += 1;
@@ -1077,6 +1214,22 @@ export class VoiceController {
     this.dispatch({ type: "response-audio" });
 
     this.playback?.push(pcm);
+  }
+
+  private logLatencySummary(): void {
+    if (this.latencySamples.length === 0) {
+      return;
+    }
+
+    const sorted = [...this.latencySamples].sort((a, b) => a - b);
+
+    const pick = (q: number): number =>
+      sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
+
+    this.log(
+      `⏱ latency summary (n=${sorted.length}): ` +
+        `p50=${pick(0.5)}ms, p95=${pick(0.95)}ms, best=${sorted[0]}ms, worst=${sorted[sorted.length - 1]}ms`,
+    );
   }
 
   private cleanup(): void {
@@ -1103,6 +1256,8 @@ export class VoiceController {
     }
 
     this.awaitingDrain = false;
+
+    this.logLatencySummary();
 
     const gen = this.gen;
 
@@ -1133,6 +1288,8 @@ export class VoiceController {
     this.localSpeech = false;
 
     this.resampler = null;
+
+    this.captureReady = false;
 
     this.preRoll.clear();
 
