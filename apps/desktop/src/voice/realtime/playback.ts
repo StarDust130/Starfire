@@ -1,4 +1,4 @@
-import { computeRms, LinearResampler, pcm16ToFloat } from "./audio";
+import { LinearResampler, pcm16ToFloat } from "./audio";
 
 import { resolveWorkletUrl } from "./microphone";
 
@@ -24,9 +24,12 @@ export type PlaybackPipelineFactory = (handlers: {
 
 /*
  * Message contract with play-worklet.js:
- *   { pcm: Float32Array }  -> audio
- *   { type: "clear" }      -> flush queue instantly (barge-in)
- *   { type: "drained" }    <- queue ran empty after playing
+ *   { pcm: Float32Array }   -> audio
+ *   { type: "clear" }       -> flush queue instantly (barge-in)
+ *   { type: "level", rms }  <- real-time output loudness (play-time,
+ *                              NOT push-time — this is what keeps
+ *                              her mouth moving for the whole reply)
+ *   { type: "drained" }     <- queue ran empty after playing
  */
 export function buildPlaybackMessage(samples: Float32Array): {
   pcm: Float32Array;
@@ -83,10 +86,16 @@ export function createPlaybackPipeline(handlers: {
     });
 
     node.port.onmessage = (event: MessageEvent) => {
-      const data = event.data as { type?: string };
+      const data = event.data as { type?: string; rms?: number };
 
       if (data?.type === "drained") {
         handlers.onDrained?.();
+
+        return;
+      }
+
+      if (data?.type === "level" && typeof data.rms === "number") {
+        handlers.onLevel(data.rms);
       }
     };
 
@@ -122,8 +131,6 @@ export function createPlaybackPipeline(handlers: {
         const source = pcm16ToFloat(new Int16Array(pcm));
 
         const samples = resampler ? resampler.process(source) : source;
-
-        handlers.onLevel(computeRms(samples));
 
         const copy = new Float32Array(samples);
 
