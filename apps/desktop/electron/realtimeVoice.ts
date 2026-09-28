@@ -1,10 +1,13 @@
-import { ipcMain, type BrowserWindow } from "electron";
-
+import { AgentRunner } from "@starfire/core";
+import { createDefaultRegistry } from "@starfire/tools";
+import { type BrowserWindow, ipcMain } from "electron";
 import WebSocket from "ws";
-
+import { createElectronPorts } from "./agent/electron-ports.js";
 import {
   buildAudioAppend,
+  buildFunctionCallOutput,
   buildResponseCancel,
+  buildResponseCreate,
   buildSessionUpdate,
   parseServerEvent,
   REALTIME_MODEL,
@@ -23,9 +26,19 @@ type PendingStart = {
   timer: ReturnType<typeof setTimeout>;
 };
 
+type FunctionCallEvent = {
+  callId: string;
+
+  name: string;
+
+  args: unknown;
+};
+
 /*
- * Owns the EmpirioLabs realtime WebSocket and the API key.
- * The renderer only ever sees validated events and raw PCM audio.
+ * Owns the EmpirioLabs realtime WebSocket, the API key, and now the
+ * AGENT: model tool calls come in, run through the ToolRegistry with
+ * real OS ports, and the results are handed back so Starfire can
+ * speak the outcome.
  */
 export class RealtimeVoiceBridge {
   private socket: WebSocket | null = null;
@@ -48,7 +61,32 @@ export class RealtimeVoiceBridge {
 
   private audioBytes = 0;
 
-  constructor(private readonly getWindow: () => BrowserWindow | null) {}
+  /*
+   * Agent wiring. sawToolCall tracks whether THIS response turn used
+   * a tool (reset on response.created); in-flight/follow-up handle
+   * the case where response.done arrives while a tool is still
+   * running — the spoken follow-up is requested only after every
+   * tool result has been delivered.
+   */
+  private readonly registry: ReturnType<typeof createDefaultRegistry>;
+
+  private readonly runner: AgentRunner;
+
+  private sawToolCall = false;
+
+  private inFlightTools = 0;
+
+  private followUpQueued = false;
+
+  constructor(private readonly getWindow: () => BrowserWindow | null) {
+    this.registry = createDefaultRegistry(createElectronPorts());
+
+    this.runner = new AgentRunner({
+      executor: this.registry,
+
+      log: (message) => console.log(`[Starfire Voice] ${message}`),
+    });
+  }
 
   register(): void {
     ipcMain.handle("starfire-voice:start", () => this.handleStart());
@@ -226,7 +264,8 @@ export class RealtimeVoiceBridge {
           `[Starfire Voice] session ready (voice=${String(event.info.voice ?? "?")}, ` +
             `in=${String(event.info.inputAudioFormat ?? "?")}, ` +
             `out=${String(event.info.outputAudioFormat ?? "?")}, ` +
-            `vad=${String(event.info.turnDetection ?? "off")})`,
+            `vad=${String(event.info.turnDetection ?? "off")}, ` +
+            `tools=${this.registry.names().length})`,
         );
 
         this.resolvePending();
@@ -235,7 +274,11 @@ export class RealtimeVoiceBridge {
 
         this.sessionConfigured = true;
 
-        this.send(buildSessionUpdate());
+        /*
+         * Tell the model WHICH tools exist. The manifests are the
+         * single source of truth shared with the registry.
+         */
+        this.send(buildSessionUpdate(this.registry.functionTools()));
 
         return;
       }
@@ -262,10 +305,10 @@ export class RealtimeVoiceBridge {
 
       this.audioBytes = 0;
 
-      /*
-       * Forwarded so the renderer knows when a fresh response begins
-       * after an interrupt — stale audio is dropped until this point.
-       */
+      this.sawToolCall = false;
+
+      this.followUpQueued = false;
+
       this.emit({ kind: "response-created" });
 
       return;
@@ -289,6 +332,12 @@ export class RealtimeVoiceBridge {
 
         this.emitAudio(pcm);
       }
+
+      return;
+    }
+
+    if (event.kind === "function-call") {
+      void this.handleFunctionCall(event);
 
       return;
     }
@@ -333,6 +382,18 @@ export class RealtimeVoiceBridge {
 
       this.emit({ kind: "response-done", usage: event.usage });
 
+      /*
+       * Tool round: once every result is delivered, ask the model to
+       * speak the outcome.
+       */
+      if (this.inFlightTools > 0) {
+        this.followUpQueued = true;
+      } else if (this.sawToolCall) {
+        this.sawToolCall = false;
+
+        this.send(buildResponseCreate());
+      }
+
       return;
     }
 
@@ -356,6 +417,62 @@ export class RealtimeVoiceBridge {
       }
 
       return;
+    }
+  }
+
+  private async handleFunctionCall(event: FunctionCallEvent): Promise<void> {
+    this.sawToolCall = true;
+
+    this.inFlightTools += 1;
+
+    this.emit({ kind: "tool-call", name: event.name });
+
+    console.log(
+      `[Starfire Voice] 🔧 tool call: ${event.name} (id=${event.callId})`,
+    );
+
+    const results = await this.runner.run(
+      [
+        {
+          callId: event.callId,
+
+          name: event.name,
+
+          args: event.args,
+        },
+      ],
+
+      {
+        log: (message) => console.log(`[Starfire Voice] ${message}`),
+      },
+    );
+
+    this.inFlightTools -= 1;
+
+    const result = results[0];
+
+    if (!result) {
+      return;
+    }
+
+    this.emit({
+      kind: "tool-result",
+
+      ok: result.ok,
+
+      summary: result.summary,
+    });
+
+    this.send(buildFunctionCallOutput(result));
+
+    console.log(
+      `[Starfire Voice] 🔧 ${result.ok ? "ok" : "failed"}: ${result.summary}`,
+    );
+
+    if (this.inFlightTools === 0 && this.followUpQueued) {
+      this.followUpQueued = false;
+
+      this.send(buildResponseCreate());
     }
   }
 
@@ -389,6 +506,12 @@ export class RealtimeVoiceBridge {
     const socket = this.socket;
 
     this.socket = null;
+
+    this.sawToolCall = false;
+
+    this.followUpQueued = false;
+
+    this.inFlightTools = 0;
 
     if (!socket) {
       return;
