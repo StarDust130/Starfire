@@ -2,6 +2,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import StarfireScene from "./components/StarfireScene";
 
+import { createMicPipeline } from "./voice/realtime/microphone";
+
+import { createPlaybackPipeline } from "./voice/realtime/playback";
+
+import {
+  VoiceController,
+  type VoiceSnapshot,
+} from "./voice/realtime/controller";
+
 import { chooseMicrophone, getMicrophones } from "./voice/microphone";
 
 import { createOnnxWakeWord, type WakeEngine } from "./voice/onnxWakeWord";
@@ -13,18 +22,31 @@ export default function App() {
 
   const startingRef = useRef(false);
 
+  const controllerRef = useRef<VoiceController | null>(null);
+
+  /*
+   * The device the wake engine successfully captures. Conversation
+   * mode reuses the same exact device instead of the system default.
+   */
+  const micIdRef = useRef<string | undefined>(undefined);
+
   const [error, setError] = useState<string | null>(null);
+
+  const [voice, setVoice] = useState<VoiceSnapshot>({
+    state: "idle",
+    message: null,
+  });
 
   const activateListening = useCallback((source: InteractionSource): void => {
     console.log(`[Starfire] 💗 listening activated by ${source}`);
 
     window.dispatchEvent(
       new CustomEvent("starfire:listen", {
-        detail: {
-          source,
-        },
+        detail: { source },
       }),
     );
+
+    void controllerRef.current?.start(source);
   }, []);
 
   const startWakeEngine = useCallback(async (): Promise<void> => {
@@ -45,17 +67,15 @@ export default function App() {
         throw new Error("No microphone found.");
       }
 
+      micIdRef.current = microphone.id;
+
       console.log(`[Starfire] 🎙️ microphone: ${microphone.label}`);
 
       const engine = await createOnnxWakeWord();
 
       engineRef.current = engine;
 
-      console.log("[Starfire] 🧠 loading wake-word engine...");
-
       await engine.load();
-
-      console.log("[Starfire] 🎧 starting wake-word listener...");
 
       await engine.start(microphone.id, (word, probability) => {
         if (word.toLowerCase() !== "starfire") {
@@ -79,21 +99,28 @@ export default function App() {
     }
   }, [activateListening]);
 
+  const stopWakeEngine = useCallback(async (): Promise<void> => {
+    const engine = engineRef.current;
+
+    engineRef.current = null;
+
+    startingRef.current = false;
+
+    if (engine) {
+      console.log("[Starfire] 🛑 wake-word listener paused for conversation.");
+
+      await engine.stop();
+    }
+  }, []);
+
   useEffect(() => {
     void startWakeEngine();
 
-    /*
-     * Super+Z from the main process (works while unfocused).
-     */
     const removeGlobalListen =
       window.starfireDesktop?.onGlobalListen(() => {
         activateListening("hotkey");
       }) ?? null;
 
-    /*
-     * Super+Z while the window has focus.
-     * Ctrl+Z is deliberately ignored.
-     */
     const handleKeyDown = (event: KeyboardEvent): void => {
       const isSuperZ =
         event.metaKey &&
@@ -113,10 +140,54 @@ export default function App() {
 
     window.addEventListener("keydown", handleKeyDown);
 
+    const controller = new VoiceController({
+      bridge: window.starfireVoice ?? null,
+
+      createMic: createMicPipeline,
+
+      createPlayback: createPlaybackPipeline,
+
+      onStopWakeEngine: stopWakeEngine,
+
+      onStartWakeEngine: () => {
+        void startWakeEngine();
+      },
+
+      getDeviceId: () => micIdRef.current,
+
+      onLog: (message) => {
+        if (window.starfireVoice) {
+          window.starfireVoice.log(message);
+        } else {
+          console.log(`[Starfire Voice] ${message}`);
+        }
+      },
+    });
+
+    controllerRef.current = controller;
+
+    const unsubscribe = controller.subscribe((snapshot) => {
+      setVoice(snapshot);
+    });
+
+    const handlePageHide = (): void => {
+      controller.stop("pagehide");
+    };
+
+    window.addEventListener("pagehide", handlePageHide);
+
     return () => {
       removeGlobalListen?.();
 
       window.removeEventListener("keydown", handleKeyDown);
+
+      window.removeEventListener("pagehide", handlePageHide);
+
+      unsubscribe();
+
+      controller.dispose();
+
+      controllerRef.current = null;
 
       const engine = engineRef.current;
 
@@ -124,7 +195,24 @@ export default function App() {
 
       void engine?.stop();
     };
-  }, [activateListening, startWakeEngine]);
+  }, [activateListening, startWakeEngine, stopWakeEngine]);
+
+  /*
+   * Auto-clear transient voice error bubbles.
+   */
+  useEffect(() => {
+    if (!voice.message) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      controllerRef.current?.clearMessage();
+    }, 6000);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [voice.message]);
 
   const handleDragStart = useCallback((): void => {
     window.starfireDesktop?.startDrag();
@@ -138,6 +226,9 @@ export default function App() {
     <main className="starfire-root">
       <StarfireScene
         error={error}
+        voiceState={voice.state}
+        voiceError={voice.message}
+        voiceMouth={controllerRef.current?.mouth ?? { raw: 0 }}
         onActivate={activateListening}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
