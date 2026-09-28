@@ -1,15 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
+import type { PlaybackPipeline } from "./controller";
 import {
-  VoiceController,
   VOICE_IDLE_AFTER_RESPONSE_MS,
   type VoiceBridge,
+  VoiceController,
   type VoiceRendererEvent,
 } from "./controller";
-
 import type { MicPipeline, MicVariant } from "./microphone";
-
-import type { PlaybackPipeline } from "./controller";
 
 type EmitEvent = (event: VoiceRendererEvent) => void;
 
@@ -828,6 +825,60 @@ describe("VoiceController", () => {
     await vi.advanceTimersByTimeAsync(400);
 
     expect(controller.getState().state).toBe("idle");
+  });
+
+  it("tool round: 15s safety idle, no premature close, follow-up plays", async () => {
+    const { deps, emitEvent, onAudioCall, emitDrained } = makeDeps();
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    emitEvent({ conn: 1, kind: "tool-call", name: "open_app" });
+
+    await vi.advanceTimersByTimeAsync(8000);
+
+    expect(controller.getState().state).toBe("listening");
+
+    emitEvent({ conn: 1, kind: "response-done", usage: null });
+
+    await vi.advanceTimersByTimeAsync(6000);
+
+    expect(controller.getState().state).toBe("listening");
+
+    emitEvent({ conn: 1, kind: "response-created" });
+
+    emitEvent({ conn: 1, kind: "speech-started" });
+
+    emitEvent({ conn: 1, kind: "speech-stopped" });
+
+    onAudioCall()(new ArrayBuffer(48 * 400));
+
+    expect(controller.getState().state).toBe("assistant-speaking");
+
+    emitEvent({ conn: 1, kind: "response-done", usage: null });
+
+    emitDrained();
+
+    expect(controller.getState().state).toBe("listening");
+  });
+
+  it("tool-result events never disturb the state", async () => {
+    const { deps, emitEvent } = makeDeps();
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    emitEvent({ conn: 1, kind: "tool-call", name: "clipboard" });
+
+    emitEvent({ conn: 1, kind: "tool-result", ok: true, summary: "Copied." });
+
+    expect(controller.getState().state).toBe("listening");
   });
 });
 
