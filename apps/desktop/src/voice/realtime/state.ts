@@ -45,10 +45,14 @@ export function transitionVoiceState(
     case "mic-ready":
       return current === "starting" ? "connecting" : current;
 
+    /*
+     * A fresh socket is ready. Valid from the normal startup states
+     * AND from any mid-conversation state, because an unexpected
+     * socket drop triggers an automatic reconnect without leaving
+     * the conversation.
+     */
     case "session-ready":
-      return current === "starting" || current === "connecting"
-        ? "listening"
-        : current;
+      return isActive(current) ? "listening" : current;
 
     case "local-speech-start":
     case "server-speech-start":
@@ -62,11 +66,6 @@ export function transitionVoiceState(
         ? "thinking"
         : current;
 
-    /*
-     * Audio can legitimately arrive while the server is still
-     * finalizing turn state (fast responses), so assistant audio
-     * starts speaking from thinking, listening, or user-speaking.
-     */
     case "response-audio":
       return current === "thinking" ||
         current === "listening" ||
