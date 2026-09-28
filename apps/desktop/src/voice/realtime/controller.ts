@@ -26,6 +26,8 @@ export type VoiceRendererEvent = {
   | { kind: "speech-started" }
   | { kind: "speech-stopped" }
   | { kind: "response-created" }
+  | { kind: "tool-call"; name: string }
+  | { kind: "tool-result"; ok: boolean; summary: string }
   | { kind: "audio-transcript-delta"; delta: string }
   | { kind: "input-transcript"; text: string }
   | { kind: "response-done"; usage: Record<string, number> | null }
@@ -122,20 +124,24 @@ const CONNECT_RETRY_DELAY_MS = 400;
 
 const RECONNECT_DELAY_MS = 300;
 
-/*
- * ---------------------------------------------------
- * LOCAL FALLBACK BARGE-IN
- * ---------------------------------------------------
- * Server VAD is the primary interrupter, but if user audio never
- * reaches it (very quiet speech at the echo floor boundary), she
- * would otherwise talk on forever. Sustained speech well above the
- * echo floor (~300ms) clears her playback and cancels the response
- * server-side. Her own speaker echo cannot sustain this level, so
- * it cannot false-trigger.
- */
 const LOCAL_BARGE_FLOOR = 0.09;
 
 const LOCAL_BARGE_FRAMES = 18;
+
+/*
+ * Safety net while a tool runs in the main process (tools may take
+ * up to their own 10s timeout). Armed on the tool-call event and on
+ * the tool round's response.done.
+ */
+const TOOL_ROUND_IDLE_MS = 15000;
+
+/*
+ * Stale-audio drop window. After an interrupt, in-flight chunks of
+ * the dead response arrive within milliseconds. If the flag were to
+ * stick (server skipping response.cancelled etc.), this window
+ * guarantees she can never go permanently mute.
+ */
+const STALE_DROP_WINDOW_MS = 3000;
 
 const MIC_VARIANTS: MicVariant[] = [
   { processing: true, useDeviceId: true },
@@ -152,17 +158,6 @@ function canSendFrom(state: VoiceStateName): boolean {
   );
 }
 
-/*
- * Single authoritative voice controller. One state machine, one
- * generation counter, one connection id — no scattered booleans.
- *
- * Interrupt model:
- *  - Server VAD interrupts (primary, instant).
- *  - Local fallback interrupts on sustained loud speech.
- *  - After ANY interrupt, stale audio of the dead response is dropped
- *    until a NEW response.created arrives. Cancelling or the user
- *    pausing does NOT re-accept the dead response's in-flight audio.
- */
 export class VoiceController {
   readonly mouth = { raw: 0 };
 
@@ -232,11 +227,9 @@ export class VoiceController {
 
   private silenceFatal = false;
 
-  /*
-   * True from the moment an interrupt happens until the NEXT
-   * response.created. All assistant audio is dropped while true.
-   */
   private interruptedResponse = false;
+
+  private interruptedResponseAt = 0;
 
   private staleDropLogged = false;
 
@@ -257,6 +250,8 @@ export class VoiceController {
   private reconnectUsed = false;
 
   private latencySamples: number[] = [];
+
+  private toolRoundActive = false;
 
   constructor(private readonly deps: VoiceControllerDeps) {}
 
@@ -347,13 +342,7 @@ export class VoiceController {
 
     this.loggedFirstAudio = false;
 
-    this.awaitingDrain = false;
-
-    if (this.drainTimer) {
-      clearTimeout(this.drainTimer);
-
-      this.drainTimer = null;
-    }
+    this.cancelDrainWait();
   }
 
   private async connectBridge(): Promise<VoiceStartResult> {
@@ -453,6 +442,8 @@ export class VoiceController {
 
     this.interruptedResponse = false;
 
+    this.interruptedResponseAt = 0;
+
     this.staleDropLogged = false;
 
     this.loudStreak = 0;
@@ -474,6 +465,8 @@ export class VoiceController {
     this.latencySamples = [];
 
     this.captureReady = false;
+
+    this.toolRoundActive = false;
 
     this.chosenDeviceId = this.deps.getDeviceId?.();
 
@@ -686,6 +679,34 @@ export class VoiceController {
     }
   }
 
+  private cancelDrainWait(): void {
+    this.awaitingDrain = false;
+
+    if (this.drainTimer) {
+      clearTimeout(this.drainTimer);
+
+      this.drainTimer = null;
+    }
+  }
+
+  /*
+   * Interrupt bookkeeping, shared by the server-VAD and local
+   * fallback paths. Critically: cancels any pending drain wait —
+   * playback.clear() resets the worklet so no `drained` event will
+   * come for the dead response.
+   */
+  private markResponseInterrupted(): void {
+    this.interruptedResponse = true;
+
+    this.interruptedResponseAt = Date.now();
+
+    this.staleDropLogged = false;
+
+    this.loudStreak = 0;
+
+    this.cancelDrainWait();
+  }
+
   private flushPreRoll(): void {
     for (const b64 of this.preRoll.flush()) {
       if (canSendFrom(this.stateName) && !this.disposed) {
@@ -853,9 +874,7 @@ export class VoiceController {
 
         this.mouth.raw = 0;
 
-        this.interruptedResponse = true;
-
-        this.staleDropLogged = false;
+        this.markResponseInterrupted();
 
         this.deps.bridge?.interrupt();
 
@@ -971,11 +990,7 @@ export class VoiceController {
 
           this.mouth.raw = 0;
 
-          this.interruptedResponse = true;
-
-          this.staleDropLogged = false;
-
-          this.loudStreak = 0;
+          this.markResponseInterrupted();
 
           this.log("assistant interrupted (server VAD)");
         }
@@ -1018,6 +1033,32 @@ export class VoiceController {
           this.log("new response started — accepting fresh audio");
         }
 
+        this.toolRoundActive = false;
+
+        break;
+      }
+
+      case "tool-call": {
+        this.toolRoundActive = true;
+
+        this.log(`🔧 tool: ${event.name}`);
+
+        this.clearIdleTimer();
+
+        /*
+         * Safety while the tool runs in the main process: if the
+         * spoken follow-up never arrives, the session still closes.
+         */
+        this.scheduleIdle(TOOL_ROUND_IDLE_MS);
+
+        break;
+      }
+
+      case "tool-result": {
+        this.log(
+          event.ok ? `🔧 ok: ${event.summary}` : `🔧 failed: ${event.summary}`,
+        );
+
         break;
       }
 
@@ -1036,12 +1077,18 @@ export class VoiceController {
       }
 
       case "response-done": {
+        const isToolRound = this.audioChunks === 0 && this.toolRoundActive;
+
         const buffered = this.audioBufferedMs;
 
         if (this.audioChunks === 0) {
-          this.log(
-            "model returned an empty response (no audio) — likely a garbled turn; just speak again",
-          );
+          if (isToolRound) {
+            this.log("tool turn complete — waiting for her spoken follow-up");
+          } else {
+            this.log(
+              "model returned an empty response (no audio) — likely a garbled turn; just speak again",
+            );
+          }
         } else {
           this.log(
             `⏱ assistant buffered: ${this.audioChunks} chunks, ` +
@@ -1069,7 +1116,9 @@ export class VoiceController {
             this.finishResponseDone();
           }, DRAIN_TIMEOUT_MS);
         } else {
-          this.finishResponseDone();
+          this.finishResponseDone(
+            isToolRound ? TOOL_ROUND_IDLE_MS : VOICE_IDLE_AFTER_RESPONSE_MS,
+          );
         }
 
         break;
@@ -1080,16 +1129,13 @@ export class VoiceController {
 
         /*
          * In-flight audio of the cancelled response can still arrive;
-         * interruptedResponse stays true until response.created.
+         * interruptedResponse stays true until response.created (or
+         * the stale-drop window expires).
          */
         if (this.stateName === "assistant-speaking") {
           this.dispatch({ type: "interrupted" });
 
-          /*
-           * Safety: if the server never produces a follow-up response,
-           * the conversation must still close on inactivity.
-           */
-          this.scheduleIdle(VOICE_IDLE_AFTER_RESPONSE_MS);
+          this.scheduleIdle(TOOL_ROUND_IDLE_MS);
         }
 
         break;
@@ -1149,9 +1195,13 @@ export class VoiceController {
 
     this.interruptedResponse = false;
 
+    this.interruptedResponseAt = 0;
+
     this.staleDropLogged = false;
 
     this.loudStreak = 0;
+
+    this.toolRoundActive = false;
 
     await new Promise((resolve) => {
       setTimeout(resolve, RECONNECT_DELAY_MS);
@@ -1226,14 +1276,15 @@ export class VoiceController {
     }
   }
 
-  private finishResponseDone(): void {
-    if (this.drainTimer) {
-      clearTimeout(this.drainTimer);
-
-      this.drainTimer = null;
-    }
-
-    this.awaitingDrain = false;
+  /*
+   * ALWAYS re-arms the idle timer (contextual duration). The idle
+   * timeout is the safety net that guarantees the session can never
+   * hang — it is never skipped.
+   */
+  private finishResponseDone(
+    idleMs: number = VOICE_IDLE_AFTER_RESPONSE_MS,
+  ): void {
+    this.cancelDrainWait();
 
     this.echoCooldownUntil = Date.now() + ECHO_COOLDOWN_MS;
 
@@ -1241,7 +1292,7 @@ export class VoiceController {
 
     this.dispatch({ type: "response-done" });
 
-    this.scheduleIdle(VOICE_IDLE_AFTER_RESPONSE_MS);
+    this.scheduleIdle(idleMs);
   }
 
   private handlePcm(pcm: ArrayBuffer): void {
@@ -1254,14 +1305,27 @@ export class VoiceController {
     }
 
     if (this.interruptedResponse) {
-      if (!this.staleDropLogged) {
-        this.staleDropLogged = true;
+      if (Date.now() - this.interruptedResponseAt > STALE_DROP_WINDOW_MS) {
+        this.interruptedResponse = false;
 
-        this.log("dropping stale audio from the interrupted response");
+        this.staleDropLogged = false;
+
+        this.log("stale-drop window expired — accepting fresh audio");
+      } else {
+        if (!this.staleDropLogged) {
+          this.staleDropLogged = true;
+
+          this.log("dropping stale audio from the interrupted response");
+        }
+
+        return;
       }
-
-      return;
     }
+
+    /*
+     * Any received audio proves this is NOT a bare tool round.
+     */
+    this.toolRoundActive = false;
 
     if (!this.loggedFirstAudio) {
       this.loggedFirstAudio = true;
@@ -1319,13 +1383,7 @@ export class VoiceController {
       this.failOpenTimer = null;
     }
 
-    if (this.drainTimer) {
-      clearTimeout(this.drainTimer);
-
-      this.drainTimer = null;
-    }
-
-    this.awaitingDrain = false;
+    this.cancelDrainWait();
 
     this.logLatencySummary();
 
@@ -1360,6 +1418,8 @@ export class VoiceController {
     this.resampler = null;
 
     this.captureReady = false;
+
+    this.toolRoundActive = false;
 
     this.preRoll.clear();
 
