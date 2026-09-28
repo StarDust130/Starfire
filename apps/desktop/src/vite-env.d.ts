@@ -20,6 +20,7 @@ type StarfireVoiceRendererEvent = {
   | { kind: "session"; info: Record<string, unknown> }
   | { kind: "speech-started" }
   | { kind: "speech-stopped" }
+  | { kind: "response-created" }
   | { kind: "audio-transcript-delta"; delta: string }
   | { kind: "input-transcript"; text: string }
   | { kind: "response-done"; usage: Record<string, number> | null }
