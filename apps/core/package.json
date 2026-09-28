@@ -2,25 +2,25 @@
   "name": "@starfire/core",
   "private": true,
   "version": "0.1.0",
-  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "build": "tsc",
-    "start": "node dist/index.js",
-    "test": "vitest run --passWithNoTests",
-    "test:watch": "vitest"
+    "build": "tsc -b --force",
+    "typecheck": "tsc -b --force --pretty false",
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@starfire/contracts": "workspace:*",
-    "@starfire/tools": "workspace:*",
-    "pino": "^10.3.1",
-    "zod": "^4.6.5"
+    "@starfire/contracts": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^26.6.2",
-    "pino-pretty": "^13.1.3",
-    "tsx": "^4.23.15",
-    "typescript": "^7.0.2",
+    "@starfire/tools": "workspace:*",
+    "typescript": "7.0.2",
     "vitest": "^5.0.1"
   }
 }
