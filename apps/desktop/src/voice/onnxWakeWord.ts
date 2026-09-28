@@ -10,10 +10,7 @@ export type WakeEngine = {
 
   start(
     deviceId: string | undefined,
-    onDetected: (
-      word: string,
-      score: number,
-    ) => void,
+    onDetected: (word: string, score: number) => void,
   ): Promise<void>;
 
   stop(): Promise<void>;
@@ -102,30 +99,20 @@ export async function createOnnxWakeWord(): Promise<WakeEngine> {
 
   let loaded = false;
 
-  let removeDetectListener:
-    | (() => void)
-    | null = null;
+  let removeDetectListener: (() => void) | null = null;
 
-  let removeSpeechStartListener:
-    | (() => void)
-    | null = null;
+  let removeSpeechStartListener: (() => void) | null = null;
 
-  let removeSpeechEndListener:
-    | (() => void)
-    | null = null;
+  let removeSpeechEndListener: (() => void) | null = null;
 
-  let removeErrorListener:
-    | (() => void)
-    | null = null;
+  let removeErrorListener: (() => void) | null = null;
 
   async function load(): Promise<void> {
     if (loaded) {
       return;
     }
 
-    console.log(
-      "[Starfire Wake] Loading wake-word engine...",
-    );
+    console.log("[Starfire Wake] Loading wake-word engine...");
 
     await engine.load();
 
@@ -133,19 +120,13 @@ export async function createOnnxWakeWord(): Promise<WakeEngine> {
      * Make absolutely sure only Starfire
      * is active.
      */
-    engine.setActiveKeywords([
-      WAKE_WORD,
-    ]);
+    engine.setActiveKeywords([WAKE_WORD]);
 
     loaded = true;
 
-    console.log(
-      "[Starfire Wake] ✅ Engine loaded",
-    );
+    console.log("[Starfire Wake] ✅ Engine loaded");
 
-    console.log(
-      `[Starfire Wake] 🎯 Wake word: ${WAKE_WORD}`,
-    );
+    console.log(`[Starfire Wake] 🎯 Wake word: ${WAKE_WORD}`);
   }
 
   function removeListeners(): void {
@@ -164,10 +145,7 @@ export async function createOnnxWakeWord(): Promise<WakeEngine> {
 
   async function start(
     deviceId: string | undefined,
-    onDetected: (
-      word: string,
-      score: number,
-    ) => void,
+    onDetected: (word: string, score: number) => void,
   ): Promise<void> {
     await load();
 
@@ -176,65 +154,33 @@ export async function createOnnxWakeWord(): Promise<WakeEngine> {
      */
     removeListeners();
 
-    removeSpeechStartListener =
-      engine.on(
-        "speech-start",
-        () => {
-          console.log(
-            "[Starfire Wake] 🗣️ Speech detected",
-          );
-        },
+    removeSpeechStartListener = engine.on("speech-start", () => {
+      console.log("[Starfire Wake] 🗣️ Speech detected");
+    });
+
+    removeSpeechEndListener = engine.on("speech-end", () => {
+      console.log("[Starfire Wake] 🔇 Speech ended");
+    });
+
+    removeDetectListener = engine.on("detect", ({ keyword, score }) => {
+      /*
+       * Ignore anything that isn't our
+       * Starfire model.
+       */
+      if (keyword.toLowerCase() !== WAKE_WORD) {
+        return;
+      }
+
+      console.log(
+        `[Starfire Wake] ✅ DETECTED "${keyword}" score=${score.toFixed(3)}`,
       );
 
-    removeSpeechEndListener =
-      engine.on(
-        "speech-end",
-        () => {
-          console.log(
-            "[Starfire Wake] 🔇 Speech ended",
-          );
-        },
-      );
+      onDetected(WAKE_WORD, score);
+    });
 
-    removeDetectListener =
-      engine.on(
-        "detect",
-        ({
-          keyword,
-          score,
-        }) => {
-          /*
-           * Ignore anything that isn't our
-           * Starfire model.
-           */
-          if (
-            keyword.toLowerCase() !==
-            WAKE_WORD
-          ) {
-            return;
-          }
-
-          console.log(
-            `[Starfire Wake] ✅ DETECTED "${keyword}" score=${score.toFixed(3)}`,
-          );
-
-          onDetected(
-            WAKE_WORD,
-            score,
-          );
-        },
-      );
-
-    removeErrorListener =
-      engine.on(
-        "error",
-        (error) => {
-          console.error(
-            "[Starfire Wake] ❌ Engine error:",
-            error,
-          );
-        },
-      );
+    removeErrorListener = engine.on("error", (error) => {
+      console.error("[Starfire Wake] ❌ Engine error:", error);
+    });
 
     /*
      * The library handles microphone capture,
@@ -246,9 +192,7 @@ export async function createOnnxWakeWord(): Promise<WakeEngine> {
       gain: 1,
     });
 
-    console.log(
-      "[Starfire Wake] 🎤 Listening for Starfire...",
-    );
+    console.log("[Starfire Wake] 🎤 Listening for Starfire...");
   }
 
   async function stop(): Promise<void> {
@@ -256,9 +200,7 @@ export async function createOnnxWakeWord(): Promise<WakeEngine> {
 
     await engine.stop();
 
-    console.log(
-      "[Starfire Wake] 🛑 Stopped",
-    );
+    console.log("[Starfire Wake] 🛑 Stopped");
   }
 
   return {
