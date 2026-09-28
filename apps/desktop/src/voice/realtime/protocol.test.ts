@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildAudioAppend,
+  buildFunctionCallOutput,
   buildResponseCancel,
   buildSessionUpdate,
   parseServerEvent,
@@ -109,12 +110,94 @@ describe("parseServerEvent", () => {
     expect(unknown?.kind).toBe("unknown");
   });
 
-  it("does not crash on function-call events", () => {
+  it("parses a complete function-call event", () => {
     const event = parseServerEvent(
-      JSON.stringify({ type: "response.function_call_arguments.done" }),
+      JSON.stringify({
+        type: "response.function_call_arguments.done",
+
+        call_id: "call_abc",
+
+        name: "open_app",
+
+        arguments: JSON.stringify({ app: "vs code" }),
+      }),
     );
 
-    expect(event).not.toBeNull();
+    expect(event).toEqual({
+      kind: "function-call",
+
+      callId: "call_abc",
+
+      name: "open_app",
+
+      args: { app: "vs code" },
+    });
+  });
+
+  it("malformed arguments JSON becomes a call with null args (registry rejects it)", () => {
+    const event = parseServerEvent(
+      JSON.stringify({
+        type: "response.function_call_arguments.done",
+
+        call_id: "call_abc",
+
+        name: "open_app",
+
+        arguments: "{not json",
+      }),
+    );
+
+    expect(event?.kind).toBe("function-call");
+
+    if (event?.kind === "function-call") {
+      expect(event.args).toBeNull();
+    }
+  });
+
+  it("function-call without call_id or name degrades to unknown", () => {
+    const noId = parseServerEvent(
+      JSON.stringify({
+        type: "response.function_call_arguments.done",
+
+        name: "open_app",
+
+        arguments: "{}",
+      }),
+    );
+
+    expect(noId?.kind).toBe("unknown");
+
+    const noName = parseServerEvent(
+      JSON.stringify({
+        type: "response.function_call_arguments.done",
+
+        call_id: "call_abc",
+
+        arguments: "{}",
+      }),
+    );
+
+    expect(noName?.kind).toBe("unknown");
+  });
+
+  it("function-call with non-object args (number) still parses", () => {
+    const event = parseServerEvent(
+      JSON.stringify({
+        type: "response.function_call_arguments.done",
+
+        call_id: "call_abc",
+
+        name: "open_app",
+
+        arguments: "42",
+      }),
+    );
+
+    expect(event?.kind).toBe("function-call");
+
+    if (event?.kind === "function-call") {
+      expect(event.args).toBe(42);
+    }
   });
 });
 
@@ -131,6 +214,106 @@ describe("builders", () => {
     const vad = payload.session.turn_detection as Record<string, unknown>;
 
     expect(vad.type).toBe("server_vad");
+  });
+
+  it("session.update without tools has no tools key", () => {
+    const payload = JSON.parse(buildSessionUpdate()) as {
+      session: Record<string, unknown>;
+    };
+
+    expect("tools" in payload.session).toBe(false);
+
+    expect("tool_choice" in payload.session).toBe(false);
+  });
+
+  it("session.update embeds tool manifests and auto tool_choice", () => {
+    const payload = JSON.parse(
+      buildSessionUpdate([
+        {
+          type: "function",
+
+          name: "open_app",
+
+          description: "Launch a desktop application.",
+
+          parameters: {
+            type: "object",
+
+            properties: {},
+
+            required: ["app"],
+          },
+        },
+      ]),
+    ) as { session: { tools: unknown[]; tool_choice: string } };
+
+    expect(payload.session.tool_choice).toBe("auto");
+
+    expect(payload.session.tools).toHaveLength(1);
+
+    expect((payload.session.tools[0] as { name: string }).name).toBe(
+      "open_app",
+    );
+  });
+
+  it("function-call output wraps the result as the protocol expects", () => {
+    const message = JSON.parse(
+      buildFunctionCallOutput({
+        callId: "call_abc",
+
+        ok: true,
+
+        summary: "Opening VS Code.",
+
+        data: { app: "VS Code", pid: 4242 },
+      }),
+    ) as {
+      type: string;
+
+      item: { type: string; call_id: string; output: string };
+    };
+
+    expect(message.type).toBe("conversation.item.create");
+
+    expect(message.item.type).toBe("function_call_output");
+
+    expect(message.item.call_id).toBe("call_abc");
+
+    const output = JSON.parse(message.item.output) as Record<string, unknown>;
+
+    expect(output).toEqual({
+      ok: true,
+
+      summary: "Opening VS Code.",
+
+      data: { app: "VS Code", pid: 4242 },
+
+      error: null,
+    });
+  });
+
+  it("function-call output tolerates missing optional fields", () => {
+    const message = JSON.parse(
+      buildFunctionCallOutput({
+        callId: "call_x",
+
+        ok: false,
+
+        summary: "I couldn't find that app.",
+      }),
+    ) as { item: { output: string } };
+
+    const output = JSON.parse(message.item.output) as Record<string, unknown>;
+
+    expect(output).toEqual({
+      ok: false,
+
+      summary: "I couldn't find that app.",
+
+      data: null,
+
+      error: null,
+    });
   });
 
   it("audio append and cancel build valid JSON", () => {
