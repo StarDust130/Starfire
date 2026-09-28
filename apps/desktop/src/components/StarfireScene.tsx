@@ -160,11 +160,16 @@ export default function StarfireScene({
 
   voiceMouthRef.current = voiceMouth;
 
-  const voiceActive = isVoiceActive(voiceState);
-
+  /*
+   * ALL state hooks are declared BEFORE any value that reads them —
+   * referencing a const before its declaration is a runtime crash,
+   * not just a lint warning.
+   */
   const [showListening, setShowListening] = useState(false);
 
   const [activityKind, setActivityKind] = useState<ActivityKind | null>(null);
+
+  const voiceActive = isVoiceActive(voiceState);
 
   /*
    * The bubble is for listening/thinking/connecting only — while she
@@ -333,6 +338,7 @@ export default function StarfireScene({
     let blinkRightName: string | null = null;
     let surprisedName: string | null = null;
     let mouthName: string | null = null;
+    let mouthSecondaryName: string | null = null;
 
     let elapsed = 0;
     let breathePhase = 0;
@@ -367,6 +373,15 @@ export default function StarfireScene({
     const dragFeel = createDragFeelState();
 
     const mouthSmoother = new MouthSmoother();
+
+    /*
+     * Voice episode variety: every transition into talking, thinking,
+     * or listening picks a fresh seed that drives this episode's
+     * gesture personality.
+     */
+    let voiceSeed = 42;
+
+    let lastVoiceState: VoiceStateName = "idle";
 
     const instantAcc = createPoseTarget();
     const damped = createPoseTarget();
@@ -675,7 +690,7 @@ export default function StarfireScene({
         const vrm = gltf.userData.vrm as VRM | undefined;
 
         if (!vrm) {
-          throw new Error("starfire-2.vrm contains no VRM data.");
+          throw new Error("starfire-3.vrm contains no VRM data.");
         }
 
         VRMUtils.rotateVRM0(vrm);
@@ -726,6 +741,7 @@ export default function StarfireScene({
         blinkRightName = findExpression(vrm, ["blinkRight", "blink"]);
         surprisedName = findExpression(vrm, ["surprised"]);
         mouthName = findExpression(vrm, ["aa", "a", "mouthA", "talk"]);
+        mouthSecondaryName = findExpression(vrm, ["oh", "ou", "o", "mouthO"]);
 
         currentVrm = vrm;
 
@@ -734,7 +750,8 @@ export default function StarfireScene({
         console.log("[Starfire] ✅ VRM loaded.");
 
         console.log(
-          `[Starfire] 🦴 calibrated relaxed pose (armSign=${rig.armSign}${mouthName ? `, mouth=${mouthName}` : ", no mouth expression"})`,
+          `[Starfire] 🦴 calibrated relaxed pose (armSign=${rig.armSign}, ` +
+            `mouth=${mouthName ?? "none"}, mouth2=${mouthSecondaryName ?? "none"})`,
         );
       } catch (cause) {
         console.error("[Starfire] ❌ VRM load failed:", cause);
@@ -786,7 +803,22 @@ export default function StarfireScene({
 
         const vs = voiceStateRef.current;
 
-        const voiceActive = isVoiceActive(vs);
+        const voiceActiveFrame = isVoiceActive(vs);
+
+        /*
+         * New voice episode -> new gesture personality.
+         */
+        if (vs !== lastVoiceState) {
+          if (
+            vs === "assistant-speaking" ||
+            vs === "thinking" ||
+            vs === "user-speaking"
+          ) {
+            voiceSeed = Math.random() * 100000;
+          }
+
+          lastVoiceState = vs;
+        }
 
         let spinYawDeg = 0;
 
@@ -810,7 +842,7 @@ export default function StarfireScene({
 
         addBone(instantAcc, "spine", 0, 0, Math.sin(elapsed * 0.23) * deg(0.4));
 
-        if (voiceActive && activity) {
+        if (voiceActiveFrame && activity) {
           cancelActivity();
         }
 
@@ -818,7 +850,7 @@ export default function StarfireScene({
           !listening &&
           !easterEgg &&
           !activity &&
-          !voiceActive &&
+          !voiceActiveFrame &&
           elapsed >= nextActivityAt
         ) {
           const kind = chooseActivity(lastActivityKind);
@@ -868,7 +900,7 @@ export default function StarfireScene({
           !easterEgg &&
           !activity &&
           !micro &&
-          !voiceActive &&
+          !voiceActiveFrame &&
           elapsed >= nextMicroAt
         ) {
           const kind = chooseMicro(lastMicroKind);
@@ -936,12 +968,13 @@ export default function StarfireScene({
 
         /*
          * ---------------------------------------------------
-         * VOICE LAYER — audio-driven mouth + talking motion
+         * VOICE LAYER — audio-driven mouth + seeded gestures
          * ---------------------------------------------------
          */
         let mouthValue = 0;
+        let mouthSecondaryValue = 0;
 
-        if (voiceActive) {
+        if (voiceActiveFrame) {
           if (vs === "assistant-speaking") {
             const level = mouthSmoother.update(
               clamp(voiceMouthRef.current.raw * 1.6, 0, 1),
@@ -955,17 +988,46 @@ export default function StarfireScene({
               s,
               fx,
               level,
+              voiceSeed,
             );
 
             mouthValue = level;
+
+            /*
+             * Dual-mouth realism: the secondary shape (oh/ou) morphs
+             * on a per-episode phase so her mouth cycles real shapes
+             * instead of holding one static open.
+             */
+            if (mouthSecondaryName) {
+              const shape =
+                0.5 + 0.5 * Math.sin(elapsed * 9.1 + voiceSeed * 0.013);
+
+              mouthSecondaryValue = level * shape * 0.8;
+            }
           } else if (vs === "user-speaking") {
             mouthSmoother.update(0, dt);
 
-            applyVoiceAnimation(instantAcc, "user-speaking", elapsed, s, fx, 0);
+            applyVoiceAnimation(
+              instantAcc,
+              "user-speaking",
+              elapsed,
+              s,
+              fx,
+              0,
+              voiceSeed,
+            );
           } else if (vs === "thinking") {
             mouthSmoother.update(0, dt);
 
-            applyVoiceAnimation(instantAcc, "thinking", elapsed, s, fx, 0);
+            applyVoiceAnimation(
+              instantAcc,
+              "thinking",
+              elapsed,
+              s,
+              fx,
+              0,
+              voiceSeed,
+            );
           } else {
             mouthSmoother.update(0, dt);
           }
@@ -1023,21 +1085,13 @@ export default function StarfireScene({
           const walk = carryWalk(elapsed, intensity, fx);
 
           addBone(instantAcc, "leftUpperLeg", walk.leftUpperX, 0, 0);
-
           addBone(instantAcc, "rightUpperLeg", walk.rightUpperX, 0, 0);
-
           addBone(instantAcc, "leftLowerLeg", walk.leftLowerX, 0, 0);
-
           addBone(instantAcc, "rightLowerLeg", walk.rightLowerX, 0, 0);
-
           addBone(instantAcc, "leftUpperArm", walk.leftArmX, 0, 0);
-
           addBone(instantAcc, "rightUpperArm", walk.rightArmX, 0, 0);
-
           addBone(instantAcc, "hips", 0, 0, walk.hipRollZ);
-
           addBone(instantAcc, "spine", walk.leanX, walk.spineYawY, 0);
-
           addBone(instantAcc, "head", walk.headCompX, 0, 0);
 
           bounce += walk.bob;
@@ -1090,11 +1144,17 @@ export default function StarfireScene({
           feel.offsetX * 1.2,
         );
 
+        /*
+         * Gaze: thinking looks up and toward a seed-chosen side; other
+         * states follow the damped look target.
+         */
         let lookX = damped.lookX;
         let lookY = damped.lookY;
 
         if (vs === "thinking") {
-          lookX += Math.sin(elapsed * 0.8) * 0.06;
+          const gazeSide = voiceSeed % 2 < 1 ? 1 : -1;
+
+          lookX += gazeSide * (0.03 + Math.sin(elapsed * 0.7) * 0.03);
           lookY += 0.05 + Math.sin(elapsed * 0.5) * 0.02;
         }
 
@@ -1110,7 +1170,6 @@ export default function StarfireScene({
           const anchor = headAnchorRef.current;
 
           anchor.x = (anchorVector.x * 0.5 + 0.5) * stageWidth;
-
           anchor.y = (-anchorVector.y * 0.5 + 0.5) * stageHeight;
 
           anchor.r =
@@ -1121,11 +1180,12 @@ export default function StarfireScene({
 
         setExpression(currentVrm, mouthName, mouthValue);
 
+        setExpression(currentVrm, mouthSecondaryName, mouthSecondaryValue);
+
         const sleeping = activity?.kind === "sleep";
 
         if (sleeping) {
           setExpression(currentVrm, blinkLeftName, 1);
-
           setExpression(currentVrm, blinkRightName, 1);
 
           blinkStarted = -1;
@@ -1133,7 +1193,6 @@ export default function StarfireScene({
         } else {
           if (eyesForced) {
             setExpression(currentVrm, blinkLeftName, 0);
-
             setExpression(currentVrm, blinkRightName, 0);
 
             eyesForced = false;
@@ -1153,12 +1212,10 @@ export default function StarfireScene({
             const value = progress < 0.5 ? progress * 2 : (1 - progress) * 2;
 
             setExpression(currentVrm, blinkLeftName, value);
-
             setExpression(currentVrm, blinkRightName, value);
 
             if (blinkTime >= BLINK_DURATION) {
               setExpression(currentVrm, blinkLeftName, 0);
-
               setExpression(currentVrm, blinkRightName, 0);
 
               blinkStarted = -1;
@@ -1213,13 +1270,13 @@ export default function StarfireScene({
 
   const isThinking = voiceState === "thinking";
 
-  const bubbleText = voiceActive
-    ? (BUBBLE_TEXT[voiceState] ?? "Listening…")
-    : "Listening…";
-
   const shownError = voiceError ?? error;
 
   const bubbleVisible = bubbleShown && !shownError;
+
+  const bubbleText = voiceActive
+    ? (BUBBLE_TEXT[voiceState] ?? "Listening…")
+    : "Listening…";
 
   return (
     <>
@@ -1227,7 +1284,7 @@ export default function StarfireScene({
         <div ref={containerRef} className="starfire-canvas" />
       </div>
 
-      {bubbleVisible && !shownError && (
+      {bubbleVisible && (
         <div className="starfire-listening" ref={bubbleRef}>
           <div className="starfire-listening-float">
             <div className="starfire-listening-card">
@@ -1235,7 +1292,6 @@ export default function StarfireScene({
                 <span className="starfire-listening-dot" />
                 {bubbleText}
               </div>
-
               {isThinking ? (
                 <div className="starfire-thinking-dots">
                   <span />
