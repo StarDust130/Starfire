@@ -13,5 +13,5 @@
     "rootDir": "electron",
     "types": ["node"]
   },
-  "include": ["electron/main.ts", "electron/preload.ts"]
+  "include": ["electron"]
 }
