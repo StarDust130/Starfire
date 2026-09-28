@@ -52,10 +52,6 @@ function asNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-/*
- * Fatal = authentication/authorization problems. These must never
- * be retried in a loop.
- */
 function isFatalError(message: string, code: string): boolean {
   return /auth|api[._-]?key|invalid[_-]?key|401|403|permission|unauthorized/i.test(
     `${code} ${message}`,
@@ -92,10 +88,6 @@ function parseUsage(value: unknown): RealtimeUsage | null {
   return Object.keys(usage).length > 0 ? usage : null;
 }
 
-/*
- * Never throws. Malformed input -> null. Unknown event types are
- * reported as { kind: "unknown" } so callers can safely ignore them.
- */
 export function parseServerEvent(raw: string): ServerEvent | null {
   let data: unknown;
 
@@ -137,11 +129,7 @@ export function parseServerEvent(raw: string): ServerEvent | null {
 
     const code = asString(error.code) ?? asString(error.type) ?? "";
 
-    return {
-      kind: "error",
-      message,
-      fatal: isFatalError(message, code),
-    };
+    return { kind: "error", message, fatal: isFatalError(message, code) };
   }
 
   if (type === "input_audio_buffer.speech_started") {
@@ -181,10 +169,7 @@ export function parseServerEvent(raw: string): ServerEvent | null {
   if (type === "response.done") {
     const response = isRecord(data.response) ? data.response : {};
 
-    return {
-      kind: "response-done",
-      usage: parseUsage(response.usage),
-    };
+    return { kind: "response-done", usage: parseUsage(response.usage) };
   }
 
   if (type === "response.cancelled") {
@@ -195,9 +180,11 @@ export function parseServerEvent(raw: string): ServerEvent | null {
 }
 
 /*
- * Single source of truth for session configuration. If the server
- * reports different format strings in session.created, adjust only
- * here.
+ * Turn detection tuned for conversation feel:
+ *  - threshold 0.45: catches quieter speech without noise triggers
+ *  - prefix_padding_ms 250: keeps word onsets intact
+ *  - silence_duration_ms 500: the user stops talking -> the model
+ *    starts ~200ms sooner than the previous 700ms setting
  */
 export function buildSessionUpdate(): string {
   return JSON.stringify({
@@ -218,9 +205,9 @@ export function buildSessionUpdate(): string {
 
       turn_detection: {
         type: "server_vad",
-        threshold: 0.5,
-        prefix_padding_ms: 300,
-        silence_duration_ms: 700,
+        threshold: 0.45,
+        prefix_padding_ms: 250,
+        silence_duration_ms: 500,
       },
     },
   });
@@ -234,9 +221,7 @@ export function buildAudioAppend(base64Pcm16: string): string {
 }
 
 export function buildResponseCancel(): string {
-  return JSON.stringify({
-    type: "response.cancel",
-  });
+  return JSON.stringify({ type: "response.cancel" });
 }
 
 export function buildConversationItemCreate(text: string): string {
