@@ -2,25 +2,25 @@
   "name": "@starfire/tools",
   "private": true,
   "version": "0.1.0",
-  "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "default": "./dist/index.js"
     }
   },
   "scripts": {
     "build": "tsc -b --force",
-    "typecheck": "tsc -b --pretty false",
+    "typecheck": "tsc -b --force --pretty false",
     "test": "vitest run --passWithNoTests"
-  },
-  "devDependencies": {
-    "typescript": "7.0.2",
-    "vitest": "^5.0.1"
   },
   "dependencies": {
     "@starfire/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "typescript": "7.0.2",
+    "vitest": "^5.0.1"
   }
 }
