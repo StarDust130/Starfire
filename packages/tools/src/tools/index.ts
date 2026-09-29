@@ -8,6 +8,8 @@ import { createCloseAppTool } from "./close-app.js";
 
 import { createCurrentDateTimeTool } from "./current-date-time.js";
 
+import { createEndSessionTool } from "./end-session.js";
+
 import { createFocusAppTool } from "./focus-app.js";
 
 import { createGetWeatherTool } from "./get-weather.js";
@@ -17,6 +19,8 @@ import { createOpenAppTool } from "./open-app.js";
 import { createOpenFileTool } from "./open-file.js";
 
 import { createOpenFolderTool } from "./open-folder.js";
+
+import { createOpenUrlTool } from "./open-url.js";
 
 import { createSystemInfoTool } from "./system-info.js";
 
@@ -40,6 +44,8 @@ export function createDefaultTools(ports: AgentPorts): ToolDefinition[] {
 
     createOpenFileTool(ports),
 
+    createOpenUrlTool(ports.urls),
+
     createClipboardTool(ports),
 
     createSystemInfoTool(ports),
@@ -51,5 +57,7 @@ export function createDefaultTools(ports: AgentPorts): ToolDefinition[] {
     createWindowControlTool(ports.windows),
 
     createCurrentDateTimeTool(),
+
+    createEndSessionTool(),
   ];
 }
