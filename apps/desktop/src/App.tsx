@@ -1,19 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import StarfireScene from "./components/StarfireScene";
-
-import { createMicPipeline } from "./voice/realtime/microphone";
-
-import { createPlaybackPipeline } from "./voice/realtime/playback";
+import { chooseMicrophone, getMicrophones } from "./voice/microphone";
+import { createOnnxWakeWord, type WakeEngine } from "./voice/onnxWakeWord";
 
 import {
   VoiceController,
   type VoiceSnapshot,
 } from "./voice/realtime/controller";
-
-import { chooseMicrophone, getMicrophones } from "./voice/microphone";
-
-import { createOnnxWakeWord, type WakeEngine } from "./voice/onnxWakeWord";
+import { createMicPipeline } from "./voice/realtime/microphone";
+import { createPlaybackPipeline } from "./voice/realtime/playback";
 
 export type InteractionSource = "wake-word" | "click" | "hotkey";
 
@@ -36,6 +32,8 @@ export default function App() {
     state: "idle",
     message: null,
   });
+
+  const [activeTool, setActiveTool] = useState<string | null>(null);
 
   const activateListening = useCallback((source: InteractionSource): void => {
     console.log(`[Starfire] 💗 listening activated by ${source}`);
@@ -162,6 +160,17 @@ export default function App() {
           console.log(`[Starfire Voice] ${message}`);
         }
       },
+
+      onToolEvent: (event: {
+        kind: "tool-call" | "tool-result";
+        name?: string;
+      }) => {
+        if (event.kind === "tool-call") {
+          setActiveTool(event.name ?? "tool");
+        } else {
+          setActiveTool(null);
+        }
+      },
     });
 
     controllerRef.current = controller;
@@ -182,6 +191,8 @@ export default function App() {
       window.removeEventListener("keydown", handleKeyDown);
 
       window.removeEventListener("pagehide", handlePageHide);
+
+      setActiveTool(null);
 
       unsubscribe();
 
@@ -229,6 +240,7 @@ export default function App() {
         voiceState={voice.state}
         voiceError={voice.message}
         voiceMouth={controllerRef.current?.mouth ?? { raw: 0 }}
+        activeTool={activeTool}
         onActivate={activateListening}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
