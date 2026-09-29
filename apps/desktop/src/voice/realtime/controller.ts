@@ -28,6 +28,8 @@ export type VoiceRendererEvent = {
   | { kind: "response-created" }
   | { kind: "tool-call"; name: string }
   | { kind: "tool-result"; ok: boolean; summary: string }
+  | { kind: "tool-end" }
+  | { kind: "session-ended" }
   | { kind: "audio-transcript-delta"; delta: string }
   | { kind: "input-transcript"; text: string }
   | { kind: "response-done"; usage: Record<string, number> | null }
@@ -82,7 +84,7 @@ export type VoiceControllerDeps = {
   onLog?: (message: string) => void;
 
   onToolEvent?: (event: {
-    kind: "tool-call" | "tool-result";
+    kind: "tool-call" | "tool-result" | "tool-end";
 
     name?: string;
   }) => void;
@@ -136,7 +138,19 @@ const LOCAL_BARGE_FRAMES = 18;
 
 const TOOL_ROUND_IDLE_MS = 15000;
 
+const GOODBYE_GRACE_MS = 12000;
+
 const STALE_DROP_WINDOW_MS = 3000;
+
+const MAX_RECONNECTS_PER_SESSION = 20;
+
+/*
+ * Goodbye keywords in the user's transcribed speech. When detected,
+ * the session closes after her farewell response finishes — no
+ * reliance on the model calling a tool.
+ */
+const GOODBYE_PATTERN =
+  /\b(bye|goodbye|good bye|see you|see ya|that'?s all|talk later|later bye|अलविदा|फिर मिलेंगे|बाय)\b/i;
 
 const MIC_VARIANTS: MicVariant[] = [
   { processing: true, useDeviceId: true },
@@ -242,18 +256,16 @@ export class VoiceController {
 
   private echoCooldownUntil = 0;
 
-  private reconnectUsed = false;
+  private reconnectsUsed = 0;
 
   private latencySamples: number[] = [];
 
   private toolRoundActive = false;
 
-  /*
-   * Real-time loudness of what her speakers are actually playing
-   * (from the play-worklet's output meter). Used by the adaptive
-   * echo gate: speaker leakage into the mic arrives attenuated, so
-   * mic audio must EXCEED the live output level to be uploaded.
-   */
+  private goodbyeActive = false;
+
+  private goodbyeDetected = false;
+
   private outputLevel = 0;
 
   constructor(private readonly deps: VoiceControllerDeps) {}
@@ -409,6 +421,12 @@ export class VoiceController {
 
     this.transcript.assistant = "";
 
+    this.goodbyeActive = false;
+
+    this.goodbyeDetected = false;
+
+    this.reconnectsUsed = 0;
+
     this.dispatch({ type: "start" });
 
     try {
@@ -465,8 +483,6 @@ export class VoiceController {
 
     this.echoCooldownUntil = 0;
 
-    this.reconnectUsed = false;
-
     this.latencySamples = [];
 
     this.captureReady = false;
@@ -497,10 +513,6 @@ export class VoiceController {
       this.chosenDeviceId,
     );
 
-    /*
-     * PARALLEL STARTUP: mic, output pipeline, and the websocket all
-     * start at once.
-     */
     const micPromise = mic.start().then(
       (rate) => {
         inputRate = rate;
@@ -698,12 +710,6 @@ export class VoiceController {
     }
   }
 
-  /*
-   * Interrupt bookkeeping, shared by the server-VAD and local
-   * fallback paths. Critically: cancels any pending drain wait —
-   * playback.clear() resets the worklet so no `drained` event will
-   * come for the dead response.
-   */
   private markResponseInterrupted(): void {
     this.interruptedResponse = true;
 
@@ -861,19 +867,7 @@ export class VoiceController {
       return;
     }
 
-    /*
-     * While she is audible: stream audio above the adaptive echo gate
-     * (so the server VAD can interrupt on real speech), and run the
-     * local fallback detector.
-     */
     if (this.stateName === "assistant-speaking") {
-      /*
-       * Adaptive half-duplex gate: while she is audible, upload only
-       * mic audio clearly louder than her live speaker output.
-       * Speaker leakage arrives attenuated (walls of the room), so
-       * echo can no longer trip the server VAD — while a real user
-       * talking near the mic is far louder than the leakage.
-       */
       const echoFloor = Math.max(ECHO_UPLOAD_FLOOR, this.outputLevel * 0.9);
 
       if (chunk.rms >= echoFloor) {
@@ -907,10 +901,6 @@ export class VoiceController {
       return;
     }
 
-    /*
-     * Just after she finished: block speaker echo from creating
-     * phantom turns, while real speech passes straight through.
-     */
     if (now < this.echoCooldownUntil) {
       if (chunk.rms >= ECHO_UPLOAD_FLOOR) {
         if (!this.localSpeech) {
@@ -933,9 +923,6 @@ export class VoiceController {
       return;
     }
 
-    /*
-     * Normal path: the gate sees clean, non-echo audio.
-     */
     const gate = this.gate.update(chunk.rms, dt);
 
     if (gate.started) {
@@ -1054,7 +1041,18 @@ export class VoiceController {
           this.log("new response started — accepting fresh audio");
         }
 
-        this.toolRoundActive = false;
+        /*
+         * A tool round's follow-up response is starting — the tool UI
+         * phase ends (App clears the tool bubble) and the state shows
+         * "Thinking…" until her voice arrives.
+         */
+        if (this.toolRoundActive) {
+          this.toolRoundActive = false;
+
+          this.deps.onToolEvent?.({ kind: "tool-end" });
+
+          this.dispatch({ type: "tool-followup-start" });
+        }
 
         break;
       }
@@ -1068,10 +1066,6 @@ export class VoiceController {
 
         this.clearIdleTimer();
 
-        /*
-         * Safety while the tool runs in the main process: if the
-         * spoken follow-up never arrives, the session still closes.
-         */
         this.scheduleIdle(TOOL_ROUND_IDLE_MS);
 
         break;
@@ -1087,6 +1081,25 @@ export class VoiceController {
         break;
       }
 
+      case "session-ended": {
+        /*
+         * She said her goodbye via end_session. Let the farewell audio
+         * finish playing, then end cleanly (no reconnect; the wake
+         * word resumes).
+         */
+        this.goodbyeActive = true;
+
+        this.log("👋 goodbye — ending the session after her farewell");
+
+        this.clearIdleTimer();
+
+        setTimeout(() => {
+          this.stop("goodbye");
+        }, GOODBYE_GRACE_MS);
+
+        break;
+      }
+
       case "audio-transcript-delta": {
         this.transcript.assistant += event.delta;
 
@@ -1097,6 +1110,11 @@ export class VoiceController {
         this.transcript.user = event.text;
 
         this.log(`you said: ${event.text}`);
+
+        if (GOODBYE_PATTERN.test(event.text)) {
+          this.goodbyeDetected = true;
+          this.log("👋 goodbye detected — will close after her farewell");
+        }
 
         break;
       }
@@ -1140,10 +1158,22 @@ export class VoiceController {
           this.drainTimer = setTimeout(() => {
             this.finishResponseDone();
           }, DRAIN_TIMEOUT_MS);
+
+          if (this.goodbyeDetected) {
+            this.log("👋 goodbye — will close after drain");
+          }
         } else {
           this.finishResponseDone(
             isToolRound ? TOOL_ROUND_IDLE_MS : VOICE_IDLE_AFTER_RESPONSE_MS,
           );
+
+          if (this.goodbyeDetected && !isToolRound) {
+            this.log("👋 goodbye — ending the session");
+
+            setTimeout(() => {
+              this.stop("goodbye");
+            }, 3000);
+          }
         }
 
         break;
@@ -1152,11 +1182,6 @@ export class VoiceController {
       case "response-cancelled": {
         this.log("response cancelled by server");
 
-        /*
-         * In-flight audio of the cancelled response can still arrive;
-         * interruptedResponse stays true until response.created (or
-         * the stale-drop window expires).
-         */
         if (this.stateName === "assistant-speaking") {
           this.dispatch({ type: "interrupted" });
 
@@ -1185,21 +1210,23 @@ export class VoiceController {
       }
 
       case "closed": {
-        if (this.disposed || this.stopRequested) {
+        if (this.disposed || this.stopRequested || this.goodbyeActive) {
           break;
         }
 
         if (canSendFrom(this.stateName) || this.stateName === "starting") {
-          if (!this.reconnectUsed) {
-            this.reconnectUsed = true;
+          if (this.reconnectsUsed < MAX_RECONNECTS_PER_SESSION) {
+            this.reconnectsUsed += 1;
 
-            this.log("connection lost — reconnecting automatically (1/1)");
+            this.log(
+              `connection lost — reconnecting automatically (${this.reconnectsUsed}/${MAX_RECONNECTS_PER_SESSION})`,
+            );
 
             void this.reconnect();
           } else {
             this.message = "Voice connection closed.";
 
-            this.log("connection lost (reconnect already used)");
+            this.log("connection lost (reconnect budget exhausted)");
 
             this.dispatch({ type: "stop" });
 
@@ -1298,6 +1325,14 @@ export class VoiceController {
 
     this.outputLevel = 0;
 
+    if (this.goodbyeActive || this.goodbyeDetected) {
+      this.cancelDrainWait();
+
+      this.stop("goodbye");
+
+      return;
+    }
+
     if (this.awaitingDrain) {
       this.log("playback drained");
 
@@ -1305,11 +1340,6 @@ export class VoiceController {
     }
   }
 
-  /*
-   * ALWAYS re-arms the idle timer (contextual duration). The idle
-   * timeout is the safety net that guarantees the session can never
-   * hang — it is never skipped.
-   */
   private finishResponseDone(
     idleMs: number = VOICE_IDLE_AFTER_RESPONSE_MS,
   ): void {
@@ -1351,9 +1381,6 @@ export class VoiceController {
       }
     }
 
-    /*
-     * Any received audio proves this is NOT a bare tool round.
-     */
     this.toolRoundActive = false;
 
     if (!this.loggedFirstAudio) {
