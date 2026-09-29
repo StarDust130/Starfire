@@ -20,6 +20,7 @@ export type VoiceTransition =
   | { type: "response-audio" }
   | { type: "response-done" }
   | { type: "interrupted" }
+  | { type: "tool-followup-start" }
   | { type: "idle-timeout" }
   | { type: "stop" }
   | { type: "fatal-error" }
@@ -45,12 +46,6 @@ export function transitionVoiceState(
     case "mic-ready":
       return current === "starting" ? "connecting" : current;
 
-    /*
-     * A fresh socket is ready. Valid from the normal startup states
-     * AND from any mid-conversation state, because an unexpected
-     * socket drop triggers an automatic reconnect without leaving
-     * the conversation.
-     */
     case "session-ready":
       return isActive(current) ? "listening" : current;
 
@@ -82,6 +77,17 @@ export function transitionVoiceState(
 
     case "interrupted":
       return current === "assistant-speaking" ? "listening" : current;
+
+    /*
+     * A tool just finished and the model is generating its spoken
+     * follow-up: show "Thinking…" instead of a wrong "Listening…".
+     */
+    case "tool-followup-start":
+      return current === "listening" ||
+        current === "assistant-speaking" ||
+        current === "user-speaking"
+        ? "thinking"
+        : current;
 
     case "idle-timeout":
     case "stop":
