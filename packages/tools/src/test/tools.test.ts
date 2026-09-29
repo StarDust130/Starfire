@@ -94,6 +94,8 @@ describe("V0 toolset through the registry", () => {
 
       "open_file",
 
+      "open_url",
+
       "clipboard",
 
       "system_info",
@@ -105,6 +107,8 @@ describe("V0 toolset through the registry", () => {
       "window_control",
 
       "current_date_time",
+
+      "end_session",
     ]);
 
     for (const tool of registry.functionTools()) {
@@ -351,4 +355,18 @@ describe("V0 toolset through the registry", () => {
 
     expect(ports.system.info).toHaveBeenCalledWith("memory");
   });
+});
+
+it("end_session: returns a warm goodbye with no arguments", async () => {
+  const result = await registry.execute({
+    callId: "c15",
+
+    name: "end_session",
+
+    args: null,
+  });
+
+  expect(result.ok).toBe(true);
+
+  expect(result.summary).toContain("goodbye");
 });
