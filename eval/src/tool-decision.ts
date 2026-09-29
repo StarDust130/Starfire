@@ -201,7 +201,7 @@ export function decideTools(utterances: string[]): Intent {
   }
 
   // Files (extract the name the user said).
-  const fileMatch = all.match(/open (?:the )?([a-z0-9._ -]+?)\s+file\b/i);
+  const fileMatch = all.match(/open (?:the )?([a-z0-9. -]+?)\s+file\b/i);
 
   if (fileMatch?.[1]) {
     push("open_file", { path: fileMatch[1].trim() });
