@@ -214,7 +214,7 @@ describe("VoiceController", () => {
     expect(controller.getState().state).toBe("error");
   });
 
-  it("unexpected close mid-conversation auto-reconnects once", async () => {
+  it("unexpected close mid-conversation auto-reconnects", async () => {
     const { deps, bridge, emitEvent, onAudioCall } = makeDeps();
 
     const controller = new VoiceController(deps);
@@ -238,8 +238,8 @@ describe("VoiceController", () => {
     expect(deps.onStartWakeEngine).not.toHaveBeenCalled();
   });
 
-  it("a second unexpected close gives up cleanly and restores wake", async () => {
-    const { deps, emitEvent } = makeDeps();
+  it("survives the full reconnect budget, then gives up cleanly", async () => {
+    const { deps, bridge, emitEvent } = makeDeps();
 
     const controller = new VoiceController(deps);
 
@@ -247,11 +247,15 @@ describe("VoiceController", () => {
 
     await flush();
 
-    emitEvent({ conn: 1, kind: "closed" });
+    for (let drop = 1; drop <= 20; drop += 1) {
+      emitEvent({ conn: 1, kind: "closed" });
 
-    await vi.advanceTimersByTimeAsync(800);
+      await vi.advanceTimersByTimeAsync(800);
 
-    expect(controller.getState().state).toBe("listening");
+      expect(bridge.start).toHaveBeenCalledTimes(drop + 1);
+
+      expect(controller.getState().state).toBe("listening");
+    }
 
     emitEvent({ conn: 1, kind: "closed" });
 
@@ -673,16 +677,10 @@ describe("VoiceController", () => {
 
     expect(controller.getState().state).toBe("user-speaking");
 
-    /*
-     * In-flight audio of the interrupted response: dropped.
-     */
     onAudioCall()(new ArrayBuffer(64));
 
     expect(playback.push).toHaveBeenCalledTimes(1);
 
-    /*
-     * The cancel does NOT re-accept the dead response's audio.
-     */
     emitEvent({ conn: 1, kind: "response-cancelled" });
 
     expect(controller.getState().state).toBe("user-speaking");
@@ -691,9 +689,6 @@ describe("VoiceController", () => {
 
     expect(playback.push).toHaveBeenCalledTimes(1);
 
-    /*
-     * Only a NEW response.created re-opens the audio path.
-     */
     emitEvent({ conn: 1, kind: "response-created" });
 
     onAudioCall()(new ArrayBuffer(64));
@@ -879,6 +874,32 @@ describe("VoiceController", () => {
     emitEvent({ conn: 1, kind: "tool-result", ok: true, summary: "Copied." });
 
     expect(controller.getState().state).toBe("listening");
+  });
+
+  it("session-ended ends the session cleanly without reconnect", async () => {
+    const { deps, bridge, emitEvent } = makeDeps();
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    emitEvent({ conn: 1, kind: "session-ended" });
+
+    expect(controller.getState().state).toBe("listening");
+
+    /*
+     * The goodbye grace is 12000ms, then cleanup takes another 350ms
+     * before the state reaches idle — so advance a bit further.
+     */
+    await vi.advanceTimersByTimeAsync(12400);
+
+    expect(controller.getState().state).toBe("idle");
+
+    expect(deps.onStartWakeEngine).toHaveBeenCalled();
+
+    expect(bridge.start).toHaveBeenCalledTimes(1);
   });
 });
 
