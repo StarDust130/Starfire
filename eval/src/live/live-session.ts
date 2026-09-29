@@ -15,9 +15,19 @@ import { createDefaultRegistry } from "../../../packages/tools/src/index.ts";
 
 import { createEvalPorts, type SimState } from "../ports.js";
 
+import { createRateLimiter, type RateLimiter } from "./rate-limiter.js";
+
 const DEFAULT_ENDPOINT = `wss://api.empiriolabs.ai/v1/realtime?model=${REALTIME_MODEL}`;
 
 const CONNECT_TIMEOUT_MS = 15000;
+
+/*
+ * Instruction context is re-sent on every session (2.5k+ tokens);
+ * each turn adds ~1k. Used for rate-limit projections.
+ */
+const SESSION_OVERHEAD_TOKENS = 2600;
+
+const TURN_OVERHEAD_TOKENS = 900;
 
 export type LiveFunctionCall = {
   name: string;
@@ -37,14 +47,29 @@ export type LiveAskResult = {
   usage: { input: number; output: number };
 };
 
+export class LiveSessionClosedError extends Error {
+  constructor(
+    message: string,
+
+    readonly code: number | "error",
+  ) {
+    super(message);
+
+    this.name = "LiveSessionClosedError";
+  }
+}
+
 /*
- * A REAL Qwen realtime session. Utterances are sent as text turns
- * (input_text) over the same WebSocket production uses, the model's
- * tool calls execute through the REAL AgentRunner + ToolRegistry,
- * and results go back so the model generates its spoken answer.
+ * A persistent REAL Qwen realtime session, reused across many eval
+ * cases (like a real user conversation) so providers never see a
+ * 47-socket burst. Utterances are text turns; tool calls execute
+ * through the REAL AgentRunner + ToolRegistry. All sends pass through
+ * the account-level rate limiter.
  *
- * Only the OS ports are dry-run (no windows open during eval) —
- * every model decision, tool result, and network round-trip is real.
+ * ask() waits for the WHOLE turn: the model's function-call response
+ * AND the follow-up spoken response after the tool output is fed
+ * back. It THROWS on fatal server errors so the runner's backoff
+ * ladder can engage — a silent empty turn is never acceptable.
  */
 export class LiveSession {
   private ws: WebSocket | null = null;
@@ -54,6 +79,8 @@ export class LiveSession {
   private readonly runner: AgentRunner;
 
   private readonly simState: SimState;
+
+  private readonly limiter: RateLimiter;
 
   private transcript = "";
 
@@ -65,12 +92,16 @@ export class LiveSession {
 
   private doneCount = 0;
 
-  private toolsSinceDone = 0;
+  private toolsPendingResponse = 0;
 
   private fatalError: string | null = null;
 
+  private closed = false;
+
   constructor(simState: SimState) {
     this.simState = simState;
+
+    this.limiter = createRateLimiter();
 
     this.registry = createDefaultRegistry(createEvalPorts(this.simState, []));
 
@@ -81,18 +112,65 @@ export class LiveSession {
     });
   }
 
-  async connect(): Promise<void> {
+  isAlive(): boolean {
+    return (
+      this.ws !== null &&
+      this.ws.readyState === WebSocket.OPEN &&
+      this.fatalError === null &&
+      !this.closed
+    );
+  }
+
+  isReady(): boolean {
+    return this.isAlive();
+  }
+
+  private async sendLimited(
+    payload: string,
+    estimatedTokens: number,
+  ): Promise<boolean> {
+    await this.limiter.acquire(estimatedTokens);
+
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+
+    this.ws.send(payload);
+
+    return true;
+  }
+
+  /**
+   * Opens the socket (or reopens if it died) and waits until the
+   * session is configured. handleMessage receives an onReady callback
+   * that fires exactly when session.created has been handled.
+   */
+  async ensureConnected(): Promise<void> {
+    if (this.isAlive()) {
+      return;
+    }
+
+    if (this.ws) {
+      this.close();
+    }
+
     const key = process.env.EMPIRIOLABS_API_KEY;
 
     if (!key || key.trim().length === 0) {
       throw new Error("EMPIRIOLABS_API_KEY is not set.");
     }
 
-    const ws = new WebSocket(DEFAULT_ENDPOINT, {
+    const endpoint = process.env.EMPIRIOLABS_REALTIME_URL ?? DEFAULT_ENDPOINT;
+
+    const ws = new WebSocket(endpoint, {
       headers: { Authorization: `Bearer ${key}` },
     });
 
     this.ws = ws;
+
+    this.closed = false;
+
+    this.fatalError = null;
 
     let settled = false;
 
@@ -106,15 +184,19 @@ export class LiveSession {
       }, CONNECT_TIMEOUT_MS);
 
       ws.on("message", (data) => {
-        this.handleMessage(data.toString(), () => {
-          if (!settled) {
-            settled = true;
+        this.handleMessage(
+          data.toString(),
 
-            clearTimeout(timer);
+          () => {
+            if (!settled) {
+              settled = true;
 
-            resolve();
-          }
-        });
+              clearTimeout(timer);
+
+              resolve();
+            }
+          },
+        );
       });
 
       ws.on("error", (error) => {
@@ -126,6 +208,18 @@ export class LiveSession {
           this.fatalError = error.message;
 
           reject(error);
+        }
+      });
+
+      ws.on("close", (code) => {
+        if (!settled) {
+          settled = true;
+
+          clearTimeout(timer);
+
+          this.closed = true;
+
+          reject(new LiveSessionClosedError(`socket closed: ${code}`, code));
         }
       });
     });
@@ -140,7 +234,11 @@ export class LiveSession {
 
     if (event.kind === "session") {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.send(buildSessionUpdate(this.registry.functionTools()));
+        void this.sendLimited(
+          buildSessionUpdate(this.registry.functionTools()),
+
+          SESSION_OVERHEAD_TOKENS,
+        );
       }
 
       onReady?.();
@@ -149,7 +247,7 @@ export class LiveSession {
     }
 
     if (event.kind === "function-call") {
-      this.toolsSinceDone += 1;
+      this.toolsPendingResponse += 1;
 
       this.functionCalls.push({
         name: event.name,
@@ -175,13 +273,19 @@ export class LiveSession {
     if (event.kind === "response-done") {
       this.doneCount += 1;
 
-      this.toolsSinceDone = 0;
+      this.toolsPendingResponse = 0;
 
       if (event.usage) {
         this.usage.input += event.usage.input_tokens ?? 0;
 
         this.usage.output += event.usage.output_tokens ?? 0;
       }
+
+      return;
+    }
+
+    if (event.kind === "response-cancelled") {
+      this.toolsPendingResponse = 0;
 
       return;
     }
@@ -221,7 +325,7 @@ export class LiveSession {
     );
 
     if (result) {
-      this.send(
+      await this.sendLimited(
         buildFunctionCallOutput({
           callId: result.callId,
 
@@ -231,9 +335,11 @@ export class LiveSession {
 
           data: result.data,
         }),
+
+        400,
       );
     } else {
-      this.send(
+      await this.sendLimited(
         buildFunctionCallOutput({
           callId,
 
@@ -243,19 +349,28 @@ export class LiveSession {
 
           error: "internal-error",
         }),
+
+        100,
       );
     }
 
-    this.send(buildResponseCreate());
+    await this.sendLimited(buildResponseCreate(), 20);
   }
 
   /**
-   * Sends one utterance as a text turn and waits for the model's
-   * complete answer (including any tool rounds it triggers). Usage is
-   * reported as the per-turn delta of the session totals.
+   * Sends one utterance as a text turn and waits for the COMPLETE
+   * answer: the response.done for the initial turn AND every tool
+   * round-trip that follows. THROWS on fatal server errors and
+   * socket death so the runner's backoff ladder can engage — a
+   * silent empty turn is never acceptable. Usage is reported as the
+   * per-turn delta of the session totals.
    */
   async ask(text: string, timeoutMs = 60000): Promise<LiveAskResult> {
+    await this.ensureConnected();
+
     const started = Date.now();
+
+    const doneAtStart = this.doneCount;
 
     const usageBefore = { ...this.usage };
 
@@ -265,28 +380,44 @@ export class LiveSession {
 
     this.toolResults = [];
 
-    this.doneCount = 0;
-
-    this.toolsSinceDone = 0;
-
     this.fatalError = null;
 
-    this.send(buildConversationItemCreate(text));
+    await this.sendLimited(
+      buildConversationItemCreate(text),
 
-    this.send(buildResponseCreate());
+      TURN_OVERHEAD_TOKENS,
+    );
+
+    await this.sendLimited(buildResponseCreate(), 20);
 
     while (Date.now() - started < timeoutMs) {
-      if (this.fatalError) {
-        break;
+      if (!this.isAlive()) {
+        throw new LiveSessionClosedError(
+          this.fatalError ?? "socket closed during turn",
+
+          "error",
+        );
       }
 
-      if (this.doneCount > 0 && this.toolsSinceDone === 0) {
+      if (this.fatalError) {
+        throw new LiveSessionClosedError(this.fatalError, "error");
+      }
+
+      /*
+       * Turn complete = at least one NEW response.done AND no tool
+       * round still awaiting its follow-up response.
+       */
+      if (this.doneCount > doneAtStart && this.toolsPendingResponse === 0) {
         break;
       }
 
       await new Promise((resolve) => {
         setTimeout(resolve, 60);
       });
+    }
+
+    if (this.fatalError) {
+      throw new LiveSessionClosedError(this.fatalError, "error");
     }
 
     const durationMs = Date.now() - started;
@@ -320,18 +451,12 @@ export class LiveSession {
     return false;
   }
 
-  isAlive(): boolean {
-    return (
-      this.ws !== null &&
-      this.ws.readyState === WebSocket.OPEN &&
-      this.fatalError === null
-    );
-  }
-
   close(): void {
     const ws = this.ws;
 
     this.ws = null;
+
+    this.closed = true;
 
     if (!ws) {
       return;
