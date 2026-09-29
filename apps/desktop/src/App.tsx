@@ -13,6 +13,8 @@ import { createPlaybackPipeline } from "./voice/realtime/playback";
 
 export type InteractionSource = "wake-word" | "click" | "hotkey";
 
+const WAKE_RETRY_DELAY_MS = 800;
+
 export default function App() {
   const engineRef = useRef<WakeEngine | null>(null);
 
@@ -20,10 +22,6 @@ export default function App() {
 
   const controllerRef = useRef<VoiceController | null>(null);
 
-  /*
-   * The device the wake engine successfully captures. Conversation
-   * mode reuses the same exact device instead of the system default.
-   */
   const micIdRef = useRef<string | undefined>(undefined);
 
   const [error, setError] = useState<string | null>(null);
@@ -34,6 +32,8 @@ export default function App() {
   });
 
   const [activeTool, setActiveTool] = useState<string | null>(null);
+
+  const [goodbyeSleep, setGoodbyeSleep] = useState(false);
 
   const activateListening = useCallback((source: InteractionSource): void => {
     console.log(`[Starfire] 💗 listening activated by ${source}`);
@@ -47,55 +47,79 @@ export default function App() {
     void controllerRef.current?.start(source);
   }, []);
 
-  const startWakeEngine = useCallback(async (): Promise<void> => {
-    if (engineRef.current || startingRef.current) {
-      return;
-    }
-
-    startingRef.current = true;
-
-    try {
-      console.log("[Starfire] 🎤 requesting microphone...");
-
-      const microphones = await getMicrophones();
-
-      const microphone = chooseMicrophone(microphones);
-
-      if (!microphone) {
-        throw new Error("No microphone found.");
+  const startWakeEngine = useCallback(
+    async (allowRetry = true): Promise<void> => {
+      if (engineRef.current || startingRef.current) {
+        return;
       }
 
-      micIdRef.current = microphone.id;
+      startingRef.current = true;
 
-      console.log(`[Starfire] 🎙️ microphone: ${microphone.label}`);
+      try {
+        console.log("[Starfire] 🎤 requesting microphone...");
 
-      const engine = await createOnnxWakeWord();
+        const microphones = await getMicrophones();
 
-      engineRef.current = engine;
+        const microphone = chooseMicrophone(microphones);
 
-      await engine.load();
-
-      await engine.start(microphone.id, (word, probability) => {
-        if (word.toLowerCase() !== "starfire") {
-          return;
+        if (!microphone) {
+          throw new Error("No microphone found.");
         }
 
-        console.log(
-          `[Starfire] ✅ wake detected: "${word}" score=${probability.toFixed(3)}`,
-        );
+        micIdRef.current = microphone.id;
 
-        activateListening("wake-word");
-      });
+        console.log(`[Starfire] 🎙️ microphone: ${microphone.label}`);
 
-      console.log("[Starfire] ✅ wake-word listener ready.");
-    } catch (cause) {
-      console.error("[Starfire] ❌ wake-word startup failed:", cause);
+        const engine = await createOnnxWakeWord();
 
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      startingRef.current = false;
-    }
-  }, [activateListening]);
+        engineRef.current = engine;
+
+        await engine.load();
+
+        await engine.start(microphone.id, (word, probability) => {
+          if (word.toLowerCase() !== "starfire") {
+            return;
+          }
+
+          console.log(
+            `[Starfire] ✅ wake detected: "${word}" score=${probability.toFixed(3)}`,
+          );
+
+          activateListening("wake-word");
+        });
+
+        console.log("[Starfire] ✅ wake-word listener ready.");
+      } catch (cause) {
+        /*
+         * The wake engine's AudioContext can transiently fail to load
+         * its worklet right after a conversation AudioContext closed
+         * ("Unable to load a worklet's module"). One automatic retry
+         * fixes that race.
+         */
+        if (allowRetry && !engineRef.current) {
+          console.warn(
+            "[Starfire] ⚠️ wake-word start failed — retrying once...",
+            cause instanceof Error ? cause.message : cause,
+          );
+
+          startingRef.current = false;
+
+          await new Promise((resolve) => {
+            setTimeout(resolve, WAKE_RETRY_DELAY_MS);
+          });
+
+          return startWakeEngine(false);
+        }
+
+        console.error("[Starfire] ❌ wake-word startup failed:", cause);
+
+        setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        startingRef.current = false;
+      }
+    },
+    [activateListening],
+  );
 
   const stopWakeEngine = useCallback(async (): Promise<void> => {
     const engine = engineRef.current;
@@ -161,13 +185,18 @@ export default function App() {
         }
       },
 
-      onToolEvent: (event: {
-        kind: "tool-call" | "tool-result";
-        name?: string;
-      }) => {
+      onToolEvent: (event) => {
         if (event.kind === "tool-call") {
           setActiveTool(event.name ?? "tool");
-        } else {
+
+          if (event.name === "end_session") {
+            setGoodbyeSleep(true);
+
+            window.setTimeout(() => {
+              setGoodbyeSleep(false);
+            }, 6000);
+          }
+        } else if (event.kind === "tool-end") {
           setActiveTool(null);
         }
       },
@@ -192,13 +221,13 @@ export default function App() {
 
       window.removeEventListener("pagehide", handlePageHide);
 
-      setActiveTool(null);
-
       unsubscribe();
 
       controller.dispose();
 
       controllerRef.current = null;
+
+      setActiveTool(null);
 
       const engine = engineRef.current;
 
@@ -208,9 +237,6 @@ export default function App() {
     };
   }, [activateListening, startWakeEngine, stopWakeEngine]);
 
-  /*
-   * Auto-clear transient voice error bubbles.
-   */
   useEffect(() => {
     if (!voice.message) {
       return;
@@ -241,6 +267,7 @@ export default function App() {
         voiceError={voice.message}
         voiceMouth={controllerRef.current?.mouth ?? { raw: 0 }}
         activeTool={activeTool}
+        goodbyeSleep={goodbyeSleep}
         onActivate={activateListening}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
