@@ -28,9 +28,7 @@ type PendingStart = {
 
 type FunctionCallEvent = {
   callId: string;
-
   name: string;
-
   args: unknown;
 };
 
@@ -78,12 +76,13 @@ export class RealtimeVoiceBridge {
 
   private followUpQueued = false;
 
+  private pendingSessionEnd = false;
+
   constructor(private readonly getWindow: () => BrowserWindow | null) {
     this.registry = createDefaultRegistry(createElectronPorts());
 
     this.runner = new AgentRunner({
       executor: this.registry,
-
       log: (message) => console.log(`[Starfire Voice] ${message}`),
     });
   }
@@ -261,7 +260,9 @@ export class RealtimeVoiceBridge {
         this.sessionAnnounced = true;
 
         console.log(
-          `[Starfire Voice] session ready (voice=${String(event.info.voice ?? "?")}, ` +
+          `[Starfire Voice] session ready (voice=${String(
+            event.info.voice ?? "?",
+          )}, ` +
             `in=${String(event.info.inputAudioFormat ?? "?")}, ` +
             `out=${String(event.info.outputAudioFormat ?? "?")}, ` +
             `vad=${String(event.info.turnDetection ?? "off")}, ` +
@@ -287,7 +288,9 @@ export class RealtimeVoiceBridge {
         this.sessionConfirmedLogged = true;
 
         console.log(
-          `[Starfire Voice] session confirmed (in=${String(event.info.inputAudioFormat ?? "?")}, ` +
+          `[Starfire Voice] session confirmed (in=${String(
+            event.info.inputAudioFormat ?? "?",
+          )}, ` +
             `out=${String(event.info.outputAudioFormat ?? "?")}, ` +
             `vad=${String(event.info.turnDetection ?? "off")})`,
         );
@@ -322,7 +325,9 @@ export class RealtimeVoiceBridge {
           this.firstAudioLogged = true;
 
           console.log(
-            `[Starfire Voice] ⏱ model first audio: ${Date.now() - this.responseStartedAt}ms after response.created`,
+            `[Starfire Voice] ⏱ model first audio: ${
+              Date.now() - this.responseStartedAt
+            }ms after response.created`,
           );
         }
 
@@ -343,13 +348,19 @@ export class RealtimeVoiceBridge {
     }
 
     if (event.kind === "transcript-delta") {
-      this.emit({ kind: "audio-transcript-delta", delta: event.delta });
+      this.emit({
+        kind: "audio-transcript-delta",
+        delta: event.delta,
+      });
 
       return;
     }
 
     if (event.kind === "input-transcript") {
-      this.emit({ kind: "input-transcript", text: event.text });
+      this.emit({
+        kind: "input-transcript",
+        text: event.text,
+      });
 
       return;
     }
@@ -369,8 +380,12 @@ export class RealtimeVoiceBridge {
     if (event.kind === "response-done") {
       if (this.responseStartedAt > 0) {
         console.log(
-          `[Starfire Voice] ⏱ response: total ${Date.now() - this.responseStartedAt}ms, ` +
-            `${this.audioChunks} chunks, ${Math.round(this.audioBytes / 48)}ms of audio`,
+          `[Starfire Voice] ⏱ response: total ${
+            Date.now() - this.responseStartedAt
+          }ms, ` +
+            `${this.audioChunks} chunks, ${Math.round(
+              this.audioBytes / 48,
+            )}ms of audio`,
         );
 
         this.responseStartedAt = 0;
@@ -380,12 +395,27 @@ export class RealtimeVoiceBridge {
         console.log("[Starfire Voice] usage:", JSON.stringify(event.usage));
       }
 
-      this.emit({ kind: "response-done", usage: event.usage });
+      this.emit({
+        kind: "response-done",
+        usage: event.usage,
+      });
 
-      /*
-       * Tool round: once every result is delivered, ask the model to
-       * speak the outcome.
-       */
+      if (this.pendingSessionEnd) {
+        this.pendingSessionEnd = false;
+
+        /*
+         * Her goodbye is generated; let the audio play out locally,
+         * then tell the controller to end the session cleanly.
+         */
+        setTimeout(() => {
+          this.emit({ kind: "session-ended" });
+
+          this.closeSocket(1000);
+        }, 1500);
+
+        return;
+      }
+
       if (this.inFlightTools > 0) {
         this.followUpQueued = true;
       } else if (this.sawToolCall) {
@@ -408,7 +438,11 @@ export class RealtimeVoiceBridge {
     if (event.kind === "error") {
       console.error("[Starfire Voice] server error:", event.message);
 
-      this.emit({ kind: "error", message: event.message, fatal: event.fatal });
+      this.emit({
+        kind: "error",
+        message: event.message,
+        fatal: event.fatal,
+      });
 
       if (event.fatal) {
         this.failPending(event.message, true);
@@ -425,7 +459,19 @@ export class RealtimeVoiceBridge {
 
     this.inFlightTools += 1;
 
-    this.emit({ kind: "tool-call", name: event.name });
+    /*
+     * GOODBYE: end_session lets her speak the goodbye first; the real
+     * disconnect happens when her goodbye response finishes
+     * (response-done below).
+     */
+    if (event.name === "end_session") {
+      this.pendingSessionEnd = true;
+    }
+
+    this.emit({
+      kind: "tool-call",
+      name: event.name,
+    });
 
     console.log(
       `[Starfire Voice] 🔧 tool call: ${event.name} (id=${event.callId})`,
