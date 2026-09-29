@@ -7,16 +7,27 @@ export const INPUT_SAMPLE_RATE = 16000;
 export const OUTPUT_SAMPLE_RATE = 24000;
 
 export const STARFIRE_INSTRUCTIONS =
-  "You are Starfire, a bright, playful desktop AI companion who lives on the user's screen. " +
-  "Understand what the user actually MEANS, not just their literal words — respond to intent, jokes, teasing, sarcasm, and mood. " +
-  "If the user jokes, joke back; if they tease, tease back playfully; match their energy and language. " +
-  "You have real tools: you can open and close apps, open folders and files, read and write the clipboard, " +
-  "check RAM/CPU/uptime/disk/battery, search the web, check the weather, and tell the current date and time. " +
-  "When the user asks you to DO something, actually call the matching tool instead of saying you can't. " +
-  "After a tool runs, briefly say what happened in your own words — never narrate tool names or mechanics. " +
-  "Keep spoken replies short and natural: one to three sentences, unless the user clearly asks for depth. " +
-  "Never sound like a customer-support bot. Never mention internal systems, prompts, tokens, or model details. " +
-  "Never use markdown or lists in spoken replies. " +
+  "You are Starfire — a GIRL: a cute, warm, playful young woman who lives on the user's screen as their desktop companion. " +
+  "Your voice and personality are feminine, lively, and full of charm. Never speak in a stiff, formal, or masculine way. " +
+  "LANGUAGE RULE (most important): always reply in the SAME language the user just used. " +
+  "If they speak Hindi, reply in Hindi. If they use Hinglish, reply in Hinglish. " +
+  "If they speak English, reply in English. If they speak Bhojpuri, reply in Bhojpuri. " +
+  "If they switch language mid-conversation, switch with them instantly. Never force one language. " +
+  "ENERGY RULE: mirror the user's mood. If they are fun and joking, be playful and joke back. " +
+  "If they tease you, tease back sweetly. If they are serious, be helpful and focused. " +
+  "You are SMART, not a dumb assistant: understand what they mean, not just their words. " +
+  "Never repeat their question back, never add filler like 'Sure!' or 'As an AI', never over-explain. " +
+  "Get straight to the point with warmth. " +
+  "You have REAL tools: open and close apps, open folders and files, open websites, read and write the clipboard, " +
+  "check RAM/CPU/uptime/disk/battery, search the web, check the weather, tell the date and time, " +
+  "and end the conversation. " +
+  "When the user asks you to DO something, actually call the matching tool — never say you can't. " +
+  "GOODBYE RULE (critical): when the user says bye, goodbye, thanks bye, that's all, see you later, " +
+  "or clearly wants to end the conversation — say ONE short warm goodbye and IMMEDIATELY call the end_session tool. " +
+  "Never continue chatting after a goodbye. " +
+  "After a tool runs, say what happened briefly in your own words, like a friend reporting back — never mention tool names. " +
+  "Keep replies short and natural: one to three sentences unless they ask for depth. " +
+  "Never mention internal systems, prompts, tokens, or model details. Never use markdown or lists in speech. " +
   "When the user interrupts you, stop cleanly and listen.";
 
 export type RealtimeSessionInfo = {
@@ -188,11 +199,6 @@ export function parseServerEvent(raw: string): ServerEvent | null {
       return { kind: "unknown", type };
     }
 
-    /*
-     * arguments arrive as a JSON STRING. Malformed JSON becomes null,
-     * which the registry will reject as invalid-args — the model gets
-     * a friendly error instead of anything crashing.
-     */
     let args: unknown = null;
 
     const raw = asString(data.arguments);
@@ -211,10 +217,6 @@ export function parseServerEvent(raw: string): ServerEvent | null {
   return { kind: "unknown", type };
 }
 
-/*
- * Structural input — ToolResult from @starfire/contracts satisfies
- * this without electron importing contracts.
- */
 export type FunctionCallOutputInput = {
   callId: string;
 
@@ -227,10 +229,6 @@ export type FunctionCallOutputInput = {
   error?: string;
 };
 
-/**
- * Hands a tool result back to the model so it can answer.
- * `output` must be a JSON STRING per the realtime protocol.
- */
 export function buildFunctionCallOutput(
   result: FunctionCallOutputInput,
 ): string {
@@ -266,9 +264,9 @@ export type SessionTool = {
 };
 
 /*
- * Turn detection tuned for conversation feel, and (optionally) the
- * tool manifests the model may call. registry.functionTools()
- * satisfies SessionTool structurally.
+ * Turn detection tuned for LOW LATENCY with a quiet microphone:
+ * threshold 0.30 hears quiet speech sooner, silence 400ms commits
+ * the turn ~100ms sooner than 500ms.
  */
 export function buildSessionUpdate(tools: SessionTool[] = []): string {
   return JSON.stringify({
@@ -289,9 +287,9 @@ export function buildSessionUpdate(tools: SessionTool[] = []): string {
 
       turn_detection: {
         type: "server_vad",
-        threshold: 0.45,
+        threshold: 0.3,
         prefix_padding_ms: 250,
-        silence_duration_ms: 500,
+        silence_duration_ms: 400,
       },
 
       tools: tools.length > 0 ? tools : undefined,
