@@ -13,11 +13,17 @@
     "test:watch": "vitest",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
     "build": "pnpm -r --if-present build",
-    "verify": "pnpm check && pnpm build"
+    "verify": "pnpm check && pnpm build",
+    "eval": "pnpm --filter @starfire/contracts build && pnpm --filter @starfire/tools build && pnpm --filter @starfire/core build && tsx eval/src/run.ts",
+    "eval:live": "pnpm --filter @starfire/contracts build && pnpm --filter @starfire/tools build && pnpm --filter @starfire/core build && tsx eval/src/live/run.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",
+    "@types/node": "^26.6.3",
+    "@types/ws": "^8.18.1",
     "lefthook": "^2.1.14",
-    "vitest": "^5.0.1"
+    "tsx": "^4.19.2",
+    "vitest": "^5.0.1",
+    "ws": "^8.22.0"
   }
 }
