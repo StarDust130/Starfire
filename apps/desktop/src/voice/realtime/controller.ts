@@ -81,6 +81,12 @@ export type VoiceControllerDeps = {
 
   onLog?: (message: string) => void;
 
+  onToolEvent?: (event: {
+    kind: "tool-call" | "tool-result";
+
+    name?: string;
+  }) => void;
+
   getDeviceId?: () => string | undefined;
 
   micStallTimeoutMs?: number;
@@ -128,19 +134,8 @@ const LOCAL_BARGE_FLOOR = 0.09;
 
 const LOCAL_BARGE_FRAMES = 18;
 
-/*
- * Safety net while a tool runs in the main process (tools may take
- * up to their own 10s timeout). Armed on the tool-call event and on
- * the tool round's response.done.
- */
 const TOOL_ROUND_IDLE_MS = 15000;
 
-/*
- * Stale-audio drop window. After an interrupt, in-flight chunks of
- * the dead response arrive within milliseconds. If the flag were to
- * stick (server skipping response.cancelled etc.), this window
- * guarantees she can never go permanently mute.
- */
 const STALE_DROP_WINDOW_MS = 3000;
 
 const MIC_VARIANTS: MicVariant[] = [
@@ -253,6 +248,14 @@ export class VoiceController {
 
   private toolRoundActive = false;
 
+  /*
+   * Real-time loudness of what her speakers are actually playing
+   * (from the play-worklet's output meter). Used by the adaptive
+   * echo gate: speaker leakage into the mic arrives attenuated, so
+   * mic audio must EXCEED the live output level to be uploaded.
+   */
+  private outputLevel = 0;
+
   constructor(private readonly deps: VoiceControllerDeps) {}
 
   getState(): VoiceSnapshot {
@@ -339,6 +342,8 @@ export class VoiceController {
     void playback?.stop();
 
     this.mouth.raw = 0;
+
+    this.outputLevel = 0;
 
     this.loggedFirstAudio = false;
 
@@ -468,6 +473,8 @@ export class VoiceController {
 
     this.toolRoundActive = false;
 
+    this.outputLevel = 0;
+
     this.chosenDeviceId = this.deps.getDeviceId?.();
 
     if (this.chosenDeviceId) {
@@ -507,6 +514,8 @@ export class VoiceController {
 
     this.playback = this.deps.createPlayback({
       onLevel: (rms) => {
+        this.outputLevel = rms;
+
         this.mouth.raw = mouthFromRms(rms);
       },
 
@@ -704,6 +713,8 @@ export class VoiceController {
 
     this.loudStreak = 0;
 
+    this.outputLevel = 0;
+
     this.cancelDrainWait();
   }
 
@@ -851,11 +862,21 @@ export class VoiceController {
     }
 
     /*
-     * While she is audible: stream audio above the echo floor (so the
-     * server VAD can interrupt), and run the local fallback detector.
+     * While she is audible: stream audio above the adaptive echo gate
+     * (so the server VAD can interrupt on real speech), and run the
+     * local fallback detector.
      */
     if (this.stateName === "assistant-speaking") {
-      if (chunk.rms >= ECHO_UPLOAD_FLOOR) {
+      /*
+       * Adaptive half-duplex gate: while she is audible, upload only
+       * mic audio clearly louder than her live speaker output.
+       * Speaker leakage arrives attenuated (walls of the room), so
+       * echo can no longer trip the server VAD — while a real user
+       * talking near the mic is far louder than the leakage.
+       */
+      const echoFloor = Math.max(ECHO_UPLOAD_FLOOR, this.outputLevel * 0.9);
+
+      if (chunk.rms >= echoFloor) {
         this.clearIdleTimer();
 
         this.deps.bridge?.sendAudio(b64);
@@ -1043,6 +1064,8 @@ export class VoiceController {
 
         this.log(`🔧 tool: ${event.name}`);
 
+        this.deps.onToolEvent?.({ kind: "tool-call", name: event.name });
+
         this.clearIdleTimer();
 
         /*
@@ -1058,6 +1081,8 @@ export class VoiceController {
         this.log(
           event.ok ? `🔧 ok: ${event.summary}` : `🔧 failed: ${event.summary}`,
         );
+
+        this.deps.onToolEvent?.({ kind: "tool-result" });
 
         break;
       }
@@ -1239,6 +1264,8 @@ export class VoiceController {
 
     this.playback = this.deps.createPlayback({
       onLevel: (rms) => {
+        this.outputLevel = rms;
+
         this.mouth.raw = mouthFromRms(rms);
       },
 
@@ -1268,6 +1295,8 @@ export class VoiceController {
 
   private handlePlaybackDrained(): void {
     this.mouth.raw = 0;
+
+    this.outputLevel = 0;
 
     if (this.awaitingDrain) {
       this.log("playback drained");
@@ -1410,6 +1439,8 @@ export class VoiceController {
     this.deps.bridge?.stop();
 
     this.mouth.raw = 0;
+
+    this.outputLevel = 0;
 
     this.transmitting = false;
 
