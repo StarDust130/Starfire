@@ -7,11 +7,6 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 import type { InteractionSource } from "../App";
-
-import { MouthSmoother } from "../voice/realtime/audio";
-
-import type { VoiceStateName } from "../voice/realtime/state";
-
 import {
   type Activity,
   type ActivityKind,
@@ -23,28 +18,21 @@ import {
   chooseActivity,
   startActivity,
 } from "../three/activities";
-
-import {
-  EASTER_EGG_STREAK,
-  EASTER_EGG_WINDOW_S,
-  type EasterEgg,
-  type EasterEggKind,
-  applyEasterEgg,
-  chooseEasterEgg,
-  startEasterEgg,
-} from "../three/easterEgg";
-
 import {
   carryWalk,
   createDragFeelState,
   updateDragFeel,
 } from "../three/dragFeel";
-
 import {
-  STARFIRE_BONES,
-  type HeadAnchor,
-  type Rig,
-  type StarfireBoneName,
+  applyEasterEgg,
+  chooseEasterEgg,
+  EASTER_EGG_STREAK,
+  EASTER_EGG_WINDOW_S,
+  type EasterEgg,
+  type EasterEggKind,
+  startEasterEgg,
+} from "../three/easterEgg";
+import {
   addBone,
   clamp,
   createPoseTarget,
@@ -52,29 +40,33 @@ import {
   dampPoseTarget,
   deg,
   findExpression,
+  type HeadAnchor,
+  type Rig,
   removeObviousEnvironment,
   resetPoseTarget,
+  STARFIRE_BONES,
+  type StarfireBoneName,
   setExpression,
 } from "../three/pose";
-
-import { applyVoiceAnimation, talkingWanderX } from "../three/voiceAnim";
-
 import {
-  LISTENING_ACTION_S,
-  MICRO_MAX_DELAY,
-  MICRO_MIN_DELAY,
-  type ListeningAction,
-  type ListeningVariant,
-  type MicroKind,
-  type MicroReaction,
   applyListeningAction,
   applyMicroReaction,
   chooseListeningVariant,
   chooseMicro,
+  LISTENING_ACTION_S,
+  type ListeningAction,
+  type ListeningVariant,
   listeningExpression,
+  MICRO_MAX_DELAY,
+  MICRO_MIN_DELAY,
+  type MicroKind,
+  type MicroReaction,
   microDuration,
   microExpression,
 } from "../three/reactions";
+import { applyVoiceAnimation, talkingWanderX } from "../three/voiceAnim";
+import { MouthSmoother } from "../voice/realtime/audio";
+import type { VoiceStateName } from "../voice/realtime/state";
 
 import StarfireZzz from "./StarfireZzz";
 
@@ -86,6 +78,8 @@ type StarfireSceneProps = {
   voiceError: string | null;
 
   voiceMouth: { raw: number };
+
+  activeTool: string | null;
 
   onActivate: (source: InteractionSource) => void;
 
@@ -117,6 +111,19 @@ const BLINK_DURATION = 0.16;
 
 const POSE_DAMP_RATE = 4.4;
 
+const TOOL_BUBBLE_TEXT: Record<string, string> = {
+  web_search: "Searching the web…",
+  get_weather: "Checking the weather…",
+  clipboard: "Checking your clipboard…",
+  system_info: "Checking your system…",
+  open_app: "Opening that for you…",
+  close_app: "Closing that…",
+  open_folder: "Opening the folder…",
+  open_file: "Opening the file…",
+  window_control: "Adjusting the window…",
+  current_date_time: "Checking the time…",
+};
+
 const BUBBLE_TEXT: Partial<Record<VoiceStateName, string>> = {
   starting: "Connecting…",
   connecting: "Connecting…",
@@ -134,6 +141,7 @@ export default function StarfireScene({
   voiceState,
   voiceError,
   voiceMouth,
+  activeTool,
   onActivate,
   onDragStart,
   onDragEnd,
@@ -156,9 +164,13 @@ export default function StarfireScene({
 
   const voiceMouthRef = useRef<{ raw: number }>(voiceMouth);
 
+  const activeToolRef = useRef<string | null>(activeTool);
+
   voiceStateRef.current = voiceState;
 
   voiceMouthRef.current = voiceMouth;
+
+  activeToolRef.current = activeTool;
 
   /*
    * ALL state hooks are declared BEFORE any value that reads them —
@@ -170,13 +182,21 @@ export default function StarfireScene({
 
   const voiceActive = isVoiceActive(voiceState);
 
+  const isToolBusy = activeTool !== null;
+
+  const toolBubbleText = activeTool
+    ? (TOOL_BUBBLE_TEXT[activeTool] ?? `Using ${activeTool}…`)
+    : null;
+
+  const bubbleShown =
+    (voiceActive && voiceState !== "assistant-speaking") ||
+    showListening ||
+    isToolBusy;
+
   /*
    * The bubble is for listening/thinking/connecting only — while she
    * is actually talking, her animation says it; no text bubble.
    */
-  const bubbleShown =
-    (voiceActive && voiceState !== "assistant-speaking") || showListening;
-
   useEffect(() => {
     let timer: number | undefined;
 
@@ -1159,7 +1179,7 @@ export default function StarfireScene({
         let lookX = damped.lookX;
         let lookY = damped.lookY;
 
-        if (vs === "thinking") {
+        if (vs === "thinking" || activeToolRef.current !== null) {
           const gazeSide = voiceSeed % 2 < 1 ? 1 : -1;
 
           lookX += gazeSide * (0.03 + Math.sin(elapsed * 0.7) * 0.03);
@@ -1315,9 +1335,15 @@ export default function StarfireScene({
             <div className="starfire-listening-card">
               <div className="starfire-listening-title">
                 <span className="starfire-listening-dot" />
-                {bubbleText}
+                {isToolBusy && toolBubbleText ? toolBubbleText : bubbleText}
               </div>
               {isThinking ? (
+                <div className="starfire-thinking-dots">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+              ) : isToolBusy ? (
                 <div className="starfire-thinking-dots">
                   <span />
                   <span />
