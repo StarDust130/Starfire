@@ -110,7 +110,15 @@ export class ToolRegistry {
       };
     }
 
-    const validated = validateToolArgs(tool.manifest.parameters, call.args);
+    /*
+     * Models sometimes send null or omit arguments entirely for
+     * zero-argument tools. Treat that as an empty object so "no
+     * arguments" tools work naturally.
+     */
+    const validated = validateToolArgs(
+      tool.manifest.parameters,
+      call.args ?? {},
+    );
 
     if (!validated.ok) {
       return {
