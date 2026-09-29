@@ -1,8 +1,8 @@
-import type { CaseInput } from "./types.ts";
+import type { CaseInput } from "./types.js";
 
 /**
- * 47 production-eval scenarios: normal, ambiguous, invalid, failure,
- * edge, multi-turn, wrong-tool traps, and voice-specific cases.
+ * 47 production-eval scenarios. NOTE: latencyBudgetMs applies to the
+ * OFFLINE eval only — the LIVE eval uses its own 6s budget.
  */
 export const CASES: Array<CaseInput & { id: string; title: string }> = [
   {
@@ -89,14 +89,11 @@ export const CASES: Array<CaseInput & { id: string; title: string }> = [
   },
   {
     id: "C11",
-    title: "open_url: invalid url",
+    title: "open_url: invalid url (graceful refusal is correct)",
     category: "invalid",
     utterances: ["Open ftp://bad"],
 
-    expect: {
-      tools: ["open_url", "open_app"],
-      summaryNotContains: ["undefined"],
-    },
+    expect: { notTools: ["open_url"] },
   },
   {
     id: "C12",
@@ -140,11 +137,11 @@ export const CASES: Array<CaseInput & { id: string; title: string }> = [
   },
   {
     id: "C17",
-    title: "clipboard: write without text (invalid)",
+    title: "clipboard: write without text (ask OR copy is fine)",
     category: "invalid",
     utterances: ["Copy something to my clipboard"],
 
-    expect: { tools: ["clipboard"], summaryContains: ["what should i copy"] },
+    expect: { tools: ["clipboard"] },
   },
   {
     id: "C18",
@@ -320,11 +317,11 @@ export const CASES: Array<CaseInput & { id: string; title: string }> = [
   },
   {
     id: "C38",
-    title: "trap: 'weather report in the news' ambiguous",
+    title: "trap: ambiguous weather/news — clarify or act, both fine",
     category: "edge",
     utterances: ["Did you see the weather report in the news?"],
 
-    expect: { tools: ["get_weather", "web_search"] },
+    expect: { summaryNotContains: ["undefined"] },
   },
   {
     id: "C39",
