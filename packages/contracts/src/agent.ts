@@ -52,6 +52,10 @@ export const TOOL_NAMES = [
   "open_file",
   "clipboard",
   "system_info",
+  "web_search",
+  "get_weather",
+  "window_control",
+  "current_date_time",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -180,6 +184,53 @@ export type SystemPort = {
   info(query: SystemInfoQuery): Promise<SystemInfoResult>;
 };
 
+export type WebSearchResultItem = {
+  title: string;
+
+  url: string;
+
+  snippet: string;
+};
+
+export type WebSearchResult = {
+  answer: string;
+
+  results: WebSearchResultItem[];
+};
+
+export type WebPort = {
+  search(query: string): Promise<WebSearchResult>;
+};
+
+export type WeatherResult = {
+  summary: string;
+
+  temperatureC: number | null;
+
+  data?: Record<string, unknown>;
+};
+
+export type WeatherPort = {
+  current(place?: string): Promise<WeatherResult>;
+};
+
+export type WindowAction =
+  | "focus"
+  | "lower"
+  | "minimize"
+  | "maximize"
+  | "restore";
+
+export type WindowControlResult = {
+  done: boolean;
+
+  detail?: string;
+};
+
+export type WindowPort = {
+  control(action: WindowAction, app?: string): Promise<WindowControlResult>;
+};
+
 export type AgentPorts = {
   apps: AppPort;
 
@@ -188,4 +239,10 @@ export type AgentPorts = {
   clipboard: ClipboardPort;
 
   system: SystemPort;
+
+  web: WebPort;
+
+  weather: WeatherPort;
+
+  windows: WindowPort;
 };
