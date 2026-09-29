@@ -1,5 +1,50 @@
 import type { CaseInput } from "../types.js";
-import type { LiveAskResult } from "./live-session.js";
+
+/*
+ * LIVE latency budget. Real turns include network + model + tools,
+ * which land at 1.3-2.7s. Offline budgets do NOT apply here.
+ */
+const LIVE_DEFAULT_LATENCY_BUDGET_MS = 6000;
+
+export type CaseReport = {
+  id: string;
+
+  title: string;
+
+  category: string;
+
+  passed: boolean;
+
+  reasons: string[];
+
+  utterances: string[];
+
+  turns: Array<{
+    utterance: string;
+
+    transcript: string;
+
+    durationMs: number;
+
+    functionCalls: Array<{ name: string; args: unknown }>;
+
+    toolResults: Array<{
+      ok: boolean;
+
+      summary: string;
+
+      error?: string;
+    }>;
+  }>;
+
+  toolsCalled: string[];
+
+  worstTurnMs: number;
+
+  usage: { input: number; output: number };
+};
+
+export type LiveTurn = CaseReport["turns"][number];
 
 export type LiveCaseGrade = {
   passed: boolean;
@@ -21,19 +66,19 @@ export type LiveCaseGrade = {
 
 export function gradeLiveCase(
   testCase: CaseInput & { id: string; title: string },
-  asks: LiveAskResult[],
+  turns: LiveTurn[],
 ): LiveCaseGrade {
   const expect = testCase.expect ?? {};
 
   const reasons: string[] = [];
 
-  const calledNames = asks.flatMap((ask) =>
-    ask.functionCalls.map((call) => call.name),
+  const calledNames = turns.flatMap((turn: LiveTurn) =>
+    turn.functionCalls.map((call: { name: string }) => call.name),
   );
 
-  const allToolResults = asks.flatMap((ask) => ask.toolResults);
+  const allToolResults = turns.flatMap((turn: LiveTurn) => turn.toolResults);
 
-  const transcripts = asks.map((ask) => ask.transcript.trim());
+  const transcripts = turns.map((turn: LiveTurn) => turn.transcript.trim());
 
   // ------------------------------------------------------------
   // TOOL SELECTION
@@ -41,7 +86,9 @@ export function gradeLiveCase(
   let toolSelection = true;
 
   if (expect.tools && expect.tools.length > 0) {
-    const hasAny = expect.tools.some((tool) => calledNames.includes(tool));
+    const hasAny = expect.tools.some((tool: string) =>
+      calledNames.includes(tool),
+    );
 
     if (!hasAny) {
       toolSelection = false;
@@ -54,7 +101,9 @@ export function gradeLiveCase(
   }
 
   if (expect.notTools && expect.notTools.length > 0) {
-    const bad = calledNames.filter((tool) => expect.notTools?.includes(tool));
+    const bad = calledNames.filter((tool: string) =>
+      expect.notTools?.includes(tool),
+    );
 
     if (bad.length > 0) {
       toolSelection = false;
@@ -70,7 +119,7 @@ export function gradeLiveCase(
 
   const expectFailure =
     (expect.summaryContains ?? []).some(
-      (needle) =>
+      (needle: string) =>
         needle.includes("couldn't") ||
         needle.includes("not be empty") ||
         needle.includes("what should i copy"),
@@ -80,7 +129,7 @@ export function gradeLiveCase(
 
   if (!expectFailure && failing.length > 0) {
     const allGraceful = failing.every(
-      (result) => result.error === "tool-error",
+      (result: { error?: string }) => result.error === "tool-error",
     );
 
     if (!(allGraceful && testCase.category === "invalid")) {
@@ -93,12 +142,12 @@ export function gradeLiveCase(
   }
 
   // ------------------------------------------------------------
-  // RESPONSE QUALITY — the model must actually SAY something
+  // RESPONSE QUALITY
   // ------------------------------------------------------------
   let responseQuality = true;
 
   if (!expect.tools || expect.tools.length === 0) {
-    const spoke = transcripts.some((text) => text.length > 0);
+    const spoke = transcripts.some((text: string) => text.length > 0);
 
     if (!spoke) {
       responseQuality = false;
@@ -107,7 +156,7 @@ export function gradeLiveCase(
     }
   } else {
     const summaries = allToolResults
-      .map((result) => result.summary.toLowerCase())
+      .map((result: { summary: string }) => result.summary.toLowerCase())
       .join(" \n ");
 
     const spoken = transcripts.join(" \n ").toLowerCase();
@@ -155,15 +204,18 @@ export function gradeLiveCase(
   // ------------------------------------------------------------
   // LATENCY
   // ------------------------------------------------------------
-  const budget = testCase.latencyBudgetMs ?? 8000;
+  const budget = LIVE_DEFAULT_LATENCY_BUDGET_MS;
 
-  const worstTurnMs = Math.max(0, ...asks.map((ask) => ask.durationMs));
+  const worstTurnMs = Math.max(
+    0,
+    ...turns.map((turn: LiveTurn) => turn.durationMs),
+  );
 
   const withinLatency = worstTurnMs <= budget;
 
   if (!withinLatency) {
     reasons.push(
-      `latency ${Math.round(worstTurnMs)}ms exceeded budget ${budget}ms`,
+      `latency ${Math.round(worstTurnMs)}ms exceeded live budget ${budget}ms`,
     );
   }
 
