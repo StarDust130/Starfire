@@ -44,6 +44,30 @@ function createFakePorts(): AgentPorts {
         data: { percent: 62 },
       })),
     },
+
+    web: {
+      search: vi.fn(async (_q: string) => ({
+        answer: "I found 1 result for that.",
+
+        results: [{ title: "A", url: "https://a", snippet: "s" }],
+      })),
+    },
+
+    weather: {
+      current: vi.fn(async (_place?: string) => ({
+        summary: "It's 20°C.",
+
+        temperatureC: 20,
+      })),
+    },
+
+    windows: {
+      control: vi.fn(async (_action: string, _app?: string) => ({
+        done: false,
+
+        detail: "Window control isn't supported on Wayland yet.",
+      })),
+    },
   };
 }
 
@@ -58,7 +82,7 @@ beforeEach(() => {
 });
 
 describe("V0 toolset through the registry", () => {
-  it("registers exactly the 7 V0 tools with valid manifests", () => {
+  it("registers the full V0 toolset with valid manifests", () => {
     expect(registry.names()).toEqual([
       "open_app",
 
@@ -73,6 +97,14 @@ describe("V0 toolset through the registry", () => {
       "clipboard",
 
       "system_info",
+
+      "web_search",
+
+      "get_weather",
+
+      "window_control",
+
+      "current_date_time",
     ]);
 
     for (const tool of registry.functionTools()) {
