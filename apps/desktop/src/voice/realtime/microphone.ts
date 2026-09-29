@@ -40,6 +40,28 @@ export function resolveWorkletUrl(name: string): string {
   return new URL(`worklets/${name}`, document.baseURI).toString();
 }
 
+const WORKLET_RETRY_DELAY_MS = 250;
+
+/*
+ * Worklet module loading can transiently fail right after a previous
+ * AudioContext closed ("Unable to load a worklet's module") — one
+ * automatic retry fixes that race.
+ */
+async function addWorkletModule(
+  context: AudioContext,
+  url: string,
+): Promise<void> {
+  try {
+    await context.audioWorklet.addModule(url);
+  } catch {
+    await new Promise((resolve) => {
+      setTimeout(resolve, WORKLET_RETRY_DELAY_MS);
+    });
+
+    await context.audioWorklet.addModule(url);
+  }
+}
+
 function buildAudioConstraints(
   variant: MicVariant,
   deviceId: string | undefined,
@@ -74,8 +96,9 @@ function buildAudioConstraints(
  * audio graph is pull-based, and a capture worklet with no path to
  * the destination is never processed. The gain of 0 keeps it silent.
  *
- * The AudioContext runs at the device's native rate; the controller
- * resamples to 16 kHz in software (LinearResampler).
+ * The AudioContext runs at the device's NATIVE rate — no override.
+ * Forcing a rate on Linux makes MediaStreamAudioSourceNode deliver
+ * all-zero samples. The controller resamples to 16 kHz in software.
  */
 export function createMicPipeline(
   handlers: MicHandlers,
@@ -133,7 +156,7 @@ export function createMicPipeline(
       await context.resume();
     }
 
-    await context.audioWorklet.addModule(resolveWorkletUrl("mic-worklet.js"));
+    await addWorkletModule(context, resolveWorkletUrl("mic-worklet.js"));
 
     const source = context.createMediaStreamSource(stream);
 
