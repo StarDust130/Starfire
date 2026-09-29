@@ -9,10 +9,18 @@ import type {
   OpenedApp,
   SystemInfoQuery,
   SystemInfoResult,
+  WeatherResult,
+  WebSearchResult,
+  WindowAction,
+  WindowControlResult,
 } from "@starfire/contracts";
 
 import { ToolError } from "@starfire/tools";
 import { clipboard } from "electron";
+
+import { createExaSearchAdapter } from "./exa-search.js";
+
+import { createKwinWindowController } from "./kwin-windows.js";
 
 /*
  * ---------------------------------------------------
@@ -23,7 +31,8 @@ import { clipboard } from "electron";
  *  - denylist for dangerous binaries
  *  - file tools restricted to the user's home folder
  *  - close is GRACEFUL (SIGTERM, like clicking X) — never SIGKILL
- *  - focus is honest about the Wayland limitation
+ *  - window control goes through KWin scripting (the compositor
+ *    performs every action — Wayland-safe on KDE)
  */
 
 const DENYLIST = new Set([
@@ -228,12 +237,40 @@ function humanizeUptime(totalSeconds: number): string {
   return `${minutes}m`;
 }
 
+async function fetchJson<T>(url: string, timeoutMs = 6000): Promise<T> {
+  const controller = new AbortController();
+
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+
+    if (!response.ok) {
+      throw new ToolError("A web service I needed didn't respond properly.");
+    }
+
+    return (await response.json()) as T;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function createElectronPorts(): AgentPorts {
   /*
    * Apps Starfire launched herself — remembered so close_app can
    * target them precisely and gracefully.
    */
   const opened = new Map<string, OpenedApp>();
+
+  const kwin = createKwinWindowController(
+    {
+      read: () => clipboard.readText(),
+
+      write: (text: string) => clipboard.writeText(text),
+    },
+
+    (message) => console.log(`[Starfire Voice] ${message}`),
+  );
 
   return {
     apps: {
@@ -331,16 +368,23 @@ export function createElectronPorts(): AgentPorts {
         };
       },
 
-      async focus(_app: string): Promise<FocusOutcome> {
+      async focus(app: string): Promise<FocusOutcome> {
         /*
-         * Wayland intentionally blocks third-party window focusing.
-         * When KWin DBus scripting lands, only this port changes —
-         * the tool, registry, and model need nothing.
+         * Real focusing on KDE: delegated to KWin scripting (the
+         * compositor performs the raise — Wayland-safe).
          */
-        return {
-          focused: false,
+        const outcome = await kwin.perform("focus", normalizeName(app));
 
-          detail: "Window focusing isn't supported on Wayland yet — I'm sorry!",
+        if (!outcome.done) {
+          return {
+            focused: false,
+
+            detail: outcome.detail ?? `I couldn't bring ${app} to the front.`,
+          };
+        }
+
+        return {
+          focused: true,
         };
       },
     },
@@ -485,6 +529,101 @@ export function createElectronPorts(): AgentPorts {
         return {
           summary: `You're on ${os.hostname()} — ${os.type()} ${os.release()} (${os.arch()}).`,
         };
+      },
+    },
+
+    web: {
+      async search(query: string): Promise<WebSearchResult> {
+        const adapter = createExaSearchAdapter(process.env.EXA_API_KEY);
+
+        const result = await adapter.search(query);
+
+        return result as WebSearchResult;
+      },
+    },
+
+    weather: {
+      async current(place?: string): Promise<WeatherResult> {
+        /*
+         * Free, keyless: Open-Meteo geocoding + forecast. IP
+         * geolocation via ip-api.com (free, no key) when no place is
+         * given.
+         */
+        let latitude: number;
+
+        let longitude: number;
+
+        let placeName: string;
+
+        if (place) {
+          const geo = await fetchJson<{
+            results?: Array<{
+              latitude: number;
+              longitude: number;
+              name: string;
+            }>;
+          }>(
+            `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(place)}&count=1`,
+          );
+
+          const hit = geo.results?.[0];
+
+          if (!hit) {
+            throw new ToolError(`I couldn't find a place called "${place}".`);
+          }
+
+          latitude = hit.latitude;
+
+          longitude = hit.longitude;
+
+          placeName = hit.name;
+        } else {
+          const ip = await fetchJson<{ lat?: number; lon?: number } | null>(
+            "http://ip-api.com/json/",
+          );
+
+          if (!ip?.lat || !ip?.lon) {
+            throw new ToolError("I couldn't figure out your location.");
+          }
+
+          latitude = ip.lat;
+
+          longitude = ip.lon;
+
+          placeName = "your area";
+        }
+
+        const weather = await fetchJson<{
+          current?: { temperature_2m?: number; weather_code?: number };
+        }>(
+          `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weather_code`,
+        );
+
+        const temperature = weather.current?.temperature_2m;
+
+        if (typeof temperature !== "number") {
+          throw new ToolError("I couldn't get the weather right now.");
+        }
+
+        return {
+          summary: `It's ${Math.round(temperature)}°C in ${placeName} right now.`,
+
+          temperatureC: temperature,
+
+          data: {
+            place: placeName,
+            weatherCode: weather.current?.weather_code,
+          },
+        };
+      },
+    },
+
+    windows: {
+      async control(
+        action: WindowAction,
+        app?: string,
+      ): Promise<WindowControlResult> {
+        return kwin.perform(action, app ? normalizeName(app) : null);
       },
     },
   };
