@@ -16,7 +16,7 @@ import type {
 } from "@starfire/contracts";
 
 import { ToolError } from "@starfire/tools";
-import { clipboard } from "electron";
+import { clipboard, shell } from "electron";
 
 import { createExaSearchAdapter } from "./exa-search.js";
 
@@ -33,6 +33,8 @@ import { createKwinWindowController } from "./kwin-windows.js";
  *  - close is GRACEFUL (SIGTERM, like clicking X) — never SIGKILL
  *  - window control goes through KWin scripting (the compositor
  *    performs every action — Wayland-safe on KDE)
+ *  - websites open through shell.openExternal (the OS default
+ *    browser, Wayland-safe)
  */
 
 const DENYLIST = new Set([
@@ -63,21 +65,24 @@ const APP_ALIASES: Record<string, string[]> = {
   code: ["code"],
   discord: ["discord"],
   firefox: ["firefox"],
-  chrome: ["google-chrome-stable", "chromium"],
-  "google chrome": ["google-chrome-stable", "chromium"],
+  chrome: ["google-chrome-stable", "google-chrome", "chromium"],
+  "google chrome": ["google-chrome-stable", "google-chrome", "chromium"],
   chromium: ["chromium"],
-  brave: ["brave"],
+  brave: ["brave", "brave-browser"],
+  browser: ["brave", "firefox", "google-chrome-stable", "chromium"],
+  notion: ["notion-app", "notion"],
+  telegram: ["telegram-desktop"],
   terminal: ["kitty", "konsole", "alacritty", "gnome-terminal"],
   konsole: ["konsole"],
   kitty: ["kitty"],
   alacritty: ["alacritty"],
   files: ["dolphin", "nautilus"],
   dolphin: ["dolphin"],
+  nautilus: ["nautilus"],
   calculator: ["kcalc", "gnome-calculator"],
   spotify: ["spotify"],
   vlc: ["vlc"],
   mpv: ["mpv"],
-  telegram: ["telegram-desktop"],
   steam: ["steam"],
   gimp: ["gimp"],
   krita: ["krita"],
@@ -143,21 +148,26 @@ function spawnDetached(
 }
 
 function pgrepFirst(name: string): Promise<number | null> {
-  return new Promise((resolve) => {
-    execFile("pgrep", ["-x", name], (error, stdout) => {
-      if (error) {
-        resolve(null);
+  const attempt = (args: string[]): Promise<number | null> =>
+    new Promise((resolve) => {
+      execFile("pgrep", args, (error, stdout) => {
+        if (error) {
+          resolve(null);
 
-        return;
-      }
+          return;
+        }
 
-      const first = stdout.split("\n")[0]?.trim();
+        const first = stdout.split("\n")[0]?.trim();
 
-      const pid = first ? Number.parseInt(first, 10) : Number.NaN;
+        const pid = first ? Number.parseInt(first, 10) : Number.NaN;
 
-      resolve(Number.isFinite(pid) ? pid : null);
+        resolve(Number.isFinite(pid) ? pid : null);
+      });
     });
-  });
+
+  return attempt(["-x", name]).then((pid) =>
+    pid !== null ? pid : attempt(["-f", name]),
+  );
 }
 
 function pidAlive(pid: number | undefined): pid is number {
@@ -369,10 +379,6 @@ export function createElectronPorts(): AgentPorts {
       },
 
       async focus(app: string): Promise<FocusOutcome> {
-        /*
-         * Real focusing on KDE: delegated to KWin scripting (the
-         * compositor performs the raise — Wayland-safe).
-         */
         const outcome = await kwin.perform("focus", normalizeName(app));
 
         if (!outcome.done) {
@@ -386,6 +392,14 @@ export function createElectronPorts(): AgentPorts {
         return {
           focused: true,
         };
+      },
+
+      async listRunning(): Promise<string[]> {
+        const names = [...opened.entries()]
+          .filter(([, app]) => pidAlive(app.pid))
+          .map(([key]) => prettify(key));
+
+        return names;
       },
     },
 
@@ -415,6 +429,28 @@ export function createElectronPorts(): AgentPorts {
 
         return {
           opened: path.basename(target) || target,
+        };
+      },
+    },
+
+    urls: {
+      async open(url: string) {
+        try {
+          await shell.openExternal(url);
+        } catch {
+          throw new ToolError("I couldn't open that website just now.");
+        }
+
+        let host = url;
+
+        try {
+          host = new URL(url).hostname.replace(/^www\./, "");
+        } catch {
+          // keep the raw url as the spoken name
+        }
+
+        return {
+          opened: host,
         };
       },
     },
@@ -544,11 +580,6 @@ export function createElectronPorts(): AgentPorts {
 
     weather: {
       async current(place?: string): Promise<WeatherResult> {
-        /*
-         * Free, keyless: Open-Meteo geocoding + forecast. IP
-         * geolocation via ip-api.com (free, no key) when no place is
-         * given.
-         */
         let latitude: number;
 
         let longitude: number;
