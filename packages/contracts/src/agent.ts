@@ -1,15 +1,3 @@
-/*
- * ---------------------------------------------------
- * AGENT & TOOL CONTRACTS
- * ---------------------------------------------------
- * Shared by apps/desktop (voice + executors), packages/tools
- * (registry) and apps/core (agent loop). Types only — no runtime.
- *
- * The tool manifest is the SINGLE SOURCE OF TRUTH: the exact same
- * object is embedded into the realtime session config for the model
- * AND used by the registry to validate arguments.
- */
-
 export type ToolDanger =
   /**
    * Runs immediately. V0: everything is "safe" — the permission UI
@@ -50,12 +38,14 @@ export const TOOL_NAMES = [
   "focus_app",
   "open_folder",
   "open_file",
+  "open_url",
   "clipboard",
   "system_info",
   "web_search",
   "get_weather",
   "window_control",
   "current_date_time",
+  "end_session",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -152,12 +142,18 @@ export type AppPort = {
   close(app: string): Promise<CloseOutcome>;
 
   focus(app: string): Promise<FocusOutcome>;
+
+  listRunning(): Promise<string[]>;
 };
 
 export type FilePort = {
   openFolder(path: string): Promise<{ opened: string }>;
 
   openFile(path: string): Promise<{ opened: string }>;
+};
+
+export type UrlPort = {
+  open(url: string): Promise<{ opened: string }>;
 };
 
 export type ClipboardPort = {
@@ -235,6 +231,8 @@ export type AgentPorts = {
   apps: AppPort;
 
   files: FilePort;
+
+  urls: UrlPort;
 
   clipboard: ClipboardPort;
 
