@@ -81,6 +81,8 @@ type StarfireSceneProps = {
 
   activeTool: string | null;
 
+  goodbyeSleep: boolean;
+
   onActivate: (source: InteractionSource) => void;
 
   onDragStart: () => void;
@@ -122,6 +124,8 @@ const TOOL_BUBBLE_TEXT: Record<string, string> = {
   open_file: "Opening the file…",
   window_control: "Adjusting the window…",
   current_date_time: "Checking the time…",
+  open_url: "Opening the website…",
+  end_session: "Going to sleep… ♡",
 };
 
 const BUBBLE_TEXT: Partial<Record<VoiceStateName, string>> = {
@@ -142,6 +146,7 @@ export default function StarfireScene({
   voiceError,
   voiceMouth,
   activeTool,
+  goodbyeSleep,
   onActivate,
   onDragStart,
   onDragEnd,
@@ -1357,7 +1362,9 @@ export default function StarfireScene({
         </div>
       )}
 
-      {activityKind === "sleep" && <StarfireZzz anchorRef={headAnchorRef} />}
+      {(activityKind === "sleep" || goodbyeSleep) && (
+        <StarfireZzz anchorRef={headAnchorRef} />
+      )}
 
       {shownError && (
         <div className="starfire-error" title={shownError}>
