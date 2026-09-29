@@ -6,7 +6,11 @@ import { createClipboardTool } from "./clipboard.js";
 
 import { createCloseAppTool } from "./close-app.js";
 
+import { createCurrentDateTimeTool } from "./current-date-time.js";
+
 import { createFocusAppTool } from "./focus-app.js";
+
+import { createGetWeatherTool } from "./get-weather.js";
 
 import { createOpenAppTool } from "./open-app.js";
 
@@ -15,6 +19,10 @@ import { createOpenFileTool } from "./open-file.js";
 import { createOpenFolderTool } from "./open-folder.js";
 
 import { createSystemInfoTool } from "./system-info.js";
+
+import { createWebSearchTool } from "./web-search.js";
+
+import { createWindowControlTool } from "./window-control.js";
 
 /**
  * The full V0 toolset. Adding tool #20 later = one new file in this
@@ -35,5 +43,13 @@ export function createDefaultTools(ports: AgentPorts): ToolDefinition[] {
     createClipboardTool(ports),
 
     createSystemInfoTool(ports),
+
+    createWebSearchTool(ports.web),
+
+    createGetWeatherTool(ports.weather),
+
+    createWindowControlTool(ports.windows),
+
+    createCurrentDateTimeTool(),
   ];
 }
