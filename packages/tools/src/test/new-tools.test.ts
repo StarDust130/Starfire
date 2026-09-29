@@ -14,12 +14,18 @@ function createFakePorts(): AgentPorts {
       })),
 
       focus: vi.fn(async (_app: string) => ({ focused: false, detail: "no" })),
+
+      listRunning: vi.fn(async () => ["Brave", "Terminal"]),
     },
 
     files: {
       openFolder: vi.fn(async (_p: string) => ({ opened: "F" })),
 
       openFile: vi.fn(async (_p: string) => ({ opened: "F" })),
+    },
+
+    urls: {
+      open: vi.fn(async (_url: string) => ({ opened: "youtube.com" })),
     },
 
     clipboard: {
@@ -340,8 +346,58 @@ describe("current_date_time", () => {
   });
 });
 
+describe("open_url", () => {
+  it("opens a valid https URL", async () => {
+    const result = await registry.execute({
+      callId: "u1",
+
+      name: "open_url",
+
+      args: { url: "https://www.youtube.com" },
+    });
+
+    expect(result.ok).toBe(true);
+
+    expect(result.summary).toBe("Opening youtube.com.");
+
+    expect(ports.urls.open).toHaveBeenCalledWith("https://www.youtube.com");
+  });
+
+  it("rejects a non-URL", async () => {
+    const result = await registry.execute({
+      callId: "u2",
+
+      name: "open_url",
+
+      args: { url: "not a link" },
+    });
+
+    expect(result.ok).toBe(false);
+
+    expect(result.error).toBe("tool-error");
+
+    expect(ports.urls.open).not.toHaveBeenCalled();
+  });
+});
+
+describe("end_session", () => {
+  it("returns a warm goodbye summary with no arguments", async () => {
+    const result = await registry.execute({
+      callId: "e1",
+
+      name: "end_session",
+
+      args: null,
+    });
+
+    expect(result.ok).toBe(true);
+
+    expect(result.summary).toContain("goodbye");
+  });
+});
+
 describe("full V0 set", () => {
-  it("now registers 11 tools", () => {
+  it("now registers 13 tools", () => {
     expect(registry.names()).toEqual([
       "open_app",
 
@@ -352,6 +408,8 @@ describe("full V0 set", () => {
       "open_folder",
 
       "open_file",
+
+      "open_url",
 
       "clipboard",
 
@@ -364,6 +422,8 @@ describe("full V0 set", () => {
       "window_control",
 
       "current_date_time",
+
+      "end_session",
     ]);
   });
 });
