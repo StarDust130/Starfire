@@ -169,12 +169,24 @@ importers:
       '@biomejs/biome':
         specifier: ^2.5.14
         version: 2.5.14
+      '@types/node':
+        specifier: ^26.6.3
+        version: 26.6.3
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
       lefthook:
         specifier: ^2.1.14
         version: 2.1.14
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.15
       vitest:
         specifier: ^5.0.1
         version: 5.0.1(@types/node@26.6.2)(vite@8.3.0(@types/node@26.6.2)(esbuild@0.28.2)(tsx@4.23.15))
+      ws:
+        specifier: ^8.22.0
+        version: 8.22.0
 
   apps/core:
     dependencies:
@@ -1792,7 +1804,6 @@ snapshots:
       '@esbuild/win32-arm64': 0.28.2
       '@esbuild/win32-ia32': 0.28.2
       '@esbuild/win32-x64': 0.28.2
-    optional: true
 
   estree-walker@3.0.3:
     dependencies:
@@ -2022,7 +2033,6 @@ snapshots:
       esbuild: 0.28.2
     optionalDependencies:
       fsevents: 2.3.3
-    optional: true
 
   typescript@6.0.3: {}
 
