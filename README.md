@@ -612,7 +612,7 @@ The possibilities don't.
 </p>
 
 <p align="center">
-  <a href="https://github.com/neugence/starfire">
+  <a href="https://github.com/StarDust130/starfire">
     <img src="https://img.shields.io/badge/⭐_Star_the_repo-111111?style=for-the-badge&logo=github&logoColor=white" alt="Star the repository">
   </a>
 </p>
