@@ -14,8 +14,15 @@
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
     "build": "pnpm -r --if-present build",
     "verify": "pnpm check && pnpm build",
-    "eval": "pnpm --filter @starfire/contracts build && pnpm --filter @starfire/tools build && pnpm --filter @starfire/core build && tsx eval/src/run.ts",
-    "eval:live": "pnpm --filter @starfire/contracts build && pnpm --filter @starfire/tools build && pnpm --filter @starfire/core build && tsx eval/src/live/run.ts"
+    "eval": "tsx eval/src/cli.ts run",
+    "eval:fast": "tsx eval/src/cli.ts run --max 40",
+    "eval:security": "tsx eval/src/cli.ts run --category safety,injection,leakage",
+    "eval:regression": "tsx eval/src/cli.ts run --baseline eval/reports/latest.json",
+    "eval:case": "tsx eval/src/cli.ts case",
+    "eval:tools": "tsx eval/src/cli.ts tools",
+    "eval:ui": "tsx eval/src/cli.ts ui",
+    "eval:voice": "tsx eval/src/cli.ts voice",
+    "eval:selftest": "vitest run --config eval/vitest.config.mts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",
