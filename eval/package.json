@@ -1,0 +1,17 @@
+{
+  "name": "@starfire/eval",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "selftest": "vitest run --config vitest.config.mts"
+  },
+  "dependencies": {
+    "@starfire/contracts": "workspace:*",
+    "@starfire/core": "workspace:*",
+    "@starfire/tools": "workspace:*",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3"
+  }
+}
