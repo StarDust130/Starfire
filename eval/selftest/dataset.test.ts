@@ -1,0 +1,102 @@
+import { describe, expect, it } from "vitest";
+import { buildDataset } from "../src/dataset/index.js";
+import { MockOS } from "../src/mock/os.js";
+import { createDefaultRegistry, TOOL_NAMES } from "../src/starfire.js";
+import type { EvalCase } from "../src/types.js";
+
+const reg = createDefaultRegistry(new MockOS(), { timeoutMs: 2000 });
+
+describe("dataset integrity", () => {
+  const cases: EvalCase[] = buildDataset();
+
+  it("has 220+ cases with unique ids", () => {
+    expect(cases.length).toBeGreaterThanOrEqual(220);
+    expect(new Set(cases.map((c) => c.id)).size).toBe(cases.length);
+  });
+
+  it("only expects tools that exist in the real registry", () => {
+    const bad: string[] = [];
+    for (const c of cases) {
+      for (const callExp of c.expected.calls) {
+        if (!(TOOL_NAMES as readonly string[]).includes(callExp.tool))
+          bad.push(c.id);
+      }
+    }
+    expect(bad, `cases expecting unknown tools: ${bad.join(",")}`).toEqual([]);
+  });
+
+  it("expected arg keys match real manifest properties, enum values valid", () => {
+    const problems: string[] = [];
+    for (const c of cases) {
+      for (const callExp of c.expected.calls) {
+        const m = reg.manifests().find((x) => x.name === callExp.tool);
+        if (!m || callExp.match === "any" || !callExp.args) continue;
+        for (const [k, v] of Object.entries(callExp.args)) {
+          const prop = m.parameters.properties[k];
+          if (!prop) {
+            problems.push(
+              `${c.id}: ${callExp.tool} has no arg "${k}" (manifest: ${Object.keys(m.parameters.properties).join(",")})`,
+            );
+            continue;
+          }
+          if (prop.enum && typeof v === "string" && !prop.enum.includes(v)) {
+            problems.push(
+              `${c.id}: ${callExp.tool}.${k}="${v}" not in enum [${prop.enum.join(",")}]`,
+            );
+          }
+        }
+      }
+    }
+    expect(problems, problems.join("\n")).toEqual([]);
+  });
+
+  it("state paths reference known state keys", () => {
+    const known = [
+      "apps",
+      "clipboard",
+      "openUrls",
+      "openFiles",
+      "openFolders",
+      "focusedApp",
+      "sessionEnded",
+      "weatherCalls",
+      "searches",
+    ];
+    for (const c of cases) {
+      for (const s of c.expected.state) {
+        expect(
+          known.some((k) => s.path.startsWith(k)),
+          `${c.id}: bad state path ${s.path}`,
+        ).toBe(true);
+      }
+    }
+  });
+});
+
+describe("registry behaves against mock ports", () => {
+  it("open_app succeeds and flips mock state", async () => {
+    const os = new MockOS();
+    const r = createDefaultRegistry(os, { timeoutMs: 2000 });
+    const res = await r.execute({
+      callId: "x",
+      name: "open_app",
+      args: { app: "Discord" },
+    });
+    expect(res.ok).toBe(true);
+    expect(os.snapshot().apps.discord?.state).toBe("running");
+  });
+
+  it("validator rejects missing required args exactly like production", async () => {
+    const r = createDefaultRegistry(new MockOS(), { timeoutMs: 2000 });
+    const res = await r.execute({ callId: "y", name: "open_app", args: {} });
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe("invalid-args");
+  });
+
+  it("unknown tool returns graceful error", async () => {
+    const r = createDefaultRegistry(new MockOS(), { timeoutMs: 2000 });
+    const res = await r.execute({ callId: "z", name: "shell", args: {} });
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe("unknown-tool");
+  });
+});
