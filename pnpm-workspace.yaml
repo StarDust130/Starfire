@@ -1,6 +1,7 @@
 packages:
   - "apps/*"
   - "packages/*"
+  - "eval"
 allowBuilds:
   esbuild: false
   lefthook: false
