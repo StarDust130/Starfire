@@ -1,129 +1,324 @@
 # =========================================================
-# 🌟 STARFIRE - .gitignore
+# 🌟 STARFIRE — .gitignore
 # =========================================================
 
-# -------------------------
-# 📦 Node / JavaScript
-# -------------------------
+# =========================================================
+# 📦 Node / JavaScript / TypeScript
+# =========================================================
 node_modules/
 .pnpm-store/
 .npm/
+.npmrc.local
+
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# Package manager lockfiles
 # Keep pnpm-lock.yaml tracked
 package-lock.json
 yarn.lock
 
-# -------------------------
-# 🏗️ Build output
-# -------------------------
+# TypeScript
+*.tsbuildinfo
+
+# =========================================================
+# 🏗️ Build / Generated Output
+# =========================================================
 dist/
 build/
 out/
-.tmp/
-temp/
-.cache/
-.turbo/
-.vite/
-*.tsbuildinfo
-
-# Next.js (if used later)
-.next/
-.vercel/
-
-# -------------------------
-# -------------------------
 target/
 **/target/
 
-src-tauri/target/
+.tmp/
+tmp/
+temp/
+**/.tmp/
+**/tmp/
+**/temp/
+
+.cache/
+**/.cache/
+
+.vite/
+**/.vite/
+
+.turbo/
+**/.turbo/
+
+.parcel-cache/
+.eslintcache
+
+# Electron
+apps/desktop/electron-dist/
+electron-dist/
+
+# =========================================================
+# ⚛️ Frontend Frameworks
+# =========================================================
+
+# Next.js (future)
+.next/
+.vercel/
+
+# Remix
+.build/
+
+# =========================================================
+# 🦀 Rust / Tauri
+# =========================================================
+
+# Rust build output
+target/
+**/target/
+
+# Tauri generated files
 src-tauri/gen/
+src-tauri/target/
 src-tauri/.cargo/
 
-# Rust temporary / backup files
-**/*.rs.bk
+**/src-tauri/target/
+**/src-tauri/gen/
+**/src-tauri/.cargo/
 
-# -------------------------
+# Rust backup files
+*.rs.bk
+
+# =========================================================
 # 🔐 Environment / Secrets
-# -------------------------
+# =========================================================
+
 .env
 .env.*
 !.env.example
+!.env.example.*
+!.env.template
+!.env.sample
 
-# -------------------------
-# 🤖 Local AI Models
-# -------------------------
-# Never commit large local model files
+# Local secret / credential files
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# =========================================================
+# 🤖 Local AI / ML Models
+# =========================================================
+
+# Model files
 *.gguf
 *.ggml
-*.bin
 *.safetensors
 *.onnx
+*.pt
+*.pth
+*.ckpt
+*.bin
 
-# Local model/cache directories
+# Large datasets / embeddings
+*.npz
+*.npy
+
+# Local model directories
 models/
 model/
 ai-models/
-.cache/
+local-models/
+
+**/models/
+**/model/
+**/ai-models/
+**/local-models/
+
+# Hugging Face / ML caches
 huggingface/
 hf-cache/
+huggingface-cache/
 
-# -------------------------
-# 📝 Logs
-# -------------------------
+**/huggingface/
+**/hf-cache/
+**/huggingface-cache/
+
+# =========================================================
+# 🐍 Python / DeepEval
+# =========================================================
+
+# Virtual environments
+.venv/
+venv/
+env/
+**/.venv/
+**/venv/
+**/env/
+
+# Python cache
+__pycache__/
+**/__pycache__/
+
+*.py[cod]
+*$py.class
+
+# Python tooling
+.pytest_cache/
+**/.pytest_cache/
+
+.mypy_cache/
+**/.mypy_cache/
+
+.ruff_cache/
+**/.ruff_cache/
+
+.coverage
+.coverage.*
+htmlcov/
+
+# =========================================================
+# 🧪 Testing / Coverage
+# =========================================================
+
+coverage/
+**/coverage/
+
+.nyc_output/
+**/.nyc_output/
+
+test-results/
+**/test-results/
+
+playwright-report/
+**/playwright-report/
+
+playwright/.cache/
+
+# =========================================================
+# 📊 Eval Generated Reports
+# =========================================================
+
+# Generated evaluation output should not be committed.
+eval/reports/*
+!eval/reports/.gitkeep
+
+# Generated eval artifacts
+eval/output/
+eval/results/
+eval/artifacts/
+
+# =========================================================
+# 📝 Logs / Runtime
+# =========================================================
+
 *.log
 logs/
+**/logs/
 
-# -------------------------
-# 🧪 Testing / Coverage
-# -------------------------
-coverage/
-.nyc_output/
-.pytest_cache/
+*.pid
+*.pid.lock
 
-# -------------------------
-# 🖥️ OS files
-# -------------------------
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# -------------------------
-# 🧑‍💻 Editors / IDE
-# -------------------------
-.idea/
-*.iml
-
-# VS Code
-.vscode/*
-!.vscode/extensions.json
-!.vscode/settings.json
-
-# -------------------------
-# 🔧 Local tooling
-# -------------------------
-*.swp
-*.swo
-*~
-*.tmp
-
-# -------------------------
-# 🏠 Local Starfire data
-# -------------------------
-data/
-local/
 runtime/
-storage/
+**/runtime/
 
-# SQLite databases
+# =========================================================
+# 🗃️ Local Data / Databases
+# =========================================================
+
+data/
+**/data/
+
+local/
+**/local/
+
+storage/
+**/storage/
+
+# SQLite
 *.db
 *.db-shm
 *.db-wal
 *.sqlite
 *.sqlite3
 
-apps/desktop/electron-dist/
+# =========================================================
+# 🖥️ OS Files
+# =========================================================
+
+.DS_Store
+**/.DS_Store
+
+Thumbs.db
+desktop.ini
+
+# =========================================================
+# 🧑‍💻 IDE / Editors
+# =========================================================
+
+.idea/
+*.iml
+
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# JetBrains
+*.iws
+*.ipr
+
+# Vim / Neovim
+*.swp
+*.swo
+*.swn
+*~
+
+# Emacs
+*#
+
+# =========================================================
+# 🔧 Local Tooling / Temporary Files
+# =========================================================
+
+*.tmp
+*.temp
+*.bak
+*.backup
+*.orig
+*.rej
+
+.DS_Store
+Thumbs.db
+
+# =========================================================
+# 📦 OS / Package Manager Artifacts
+# =========================================================
+
+.npm/
+.yarn/
+.pnpm-debug.log
+
+# =========================================================
+# 🔒 Local Certificates / Keys
+# =========================================================
+
+*.pem
+*.key
+*.secret
+*.secret.*
+secrets/
+**/secrets/
+
+# =========================================================
+# 📁 Optional Local Starfire State
+# =========================================================
+
+.starfire/
+.starfire-local/
+**/.starfire/
+**/.starfire-local/
+
+# =========================================================
+# ✅ Keep Empty Directories
+# =========================================================
+
+!.gitkeep
+!**/.gitkeep
