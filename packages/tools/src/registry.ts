@@ -7,8 +7,8 @@ import type {
   ToolResult,
 } from "@starfire/contracts";
 
+import { toolPolicies } from "./policy.js";
 import { ToolError } from "./tool-error.js";
-
 import { type ValidatedArgs, validateToolArgs } from "./validate.js";
 
 export type ToolHandler = (
@@ -24,9 +24,7 @@ export type ToolDefinition = {
 
 export type ToolRegistryOptions = {
   /**
-   * Hard cap per tool call. A hung tool must never hang her voice
-   * session — the model gets a friendly "took too long" and can
-   * recover.
+   * Hard cap per tool call.
    */
   timeoutMs?: number;
 };
@@ -53,13 +51,19 @@ export class ToolRegistry {
   }
 
   register(definition: ToolDefinition): void {
-    if (this.tools.has(definition.manifest.name)) {
-      throw new Error(
-        `Tool "${definition.manifest.name}" is already registered.`,
-      );
+    const name = definition.manifest.name;
+
+    if (this.tools.has(name)) {
+      throw new Error(`Tool "${name}" is already registered.`);
     }
 
-    this.tools.set(definition.manifest.name, definition);
+    const policy = toolPolicies[name];
+
+    if (!policy) {
+      throw new Error(`Tool "${name}" has no safety policy.`);
+    }
+
+    this.tools.set(name, definition);
   }
 
   registerAll(definitions: ToolDefinition[]): void {
@@ -81,7 +85,11 @@ export class ToolRegistry {
   }
 
   /**
-   * The exact shape Qwen's session config expects for function tools.
+   * Exact function-tool shape sent to Qwen.
+   *
+   * Notice that safety policy is NOT decided by Qwen.
+   * Qwen can request a tool, but the Registry makes the final
+   * runtime safety decision.
    */
   functionTools(): FunctionTool[] {
     return this.manifests().map((manifest) => ({
@@ -96,6 +104,9 @@ export class ToolRegistry {
   }
 
   async execute(call: ToolCall, ctx: ToolContext = {}): Promise<ToolResult> {
+    /*
+     * 1. Find the tool.
+     */
     const tool = this.tools.get(call.name);
 
     if (!tool) {
@@ -111,9 +122,9 @@ export class ToolRegistry {
     }
 
     /*
-     * Models sometimes send null or omit arguments entirely for
-     * zero-argument tools. Treat that as an empty object so "no
-     * arguments" tools work naturally.
+     * 2. Validate arguments BEFORE confirmation.
+     *
+     * The confirmation UI should only see valid arguments.
      */
     const validated = validateToolArgs(
       tool.manifest.parameters,
@@ -126,12 +137,113 @@ export class ToolRegistry {
 
         ok: false,
 
-        summary: `I couldn't use the ${tool.manifest.name} tool: ${validated.error}.`,
+        summary:
+          `I couldn't use the ${tool.manifest.name} tool: ` +
+          `${validated.error}.`,
 
         error: "invalid-args",
       };
     }
 
+    /*
+     * 3. Get runtime policy.
+     */
+    const policy = toolPolicies[tool.manifest.name];
+
+    if (!policy) {
+      return {
+        callId: call.callId,
+
+        ok: false,
+
+        summary: `The ${tool.manifest.name} tool has no safety policy.`,
+
+        error: "policy-denied",
+      };
+    }
+
+    /*
+     * 4. Disabled tool = never execute.
+     */
+    if (!policy.enabled) {
+      return {
+        callId: call.callId,
+
+        ok: false,
+
+        summary: `The ${tool.manifest.name} tool is currently disabled.`,
+
+        error: "policy-denied",
+      };
+    }
+
+    /*
+     * 5. Dangerous tool = require explicit user approval.
+     *
+     * `danger` is the single source of truth for confirmation.
+     */
+    if (tool.manifest.danger === "confirm") {
+      if (!ctx.confirm) {
+        return {
+          callId: call.callId,
+
+          ok: false,
+
+          summary:
+            `The ${tool.manifest.name} action requires ` + `your confirmation.`,
+
+          error: "confirmation-required",
+        };
+      }
+
+      let approved: boolean;
+
+      try {
+        approved = await ctx.confirm({
+          tool: tool.manifest.name,
+
+          args: validated.value,
+
+          reason: `Starfire wants to run ${tool.manifest.name}.`,
+        });
+      } catch (error) {
+        ctx.log?.(
+          `confirmation failed for ${tool.manifest.name}: ${String(error)}`,
+        );
+
+        /*
+         * Fail closed.
+         * If the confirmation system breaks, the action must NOT run.
+         */
+        return {
+          callId: call.callId,
+
+          ok: false,
+
+          summary:
+            `I couldn't get confirmation for ` +
+            `${tool.manifest.name}, so I didn't run it.`,
+
+          error: "confirmation-denied",
+        };
+      }
+
+      if (!approved) {
+        return {
+          callId: call.callId,
+
+          ok: false,
+
+          summary: `The ${tool.manifest.name} action was not approved.`,
+
+          error: "confirmation-denied",
+        };
+      }
+    }
+
+    /*
+     * 6. Finally execute the tool.
+     */
     try {
       const output = await this.withTimeout(
         tool.handle(validated.value, ctx),
