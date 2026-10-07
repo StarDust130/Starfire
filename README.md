@@ -9,9 +9,9 @@
 </p>
 
 <p align="center">
-  Talk to her. Ask her to do things. Let her see your screen.
+  Talk to her. Ask her to do things.
   <br>
-  <sub>Realtime voice · Desktop control · Tools · Vision · 3D companion</sub>
+  <sub>Realtime voice · Desktop control · Tools · 3D companion</sub>
 </p>
 
 <p align="center">
@@ -29,8 +29,8 @@
 <br>
 
 <p align="center">
+ <img src="https://img.shields.io/badge/Electron-000000?style=flat-square&logo=electron&logoColor=9FEAF9" alt="Electron">
   <img src="https://img.shields.io/badge/Linux-000000?style=flat-square&logo=linux&logoColor=white" alt="Linux">
-  <img src="https://img.shields.io/badge/Electron-000000?style=flat-square&logo=electron&logoColor=9FEAF9" alt="Electron">
   <img src="https://img.shields.io/badge/React-000000?style=flat-square&logo=react&logoColor=61DAFB" alt="React">
   <img src="https://img.shields.io/badge/TypeScript-000000?style=flat-square&logo=typescript&logoColor=3178C6" alt="TypeScript">
   <img src="https://img.shields.io/badge/Three.js-000000?style=flat-square&logo=threedotjs&logoColor=white" alt="Three.js">
@@ -40,7 +40,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/experimental-ff69b4?style=flat-square" alt="Experimental">
   <img src="https://img.shields.io/github/license/neugence/starfire?style=flat-square&label=license" alt="License">
-  <img src="https://img.shields.io/github/stars/neugence/starfire?style=flat-square&label=stars" alt="GitHub Stars">
+  <img src="https://img.shields.io/github/stars/neugence/starfire?style=flat-square&label=GitHub Stars" alt="GitHub Stars">
 </p>
 
 ---
@@ -53,7 +53,7 @@ She isn't another chatbot trapped inside a browser tab.
 
 She lives on your desktop.
 
-Talk naturally. Ask her to perform an action. Let her search the web. Give her controlled access to desktop tools. Let her understand what's happening on your screen.
+Talk naturally. Ask her to perform an action. Let her search the web. Give her controlled access to desktop tools. Let her interact with your computer through explicit capabilities.
 
 The idea is simple:
 
@@ -82,7 +82,6 @@ Starfire is built around **doing**, not just talking.
 | 🪟 | **Window Control** | Focus, minimize and close supported application windows |
 | 🎭 | **VRM Companion** | React through a realtime 3D character |
 | ⌨️ | **Global Shortcut** | Quickly interact using `Super + Z` |
-| 👀 | **Screen Understanding** | See and reason about what's currently on your screen |
 
 ---
 
@@ -342,48 +341,6 @@ Realistic desktop tasks
 
 ---
 
-# 👀 Screen Understanding
-
-One of the next major interaction layers is **vision**.
-
-Imagine saying:
-
-> **"Starfire, look at this."**
-
-Starfire can capture the screen, include cursor context, and send the visual information into the same realtime interaction.
-
-```text
-                    👤 YOU
-                      │
-                      │
-             "Look at this."
-                      │
-                      ▼
-             ┌────────────────┐
-             │ look_at_screen │
-             └───────┬────────┘
-                     │
-                     ▼
-                🖥️ Screenshot
-                     +
-                🖱️ Cursor
-                     │
-                     ▼
-             ┌────────────────┐
-             │ Realtime Model │
-             └───────┬────────┘
-                     │
-                     ▼
-                 🎀 STARFIRE
-                     │
-                     ▼
-               "I can see..."
-```
-
-The screen becomes another input modality for the same conversational experience.
-
----
-
 # 🧠 From Assistant → Agent
 
 The current system intentionally keeps the realtime layer lightweight.
@@ -399,7 +356,7 @@ The architecture is designed so larger agent workflows can grow around it.
                    └────────┬────────┘
                             │
                             ▼
-                           Jev
+                          Jev
                             │
                    ┌────────┴────────┐
                    ▼                 ▼
@@ -541,7 +498,7 @@ Starfire is designed to be something that's simply **there**.
                        │      ✨     │
                        └──────┬──────┘
                               │
-                       Voice + Vision
+                              Voice
                               │
                               ▼
                              YOU
