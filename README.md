@@ -38,9 +38,11 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/experimental-ff69b4?style=flat-square" alt="Experimental">
-  <img src="https://img.shields.io/github/license/neugence/starfire?style=flat-square&label=license" alt="License">
-  <img src="https://img.shields.io/github/stars/neugence/starfire?style=flat-square&label=GitHub Stars" alt="GitHub Stars">
+  <img src="https://img.shields.io/badge/experimental-ff69b4?style=flat-square" alt="Experimental" />
+  <img src="https://img.shields.io/github/stars/StarDust130/Starfire?style=flat-square&logo=github&logoColor=white&label=stars" alt="GitHub Stars" />
+  <img src="https://img.shields.io/github/forks/StarDust130/Starfire?style=flat-square&logo=git&logoColor=white&label=forks" alt="GitHub Forks" />
+  <img src="https://img.shields.io/github/license/StarDust130/Starfire?style=flat-square&label=license" alt="License" />
+  <img src="https://img.shields.io/github/last-commit/StarDust130/Starfire?style=flat-square&logo=git&logoColor=white&label=updated" alt="Last Commit" />
 </p>
 
 ---
