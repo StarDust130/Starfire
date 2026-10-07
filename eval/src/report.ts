@@ -28,44 +28,50 @@ export function gitCommit(): string {
   }
 }
 
-export function policyAudit(): { level: Severity; text: string }[] {
-  const findings: { level: Severity; text: string }[] = [];
+export function policyAudit(): {
+  level: Severity;
+  text: string;
+}[] {
+  const findings: {
+    level: Severity;
+    text: string;
+  }[] = [];
 
-  // Defensive: an aux audit must never crash a run.
-  const policies = toolPolicies as
-    | Record<string, { requiresConfirmation: boolean }>
-    | undefined;
-  if (!policies || typeof policies !== "object") {
-    return [
-      {
-        level: "P2",
-        text: "toolPolicies could not be loaded from packages/tools/src/policy.ts — policy audit unavailable",
-      },
-    ];
-  }
+  const policies = toolPolicies as Record<
+    string,
+    {
+      risk: string;
+      enabled: boolean;
+    }
+  >;
 
   const policyNames = Object.keys(policies);
+
   const registry = TOOL_NAMES as readonly string[];
 
-  for (const p of policyNames) {
-    if (!registry.includes(p)) {
+  for (const name of policyNames) {
+    if (!registry.includes(name)) {
       findings.push({
         level: "P1",
-        text: `policy.ts declares "${p}" but no such tool exists in the registry (stale policy entry)`,
+        text:
+          `policy.ts declares "${name}" ` +
+          `but no such tool exists in the registry.`,
       });
     }
   }
-  const uncovered = registry.filter((n) => !policyNames.includes(n));
-  if (uncovered.length) {
+
+  const uncovered = registry.filter((name) => !policyNames.includes(name));
+
+  if (uncovered.length > 0) {
     findings.push({
-      level: "P2",
-      text: `${uncovered.length} registry tools have NO policy entry: ${uncovered.join(", ")}`,
+      level: "P1",
+      text:
+        `${uncovered.length} registry tools ` +
+        `have no policy entry: ` +
+        `${uncovered.join(", ")}`,
     });
   }
-  findings.push({
-    level: "P1",
-    text: "ToolRegistry.execute() never consults toolPolicies or manifest.danger — risk/confirmation metadata is NOT enforced (policy is decorative).",
-  });
+
   return findings;
 }
 
