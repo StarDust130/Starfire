@@ -1,8 +1,8 @@
 export type ToolDanger =
   /**
-   * Runs immediately. V0: everything is "safe" — the permission UI
-   * comes later, but the flag is declared now so nothing changes
-   * structurally when it arrives.
+   * Runtime confirmation requirement.
+   * "safe" runs immediately.
+   * "confirm" requires explicit user approval.
    */
   "safe" | "confirm";
 
@@ -21,8 +21,8 @@ export type ToolParameter = {
 };
 
 /**
- * JSON-schema subset for a tool's arguments. This exact shape is
- * embedded into the realtime session config.
+ * JSON-schema subset for a tool's arguments.
+ * This exact shape is embedded into the realtime session config.
  */
 export type ToolParameterSchema = {
   type: "object";
@@ -55,15 +55,18 @@ export type ToolManifest = {
 
   description: string;
 
+  /**
+   * Runtime confirmation hint.
+   * The Registry enforces this value.
+   */
   danger: ToolDanger;
 
   parameters: ToolParameterSchema;
 };
 
 /**
- * A tool invocation coming from the model. `name` is a plain string
- * so the registry can answer unknown tools gracefully instead of the
- * protocol layer crashing.
+ * A tool invocation coming from the model.
+ * `name` stays a plain string so unknown tools can fail gracefully.
  */
 export type ToolCall = {
   callId: string;
@@ -75,7 +78,6 @@ export type ToolCall = {
 
 /**
  * What a tool handler produces on success.
- * `summary` is the human sentence the model speaks from.
  */
 export type ToolOutput = {
   summary: string;
@@ -85,34 +87,46 @@ export type ToolOutput = {
 
 /**
  * What the agent returns to the model for one call.
- * `error` is a machine-readable kind, never raw stack traces.
+ * Never expose raw stack traces to the model/user.
  */
 export type ToolResult = {
   callId: string;
-
   ok: boolean;
-
   summary: string;
-
   data?: Record<string, unknown>;
 
-  error?: "unknown-tool" | "invalid-args" | "tool-error" | "internal-error";
+  error?:
+    | "unknown-tool"
+    | "invalid-args"
+    | "policy-denied"
+    | "confirmation-required"
+    | "confirmation-denied"
+    | "tool-error"
+    | "internal-error";
+};
+
+export type ToolConfirmationRequest = {
+  tool: ToolName;
+  args: Record<string, unknown>;
+  reason: string;
 };
 
 export type ToolContext = {
   log?: (message: string) => void;
+
+  /**
+   * Future permission UI.
+   * Must return true only after explicit user approval.
+   */
+  confirm?: (request: ToolConfirmationRequest) => Promise<boolean>;
 };
 
 /*
  * ---------------------------------------------------
  * OS PORTS
  * ---------------------------------------------------
- * The tools are pure logic; these ports are the hands. Implemented
- * in apps/desktop/electron/agent (the only place allowed to touch
- * the OS), faked in tests.
- *
- * Ports throw ToolError (from @starfire/tools) for user-friendly
- * failures; anything else becomes a generic failure.
+ * The tools are pure logic; these ports are the hands.
+ * Implemented in apps/desktop/electron/agent and faked in tests.
  */
 
 export type OpenedApp = {
