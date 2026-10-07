@@ -6,3 +6,5 @@ allowBuilds:
   esbuild: false
   lefthook: false
   protobufjs: false
+  sharp: false
+minimumReleaseAge: 0
