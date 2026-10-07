@@ -1,40 +1,30 @@
-```bash
+
 #!/usr/bin/env bash
 
-set -uE -o pipefail
-
-# ═══════════════════════════════════════════════════════════════
-# 🌌 STARFIRE SMART COMMIT
-#
-#   FORMAT ONCE
-#      ↓
-#   GLOBAL CHECKS ONCE
-#      ↓
-#   FIND WHICH FILES ACTUALLY HAVE PROBLEMS
-#      ↓
-#   VALIDATE ONLY WHEN NEEDED
-#      ↓
-#   COMMIT EACH GOOD FILE SEPARATELY
-#
-#   ✅ Good file  → commit
-#   ❌ Bad file   → skip
-#   📚 Markdown   → accepted
-#   🐚 Shell      → bash -n + ShellCheck
-#   🧹 Code       → Biome
-#
-#   Lefthook is intentionally skipped on individual commits
-#   because the checks already ran above.
-# ═══════════════════════════════════════════════════════════════
+set -uo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)" || {
   echo "❌ Not inside a Git repository."
   exit 1
 }
 
-cd "$ROOT"
+cd "$ROOT" || exit 1
+
+# ═══════════════════════════════════════════════════════════════
+# 🌌 STARFIRE SMART COMMIT
+#
+#   1. Stage everything
+#   2. Run the REAL Lefthook pre-commit UI once
+#   3. Find files mentioned by failed checks
+#   4. Commit clean files one-by-one
+#   5. Skip files linked to failures
+#
+# Individual commits use --no-verify because Lefthook has already
+# run once against the complete staged change set.
+# ═══════════════════════════════════════════════════════════════
 
 # ───────────────────────────────────────────────────────────────
-# 🎨 TUI colors
+# 🎨 Colors
 # ───────────────────────────────────────────────────────────────
 
 if [[ -t 1 ]]; then
@@ -46,8 +36,8 @@ if [[ -t 1 ]]; then
   GREEN=$'\033[32m'
   YELLOW=$'\033[33m'
   BLUE=$'\033[34m'
-  MAGENTA=$'\033[35m'
   CYAN=$'\033[36m'
+  MAGENTA=$'\033[35m'
   WHITE=$'\033[37m'
 else
   RESET=""
@@ -64,38 +54,19 @@ else
 fi
 
 # ───────────────────────────────────────────────────────────────
-# 🎲 Emoji pools
+# 🎲 Commit emoji pools
 # ───────────────────────────────────────────────────────────────
 
-FEAT_EMOJIS=(
-  "🚀" "✨" "🌌" "⚡" "💫"
-  "🛸" "🌠" "🔥" "🎨" "🪐"
-)
-
-FIX_EMOJIS=(
-  "🛡️" "🔐" "🧩" "🔧" "🛠️"
-  "⚙️" "🚧" "🧠" "🔥" "🪄"
-)
-
-TEST_EMOJIS=(
-  "🧪" "🔬" "🎯" "🔎" "🧬"
-  "🕵️" "📊" "🧭" "🧫" "🧰"
-)
-
-DOCS_EMOJIS=(
-  "📚" "📝" "📖" "🗺️" "✍️"
-  "🪶" "📜" "💡" "🧾" "📰"
-)
-
-CHORE_EMOJIS=(
-  "🧹" "🛠️" "⚙️" "🔩" "🧰"
-  "🪛" "🔨" "🧱" "🗂️" "🔧"
-)
+FEAT_EMOJIS=("🚀" "✨" "🌌" "⚡" "💫" "🛸" "🌠" "🔥" "🎨" "🪐")
+FIX_EMOJIS=("🛡️" "🔐" "🧩" "🔧" "🛠️" "⚙️" "🚧" "🧠" "🔥" "🪄")
+TEST_EMOJIS=("🧪" "🔬" "🎯" "🔎" "🧬" "🕵️" "📊" "🧭" "🧫" "🧰")
+DOCS_EMOJIS=("📚" "📝" "📖" "🗺️" "✍️" "🪶" "📜" "💡" "🧾" "📰")
+CHORE_EMOJIS=("🧹" "🛠️" "⚙️" "🔩" "🧰" "🪛" "🔨" "🧱" "🗂️" "🔧")
 
 declare -A USED_EMOJIS=()
 
 # ───────────────────────────────────────────────────────────────
-# 💬 Cool commit subject pools
+# 💬 Commit subject pools
 # ───────────────────────────────────────────────────────────────
 
 FIX_SUBJECTS=(
@@ -154,15 +125,13 @@ CHORE_SUBJECTS=(
 )
 
 # ───────────────────────────────────────────────────────────────
-# 🧰 UI helpers
+# 🧰 UI
 # ───────────────────────────────────────────────────────────────
 
 header() {
-  local title="$1"
-
   echo ""
   echo "${CYAN}${BOLD}╭────────────────────────────────────────────────╮${RESET}"
-  printf "${CYAN}${BOLD}│ %-46s │${RESET}\n" "$title"
+  printf "${CYAN}${BOLD}│ %-46s │${RESET}\n" "$1"
   echo "${CYAN}${BOLD}╰────────────────────────────────────────────────╯${RESET}"
   echo ""
 }
@@ -175,10 +144,6 @@ fail() {
   echo "${RED}❌ $1${RESET}"
 }
 
-warn() {
-  echo "${YELLOW}⚠️  $1${RESET}"
-}
-
 info() {
   echo "${BLUE}ℹ️  $1${RESET}"
 }
@@ -187,12 +152,8 @@ skip() {
   echo "${YELLOW}⏭️  $1${RESET}"
 }
 
-command_line() {
-  echo "${DIM}┌─ $ $*${RESET}"
-}
-
 # ───────────────────────────────────────────────────────────────
-# 🎲 Random non-repeating emoji
+# 🎲 Random emoji
 # ───────────────────────────────────────────────────────────────
 
 pick_emoji() {
@@ -203,21 +164,11 @@ pick_emoji() {
   local index
 
   case "$type" in
-    feat)
-      pool=("${FEAT_EMOJIS[@]}")
-      ;;
-    fix)
-      pool=("${FIX_EMOJIS[@]}")
-      ;;
-    test)
-      pool=("${TEST_EMOJIS[@]}")
-      ;;
-    docs)
-      pool=("${DOCS_EMOJIS[@]}")
-      ;;
-    chore|*)
-      pool=("${CHORE_EMOJIS[@]}")
-      ;;
+    feat)  pool=("${FEAT_EMOJIS[@]}") ;;
+    fix)   pool=("${FIX_EMOJIS[@]}") ;;
+    test)  pool=("${TEST_EMOJIS[@]}") ;;
+    docs)  pool=("${DOCS_EMOJIS[@]}") ;;
+    *)     pool=("${CHORE_EMOJIS[@]}") ;;
   esac
 
   available=()
@@ -228,10 +179,9 @@ pick_emoji() {
     fi
   done
 
-  # Recycle only after every emoji in the pool was used.
   if [[ "${#available[@]}" -eq 0 ]]; then
     for emoji in "${pool[@]}"; do
-      unset 'USED_EMOJIS[$emoji]'
+      unset "USED_EMOJIS[$emoji]"
     done
 
     available=("${pool[@]}")
@@ -245,31 +195,17 @@ pick_emoji() {
   printf "%s" "$emoji"
 }
 
-# ───────────────────────────────────────────────────────────────
-# 🎲 Random subject
-# ───────────────────────────────────────────────────────────────
-
 random_subject() {
   local type="$1"
   local -a pool
   local index
 
   case "$type" in
-    fix)
-      pool=("${FIX_SUBJECTS[@]}")
-      ;;
-    test)
-      pool=("${TEST_SUBJECTS[@]}")
-      ;;
-    docs)
-      pool=("${DOC_SUBJECTS[@]}")
-      ;;
-    feat)
-      pool=("${FEAT_SUBJECTS[@]}")
-      ;;
-    chore|*)
-      pool=("${CHORE_SUBJECTS[@]}")
-      ;;
+    fix)   pool=("${FIX_SUBJECTS[@]}") ;;
+    test)  pool=("${TEST_SUBJECTS[@]}") ;;
+    docs)  pool=("${DOCS_SUBJECTS[@]}") ;;
+    feat)  pool=("${FEAT_SUBJECTS[@]}") ;;
+    *)     pool=("${CHORE_SUBJECTS[@]}") ;;
   esac
 
   index=$((RANDOM % ${#pool[@]}))
@@ -278,7 +214,7 @@ random_subject() {
 }
 
 # ───────────────────────────────────────────────────────────────
-# 📝 Commit metadata
+# 📝 Commit message
 # ───────────────────────────────────────────────────────────────
 
 commit_message_for_file() {
@@ -392,21 +328,18 @@ commit_message_for_file() {
       ;;
   esac
 
-  local emoji
-  emoji="$(pick_emoji "$type")"
-
   printf "%s %s(%s): %s" \
-    "$emoji" \
+    "$(pick_emoji "$type")" \
     "$type" \
     "$scope" \
     "$subject"
 }
 
 # ───────────────────────────────────────────────────────────────
-# 🔎 Log attribution
+# 🔎 Did a failed check mention this file?
 # ───────────────────────────────────────────────────────────────
 
-log_mentions_file() {
+failure_mentions_file() {
   local log="$1"
   local file="$2"
 
@@ -417,65 +350,25 @@ log_mentions_file() {
 }
 
 # ───────────────────────────────────────────────────────────────
-# 🧹 File checker
+# 🐚 Extra validation for non-code files
 # ───────────────────────────────────────────────────────────────
 
-check_file() {
+validate_special_file() {
   local file="$1"
 
   case "$file" in
-    # TypeScript / JavaScript
-    *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs)
-      command_line "pnpm exec biome check \"$file\""
-
-      if pnpm exec biome check "$file"; then
-        ok "Code check passed"
-        return 0
-      fi
-
-      fail "Code check failed"
-      return 1
-      ;;
-
-    # JSON
-    *.json|*.jsonc)
-      command_line "pnpm exec biome check \"$file\""
-
-      if pnpm exec biome check "$file"; then
-        ok "Config check passed"
-        return 0
-      fi
-
-      fail "Config check failed"
-      return 1
-      ;;
-
-    # CSS
-    *.css)
-      command_line "pnpm exec biome check \"$file\""
-
-      if pnpm exec biome check "$file"; then
-        ok "Style check passed"
-        return 0
-      fi
-
-      fail "Style check failed"
-      return 1
-      ;;
-
-    # Bash
     *.sh)
-      command_line "bash -n \"$file\""
+      echo "   🐚 bash -n $file"
 
       if ! bash -n "$file"; then
-        fail "Bash syntax failed"
+        fail "Shell syntax failed"
         return 1
       fi
 
-      ok "Bash syntax passed"
+      ok "Shell syntax passed"
 
       if command -v shellcheck >/dev/null 2>&1; then
-        command_line "shellcheck \"$file\""
+        echo "   🔎 shellcheck $file"
 
         if ! shellcheck "$file"; then
           fail "ShellCheck failed"
@@ -483,90 +376,43 @@ check_file() {
         fi
 
         ok "ShellCheck passed"
-      else
-        info "ShellCheck not installed — bash syntax check is used."
       fi
-
-      return 0
       ;;
 
-    # Markdown
     *.md)
-      info "Markdown has no source-code lint in this workflow."
+      echo "   📚 Markdown — no source-code check needed"
       ok "Documentation accepted"
-      return 0
       ;;
 
-    # Images / lockfiles / other assets
     *)
-      info "No file-specific checker needed."
-      ok "Global checks are sufficient"
       return 0
       ;;
   esac
-}
 
-# ───────────────────────────────────────────────────────────────
-# ▶️ Run a global command and save its output
-# ───────────────────────────────────────────────────────────────
-
-run_global() {
-  local label="$1"
-  local log_file="$2"
-  shift 2
-
-  echo ""
-  echo "${BOLD}${WHITE}▶ $label${RESET}"
-  command_line "$@"
-
-  "$@" 2>&1 | tee "$log_file"
-
-  local status="${PIPESTATUS[0]}"
-
-  echo ""
-
-  if [[ "$status" -eq 0 ]]; then
-    ok "$label passed"
-  else
-    fail "$label failed"
-  fi
-
-  return "$status"
+  return 0
 }
 
 # ═══════════════════════════════════════════════════════════════
 # 🚀 START
 # ═══════════════════════════════════════════════════════════════
 
-header "🌌 Starfire Smart Commit"
+header "🌌 STARFIRE SMART COMMIT"
 
-echo "${BOLD}Repository${RESET}  $ROOT"
-echo "${BOLD}Branch${RESET}     $(git branch --show-current)"
-echo "${BOLD}Started${RESET}    $(date '+%H:%M:%S')"
-
-# ───────────────────────────────────────────────────────────────
-# 🎨 Format
-# ───────────────────────────────────────────────────────────────
-
-header "🎨 Format"
-
-run_global "Biome format" /dev/null pnpm format
-
-if [[ "$?" -ne 0 ]]; then
-  fail "Formatting failed — stopping."
-  exit 1
-fi
+echo "📍 Repo    : $ROOT"
+echo "🌿 Branch  : $(git branch --show-current)"
+echo "🕒 Started : $(date '+%H:%M:%S')"
 
 # ───────────────────────────────────────────────────────────────
 # 📦 Stage
 # ───────────────────────────────────────────────────────────────
 
-header "📦 Stage changes"
+header "📦 STAGE"
 
+echo "Adding all changes..."
 git add -A
 
 if git diff --cached --quiet; then
-  info "Working tree is clean. Nothing to commit."
+  info "Nothing to commit."
   exit 0
 fi
 
@@ -576,90 +422,67 @@ mapfile -d '' -t FILES < <(
 
 FILE_COUNT="${#FILES[@]}"
 
-echo "${BOLD}Changed files: ${WHITE}${FILE_COUNT}${RESET}"
+echo ""
+echo "🧠 $FILE_COUNT changed file(s)"
 echo ""
 
 for file in "${FILES[@]}"; do
-  echo "  ├─ $file"
+  echo "   • $file"
 done
 
 # ───────────────────────────────────────────────────────────────
-# 🧪 Global checks
+# 🥊 REAL LEFTHOOK
 # ───────────────────────────────────────────────────────────────
 
-header "🧪 Global checks"
+header "🥊 LEFTHOOK PRE-COMMIT"
 
-TMP_DIR="$(mktemp -d)"
+echo "Running the real Lefthook UI once."
+echo "Nothing is hidden."
+echo ""
+echo "Expected checks:"
+echo "   🧹 Biome"
+echo "   🧠 TypeScript"
+echo "   🧪 Tests"
+echo ""
 
-cleanup() {
-  rm -rf "$TMP_DIR"
-}
+HOOK_LOG="$(mktemp)"
 
-trap cleanup EXIT
-
-DIFF_LOG="$TMP_DIR/diff.log"
-LINT_LOG="$TMP_DIR/lint.log"
-TYPECHECK_LOG="$TMP_DIR/typecheck.log"
-TEST_LOG="$TMP_DIR/test.log"
-
-GLOBAL_DIFF_OK=true
-GLOBAL_LINT_OK=true
-GLOBAL_TYPECHECK_OK=true
-GLOBAL_TEST_OK=true
-
-# Git diff
-run_global "Git diff check" "$DIFF_LOG" git diff --cached --check ||
-  GLOBAL_DIFF_OK=false
-
-# Lint
-run_global "Biome lint" "$LINT_LOG" pnpm lint ||
-  GLOBAL_LINT_OK=false
-
-# Typecheck
-run_global "TypeScript typecheck" "$TYPECHECK_LOG" pnpm typecheck ||
-  GLOBAL_TYPECHECK_OK=false
-
-# Tests
-run_global "Test suite" "$TEST_LOG" pnpm test ||
-  GLOBAL_TEST_OK=false
-
-# ───────────────────────────────────────────────────────────────
-# 📊 Global summary
-# ───────────────────────────────────────────────────────────────
-
-header "📊 Global health"
-
-if [[ "$GLOBAL_DIFF_OK" == true ]]; then
-  echo "  ${GREEN}●${RESET} Git diff       ${GREEN}PASS${RESET}"
+# `script` gives Lefthook a real TTY while also capturing output.
+# This keeps the normal Lefthook UI visible in the terminal.
+if command -v script >/dev/null 2>&1; then
+  script -qefc "pnpm exec lefthook run pre-commit" "$HOOK_LOG"
+  HOOK_STATUS=$?
 else
-  echo "  ${RED}●${RESET} Git diff       ${RED}FAIL${RESET}"
-fi
+  warn "util-linux 'script' command not found."
+  warn "Running Lefthook directly; failure attribution will be limited."
 
-if [[ "$GLOBAL_LINT_OK" == true ]]; then
-  echo "  ${GREEN}●${RESET} Biome          ${GREEN}PASS${RESET}"
-else
-  echo "  ${RED}●${RESET} Biome          ${RED}FAIL${RESET}"
-fi
-
-if [[ "$GLOBAL_TYPECHECK_OK" == true ]]; then
-  echo "  ${GREEN}●${RESET} TypeScript     ${GREEN}PASS${RESET}"
-else
-  echo "  ${RED}●${RESET} TypeScript     ${RED}FAIL${RESET}"
-fi
-
-if [[ "$GLOBAL_TEST_OK" == true ]]; then
-  echo "  ${GREEN}●${RESET} Tests          ${GREEN}PASS${RESET}"
-else
-  echo "  ${RED}●${RESET} Tests          ${RED}FAIL${RESET}"
+  pnpm exec lefthook run pre-commit 2>&1 | tee "$HOOK_LOG"
+  HOOK_STATUS="${PIPESTATUS[0]}"
 fi
 
 echo ""
 
+if [[ "$HOOK_STATUS" -eq 0 ]]; then
+  ok "Lefthook passed ✅"
+else
+  fail "Lefthook found problems."
+  echo ""
+  echo "The commits will continue."
+  echo "Files mentioned by failed checks will be skipped."
+fi
+
+# Re-read staged files because Biome may have fixed/staged files.
+mapfile -d '' -t FILES < <(
+  git diff --cached --name-only -z
+)
+
+FILE_COUNT="${#FILES[@]}"
+
 # ───────────────────────────────────────────────────────────────
-# 🚀 Individual files
+# 🚀 Individual commits
 # ───────────────────────────────────────────────────────────────
 
-header "🚀 Individual commits"
+header "🚀 INDIVIDUAL COMMITS"
 
 COMMITTED=0
 SKIPPED=0
@@ -670,137 +493,64 @@ for file in "${FILES[@]}"; do
 
   echo ""
   echo "${MAGENTA}${BOLD}╭─ [$INDEX/$FILE_COUNT] $file${RESET}"
-  echo ""
-
-  STATUS="$(
-    git diff --cached --name-status -- "$file" |
-      awk 'NR == 1 { print $1 }'
-  )"
+  echo "${MAGENTA}╰────────────────────────────────────────────────${RESET}"
 
   BLOCKED=false
 
-  # ───────────────────────────────────────────────────────────
-  # Deleted file
-  # ───────────────────────────────────────────────────────────
+  # If Lefthook failed and explicitly mentioned this file,
+  # this changed file is considered broken.
+  if [[ "$HOOK_STATUS" -ne 0 ]] &&
+    failure_mentions_file "$HOOK_LOG" "$file"; then
 
-  if [[ "$STATUS" == "D" ]]; then
-    info "Deleted file — no content check needed."
+    fail "Lefthook reported a problem in this file."
+    BLOCKED=true
+  fi
 
-  else
-    # ─────────────────────────────────────────────────────────
-    # Diff failure
-    # ─────────────────────────────────────────────────────────
-
-    if [[ "$GLOBAL_DIFF_OK" == false ]] &&
-      log_mentions_file "$DIFF_LOG" "$file"; then
-      error "Git diff check points to this file."
+  # Extra check for shell scripts because Biome does not check them.
+  if [[ "$BLOCKED" == false ]]; then
+    if ! validate_special_file "$file"; then
       BLOCKED=true
-    fi
-
-    # ─────────────────────────────────────────────────────────
-    # Lint failure
-    #
-    # If global lint failed and points to this file, run an exact
-    # file check so unrelated files can still be committed.
-    # ─────────────────────────────────────────────────────────
-
-    if [[ "$GLOBAL_LINT_OK" == false ]]; then
-      if log_mentions_file "$LINT_LOG" "$file"; then
-        error "Global lint points to this file."
-        BLOCKED=true
-      elif [[ "$file" =~ \.(ts|tsx|js|jsx|mjs|cjs|json|jsonc|css)$ ]]; then
-        info "Global lint failed elsewhere. Checking this file directly..."
-
-        if ! check_file "$file"; then
-          BLOCKED=true
-        fi
-      fi
-    fi
-
-    # ─────────────────────────────────────────────────────────
-    # Typecheck failure
-    # ─────────────────────────────────────────────────────────
-
-    if [[ "$GLOBAL_TYPECHECK_OK" == false ]] &&
-      log_mentions_file "$TYPECHECK_LOG" "$file"; then
-      error "Typecheck points to this file."
-      BLOCKED=true
-    fi
-
-    # ─────────────────────────────────────────────────────────
-    # Test failure
-    # ─────────────────────────────────────────────────────────
-
-    if [[ "$GLOBAL_TEST_OK" == false ]] &&
-      log_mentions_file "$TEST_LOG" "$file"; then
-      error "Tests point to this file."
-      BLOCKED=true
-    fi
-
-    # If everything globally passed, run only the file-specific
-    # validation that global checks do not provide.
-    if [[ "$BLOCKED" == false ]] &&
-      [[ "$GLOBAL_LINT_OK" == true ]]; then
-
-      case "$file" in
-        *.sh|*.md|*)
-          check_file "$file" || BLOCKED=true
-          ;;
-      esac
     fi
   fi
 
-  # ───────────────────────────────────────────────────────────
-  # ⏭️ Skip broken file
-  # ───────────────────────────────────────────────────────────
-
   if [[ "$BLOCKED" == true ]]; then
-    skip "Skipped — leaving $file uncommitted."
-    echo "${MAGENTA}╰──────────────────────────────────────────────${RESET}"
+    skip "Not committing → $file"
     SKIPPED=$((SKIPPED + 1))
     continue
   fi
 
-  # ───────────────────────────────────────────────────────────
-  # 📝 Commit preview
-  # ───────────────────────────────────────────────────────────
-
   MESSAGE="$(commit_message_for_file "$file")"
 
   echo ""
-  echo "${BOLD}Commit${RESET}"
-  echo "  ${CYAN}$MESSAGE${RESET}"
-  echo ""
+  echo "   📝 $MESSAGE"
+  echo "   📦 committing only this file..."
 
-  # ───────────────────────────────────────────────────────────
-  # 📦 Individual commit
-  # ───────────────────────────────────────────────────────────
-
+  # Lefthook already ran once above.
+  # Do not execute it again for every file.
   if git commit \
     --only \
     --no-verify \
     -m "$MESSAGE" \
     -- "$file"; then
 
-    ok "Committed $file"
+    ok "Committed → $file"
     COMMITTED=$((COMMITTED + 1))
   else
-    error "Git commit failed for $file"
+    fail "Commit failed → $file"
     SKIPPED=$((SKIPPED + 1))
   fi
-
-  echo "${MAGENTA}╰──────────────────────────────────────────────${RESET}"
 done
 
+rm -f "$HOOK_LOG"
+
 # ───────────────────────────────────────────────────────────────
-# 🎉 Final report
+# 🎉 Report
 # ───────────────────────────────────────────────────────────────
 
-header "🎉 Starfire Commit Report"
+header "🎉 STARFIRE COMMIT REPORT"
 
-echo ""
-echo "  ${GREEN}✅ Committed${RESET}   $COMMITTED"
-echo "  ${YELLOW}⏭️  Skipped${RESET}     $SKIPPED"
+echo "   ✅ Committed : $COMMITTED"
+echo "   ⏭️  Skipped   : $SKIPPED"
 echo ""
 
 if git diff --quiet && git diff --cached --quiet; then
@@ -814,57 +564,14 @@ fi
 
 echo ""
 
-if [[ "$SKIPPED" -eq 0 ]]; then
-  echo "${GREEN}${BOLD}🔥 Everything is clean and committed.${RESET}"
+if [[ "$HOOK_STATUS" -eq 0 && "$SKIPPED" -eq 0 ]]; then
+  echo "${GREEN}${BOLD}🔥 Everything passed and every file was committed.${RESET}"
+elif [[ "$COMMITTED" -gt 0 ]]; then
+  echo "${YELLOW}${BOLD}🛠️  Good files were committed; problem files were left behind.${RESET}"
 else
-  echo "${YELLOW}${BOLD}🛠️  Fix the skipped files and run again.${RESET}"
+  echo "${RED}${BOLD}❌ Nothing was committed.${RESET}"
 fi
 
 echo ""
-echo "${DIM}Finished: $(date '+%H:%M:%S')${RESET}"
-echo ""
-```
-
-### One important thing
-
-After pasting it, run **exactly**:
-
-```bash
-chmod +x scripts/commit-all.sh
-bash -n scripts/commit-all.sh
-./scripts/commit-all.sh
-```
-
-You should now immediately see:
-
-```text
-╭────────────────────────────────────────────────╮
-│ 🌌 Starfire Smart Commit                       │
-╰────────────────────────────────────────────────╯
-
-Repository  /home/thor/Projects/starfire
-Branch      main
-Started     12:05:31
-
-╭────────────────────────────────────────────────╮
-│ 🎨 Format                                     │
-╰────────────────────────────────────────────────╯
-
-▶ Biome format
-┌─ $ pnpm format
-...
-```
-
-And the commits can look like:
-
-```text
-🚀 feat(voice): smooth out realtime voice
-🛡️ fix(electron): harden the desktop agent bridge
-📚 docs(docs): refresh the Starfire map
-🧪 test(eval): improve agent evaluation
-🧹 chore(scripts): level up the developer workflow
-✨ feat(ui): make the experience smoother
-🔐 fix(tools): lock down tool safety
-```
-
-Much less robot, much more **Starfire**. 🌌
+echo "🕒 Finished : $(date '+%H:%M:%S')"
+echo
