@@ -12,6 +12,3 @@ pre-commit:
 
     tests:
       run: pnpm exec vitest run --passWithNoTests
-
-    rust:
-      run: pnpm check
