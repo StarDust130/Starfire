@@ -11,7 +11,7 @@ export function createCloseAppTool(ports: AgentPorts): ToolDefinition {
       "Use for 'close Discord', 'quit Firefox'. Apps with unsaved work " +
       "will ask the user themselves.",
 
-    danger: "confirm",
+    danger: "safe",
 
     parameters: {
       type: "object",
