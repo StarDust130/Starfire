@@ -18,10 +18,13 @@ function okResult(call: ToolCall): ToolResult {
   };
 }
 
-type ExecutorWithCalls = ToolExecutor & { calls: ToolCall[] };
+type ExecutorWithCalls = ToolExecutor & {
+  calls: ToolCall[];
+};
 
-/*
- * Tracking executor: records every call it receives so tests can
+/**
+ * Tracking executor:
+ * records every call it receives so tests can
  * assert on order and count.
  */
 function makeExecutor(): ExecutorWithCalls {
@@ -48,9 +51,9 @@ function makeCall(name: string, index = 0): ToolCall {
   };
 }
 
-let events: AgentTurnEvent[];
+let events: AgentTurnEvent[] = [];
 
-let logs: string[];
+let logs: string[] = [];
 
 function buildRunner(
   overrides: {
@@ -84,7 +87,9 @@ describe("AgentRunner", () => {
   it("executes nothing for an empty turn but still reports it", async () => {
     const executor = makeExecutor();
 
-    const runner = buildRunner({ executor });
+    const runner = buildRunner({
+      executor,
+    });
 
     const results = await runner.run([]);
 
@@ -108,7 +113,9 @@ describe("AgentRunner", () => {
   it("executes a single call and passes the result through", async () => {
     const executor = makeExecutor();
 
-    const runner = buildRunner({ executor });
+    const runner = buildRunner({
+      executor,
+    });
 
     const results = await runner.run([makeCall("open_app")]);
 
@@ -125,10 +132,12 @@ describe("AgentRunner", () => {
     expect(executor.calls).toHaveLength(1);
   });
 
-  it("executes multiple calls SEQUENTIALLY in order", async () => {
+  it("executes multiple calls sequentially in order", async () => {
     const executor = makeExecutor();
 
-    const runner = buildRunner({ executor });
+    const runner = buildRunner({
+      executor,
+    });
 
     const results = await runner.run([
       makeCall("open_app", 0),
@@ -142,25 +151,25 @@ describe("AgentRunner", () => {
 
     expect(executor.calls.map((call) => call.callId)).toEqual([
       "call-0",
-
       "call-1",
-
       "call-2",
     ]);
 
     expect(results.map((result) => result.callId)).toEqual([
       "call-0",
-
       "call-1",
-
       "call-2",
     ]);
   });
 
-  it("caps calls per turn and logs the overflow", async () => {
+  it("caps calls per turn and rejects overflow calls", async () => {
     const executor = makeExecutor();
 
-    const runner = buildRunner({ executor, maxCallsPerTurn: 2 });
+    const runner = buildRunner({
+      executor,
+
+      maxCallsPerTurn: 2,
+    });
 
     const results = await runner.run([
       makeCall("open_app", 0),
@@ -172,22 +181,99 @@ describe("AgentRunner", () => {
       makeCall("open_app", 3),
     ]);
 
-    expect(results).toHaveLength(2);
+    /*
+     * All valid calls receive a result.
+     *
+     * First 2 execute.
+     * Remaining 2 are rejected by the runner.
+     */
+    expect(results).toHaveLength(4);
 
     expect(executor.calls).toHaveLength(2);
+
+    expect(results[0]).toMatchObject({
+      callId: "call-0",
+
+      ok: true,
+    });
+
+    expect(results[1]).toMatchObject({
+      callId: "call-1",
+
+      ok: true,
+    });
+
+    expect(results[2]).toMatchObject({
+      callId: "call-2",
+
+      ok: false,
+
+      error: "tool-limit-exceeded",
+    });
+
+    expect(results[3]).toMatchObject({
+      callId: "call-3",
+
+      ok: false,
+
+      error: "tool-limit-exceeded",
+    });
 
     expect(logs.some((message) => message.includes("cap 2"))).toBe(true);
   });
 
-  it("skips malformed calls (missing callId or name)", async () => {
+  it("rejects an invalid maxCallsPerTurn", () => {
+    expect(
+      () =>
+        new AgentRunner({
+          executor: makeExecutor(),
+
+          maxCallsPerTurn: 0,
+        }),
+    ).toThrow("maxCallsPerTurn must be a positive integer.");
+
+    expect(
+      () =>
+        new AgentRunner({
+          executor: makeExecutor(),
+
+          maxCallsPerTurn: -1,
+        }),
+    ).toThrow("maxCallsPerTurn must be a positive integer.");
+
+    expect(
+      () =>
+        new AgentRunner({
+          executor: makeExecutor(),
+
+          maxCallsPerTurn: 1.5,
+        }),
+    ).toThrow("maxCallsPerTurn must be a positive integer.");
+  });
+
+  it("skips malformed calls", async () => {
     const executor = makeExecutor();
 
-    const runner = buildRunner({ executor });
+    const runner = buildRunner({
+      executor,
+    });
 
     const results = await runner.run([
-      { callId: "", name: "open_app", args: {} },
+      {
+        callId: "",
 
-      { callId: "ok", name: "", args: {} },
+        name: "open_app",
+
+        args: {},
+      },
+
+      {
+        callId: "ok",
+
+        name: "",
+
+        args: {},
+      },
 
       makeCall("open_app", 7),
     ]);
@@ -208,7 +294,9 @@ describe("AgentRunner", () => {
       }),
     };
 
-    const runner = buildRunner({ executor: broken });
+    const runner = buildRunner({
+      executor: broken,
+    });
 
     const results = await runner.run([makeCall("open_app")]);
 
@@ -239,35 +327,52 @@ describe("AgentRunner", () => {
       ),
     };
 
-    const runner = buildRunner({ executor: mixed });
+    const runner = buildRunner({
+      executor: mixed,
+    });
 
-    await runner.run([makeCall("good", 0), makeCall("bad", 1)]);
+    await runner.run([
+      makeCall("good", 0),
+
+      makeCall("bad", 1),
+    ]);
 
     expect(events.map((event) => event.kind)).toEqual([
       "turn-started",
-
       "call-result",
-
       "call-result",
-
       "turn-completed",
     ]);
 
     const completed = events.find((event) => event.kind === "turn-completed");
 
-    expect(completed).toMatchObject({ total: 2, ok: 1, failed: 1 });
+    expect(completed).toMatchObject({
+      total: 2,
+
+      ok: 1,
+
+      failed: 1,
+    });
   });
 
   it("passes the tool context through to the executor", async () => {
     const executor = makeExecutor();
 
-    const runner = buildRunner({ executor });
+    const runner = buildRunner({
+      executor,
+    });
 
-    const ctx: ToolContext = { log: vi.fn() };
+    const ctx: ToolContext = {
+      log: vi.fn(),
+    };
 
     await runner.run([makeCall("open_app")], ctx);
 
-    expect(executor.execute).toHaveBeenCalledWith(expect.anything(), ctx);
+    expect(executor.execute).toHaveBeenCalledWith(
+      expect.anything(),
+
+      ctx,
+    );
   });
 });
 
@@ -292,12 +397,24 @@ describe("AgentRunner -> ToolRegistry -> Tool (full chain)", () => {
 
           detail: "Window focusing is not supported on Wayland yet.",
         })),
+
+        listRunning: vi.fn(async () => ["VS Code"]),
       },
 
       files: {
-        openFolder: vi.fn(async (_path: string) => ({ opened: "Projects" })),
+        openFolder: vi.fn(async (_path: string) => ({
+          opened: "Projects",
+        })),
 
-        openFile: vi.fn(async (_path: string) => ({ opened: "README.md" })),
+        openFile: vi.fn(async (_path: string) => ({
+          opened: "README.md",
+        })),
+      },
+
+      urls: {
+        open: vi.fn(async (url: string) => ({
+          opened: url,
+        })),
       },
 
       clipboard: {
@@ -307,8 +424,32 @@ describe("AgentRunner -> ToolRegistry -> Tool (full chain)", () => {
       },
 
       system: {
-        info: vi.fn(async (_query: "memory") => ({
+        info: vi.fn(async (_query) => ({
           summary: "You're using 62% of your 16 GB of RAM.",
+        })),
+      },
+
+      web: {
+        search: vi.fn(async (_query: string) => ({
+          answer: "test",
+
+          results: [],
+        })),
+      },
+
+      weather: {
+        current: vi.fn(async (_place?: string) => ({
+          summary: "It's 25°C in Bhilai right now.",
+
+          temperatureC: 25,
+
+          data: {},
+        })),
+      },
+
+      windows: {
+        control: vi.fn(async (_action, _app) => ({
+          done: true,
         })),
       },
     };
@@ -319,7 +460,9 @@ describe("AgentRunner -> ToolRegistry -> Tool (full chain)", () => {
 
     const registry = createDefaultRegistry(ports);
 
-    const runner = buildRunner({ executor: registry });
+    const runner = buildRunner({
+      executor: registry,
+    });
 
     const results = await runner.run([
       {
@@ -327,7 +470,9 @@ describe("AgentRunner -> ToolRegistry -> Tool (full chain)", () => {
 
         name: "open_app",
 
-        args: { app: "vs code" },
+        args: {
+          app: "vs code",
+        },
       },
     ]);
 
@@ -340,7 +485,11 @@ describe("AgentRunner -> ToolRegistry -> Tool (full chain)", () => {
 
       summary: "Opening VS Code.",
 
-      data: { app: "VS Code", pid: 4242 },
+      data: {
+        app: "VS Code",
+
+        pid: 4242,
+      },
     });
 
     expect(ports.apps.open).toHaveBeenCalledWith("vs code");
@@ -349,7 +498,9 @@ describe("AgentRunner -> ToolRegistry -> Tool (full chain)", () => {
   it("an unknown model tool degrades to a graceful spoken failure", async () => {
     const registry = createDefaultRegistry(createFakePorts());
 
-    const runner = buildRunner({ executor: registry });
+    const runner = buildRunner({
+      executor: registry,
+    });
 
     const results = await runner.run([
       {
@@ -366,5 +517,61 @@ describe("AgentRunner -> ToolRegistry -> Tool (full chain)", () => {
     expect(results[0]?.error).toBe("unknown-tool");
 
     expect(results[0]?.summary).toContain("format_disk");
+  });
+
+  it("stops at the configured limit in the full chain", async () => {
+    const ports = createFakePorts();
+
+    const registry = createDefaultRegistry(ports);
+
+    const runner = buildRunner({
+      executor: registry,
+
+      maxCallsPerTurn: 2,
+    });
+
+    const results = await runner.run([
+      {
+        callId: "qwen-1",
+
+        name: "open_app",
+
+        args: {
+          app: "vs code",
+        },
+      },
+
+      {
+        callId: "qwen-2",
+
+        name: "open_app",
+
+        args: {
+          app: "discord",
+        },
+      },
+
+      {
+        callId: "qwen-3",
+
+        name: "open_app",
+
+        args: {
+          app: "firefox",
+        },
+      },
+    ]);
+
+    expect(results).toHaveLength(3);
+
+    expect(ports.apps.open).toHaveBeenCalledTimes(2);
+
+    expect(results[2]).toMatchObject({
+      callId: "qwen-3",
+
+      ok: false,
+
+      error: "tool-limit-exceeded",
+    });
   });
 });

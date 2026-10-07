@@ -2,7 +2,9 @@ import { AgentRunner } from "@starfire/core";
 import { createDefaultRegistry } from "@starfire/tools";
 import { type BrowserWindow, ipcMain } from "electron";
 import WebSocket from "ws";
+
 import { createElectronPorts } from "./agent/electron-ports.js";
+
 import {
   buildAudioAppend,
   buildFunctionCallOutput,
@@ -33,10 +35,23 @@ type FunctionCallEvent = {
 };
 
 /*
- * Owns the EmpirioLabs realtime WebSocket, the API key, and now the
- * AGENT: model tool calls come in, run through the ToolRegistry with
- * real OS ports, and the results are handed back so Starfire can
- * speak the outcome.
+ * Owns the EmpirioLabs realtime WebSocket, the API key, and the agent bridge.
+ *
+ * Flow:
+ *
+ *   Qwen function calls
+ *        ↓
+ *   collect all calls from this response
+ *        ↓
+ *   AgentRunner.run(...)
+ *        ↓
+ *   ToolRegistry
+ *        ↓
+ *   real Electron ports
+ *        ↓
+ *   send every tool result back to Qwen
+ *        ↓
+ *   Qwen speaks the result
  */
 export class RealtimeVoiceBridge {
   private socket: WebSocket | null = null;
@@ -60,21 +75,19 @@ export class RealtimeVoiceBridge {
   private audioBytes = 0;
 
   /*
-   * Agent wiring. sawToolCall tracks whether THIS response turn used
-   * a tool (reset on response.created); in-flight/follow-up handle
-   * the case where response.done arrives while a tool is still
-   * running — the spoken follow-up is requested only after every
-   * tool result has been delivered.
+   * A single model response can contain multiple function calls.
+   * We collect them and execute them together through ONE AgentRunner.run()
+   * call so maxCallsPerTurn is actually enforced.
    */
   private readonly registry: ReturnType<typeof createDefaultRegistry>;
 
   private readonly runner: AgentRunner;
 
-  private sawToolCall = false;
+  private pendingToolCalls: FunctionCallEvent[] = [];
 
-  private inFlightTools = 0;
+  private toolBatchStarted = false;
 
-  private followUpQueued = false;
+  private toolBatchCancelled = false;
 
   private pendingSessionEnd = false;
 
@@ -116,6 +129,7 @@ export class RealtimeVoiceBridge {
   async dispose(): Promise<void> {
     ipcMain.removeHandler("starfire-voice:start");
     ipcMain.removeHandler("starfire-voice:stop");
+
     ipcMain.removeAllListeners("starfire-voice:audio");
     ipcMain.removeAllListeners("starfire-voice:interrupt");
     ipcMain.removeAllListeners("starfire-voice:log");
@@ -164,15 +178,25 @@ export class RealtimeVoiceBridge {
     this.conn += 1;
 
     this.sessionConfigured = false;
-
     this.sessionAnnounced = false;
-
     this.sessionConfirmedLogged = false;
+
+    this.responseStartedAt = 0;
+    this.firstAudioLogged = false;
+    this.audioChunks = 0;
+    this.audioBytes = 0;
+
+    this.pendingToolCalls = [];
+    this.toolBatchStarted = false;
+    this.toolBatchCancelled = false;
+    this.pendingSessionEnd = false;
 
     const endpoint = process.env.EMPIRIOLABS_REALTIME_URL ?? DEFAULT_ENDPOINT;
 
     const socket = new WebSocket(endpoint, {
-      headers: { Authorization: `Bearer ${key}` },
+      headers: {
+        Authorization: `Bearer ${key}`,
+      },
     });
 
     this.socket = socket;
@@ -182,11 +206,13 @@ export class RealtimeVoiceBridge {
     return new Promise<VoiceStartResult>((resolve) => {
       const timer = setTimeout(() => {
         this.failPending("Realtime connection timed out.", false);
-
         this.closeSocket(1000);
       }, CONNECT_TIMEOUT_MS);
 
-      this.pending = { resolve, timer };
+      this.pending = {
+        resolve,
+        timer,
+      };
 
       socket.on("message", (data) => {
         this.handleMessage(data.toString());
@@ -207,7 +233,9 @@ export class RealtimeVoiceBridge {
           this.socket = null;
         }
 
-        this.emit({ kind: "closed" });
+        this.emit({
+          kind: "closed",
+        });
       });
     });
   }
@@ -223,7 +251,11 @@ export class RealtimeVoiceBridge {
 
     this.pending = null;
 
-    resolve({ ok: false, error, fatal });
+    resolve({
+      ok: false,
+      error,
+      fatal,
+    });
   }
 
   private resolvePending(): void {
@@ -237,7 +269,10 @@ export class RealtimeVoiceBridge {
 
     this.pending = null;
 
-    resolve({ ok: true, conn: this.conn });
+    resolve({
+      ok: true,
+      conn: this.conn,
+    });
   }
 
   private handleMessage(raw: string): void {
@@ -271,13 +306,17 @@ export class RealtimeVoiceBridge {
 
         this.resolvePending();
 
-        this.emit({ kind: "session", info: event.info });
+        this.emit({
+          kind: "session",
+          info: event.info,
+        });
 
         this.sessionConfigured = true;
 
         /*
-         * Tell the model WHICH tools exist. The manifests are the
-         * single source of truth shared with the registry.
+         * Tell the model which tools exist.
+         * The manifests are the single source of truth shared
+         * with the registry.
          */
         this.send(buildSessionUpdate(this.registry.functionTools()));
 
@@ -303,16 +342,22 @@ export class RealtimeVoiceBridge {
       this.responseStartedAt = Date.now();
 
       this.firstAudioLogged = false;
-
       this.audioChunks = 0;
-
       this.audioBytes = 0;
 
-      this.sawToolCall = false;
+      /*
+       * This starts a new model response.
+       *
+       * pendingSessionEnd intentionally survives here because
+       * the response after end_session is the goodbye response.
+       */
+      this.pendingToolCalls = [];
+      this.toolBatchStarted = false;
+      this.toolBatchCancelled = false;
 
-      this.followUpQueued = false;
-
-      this.emit({ kind: "response-created" });
+      this.emit({
+        kind: "response-created",
+      });
 
       return;
     }
@@ -332,7 +377,6 @@ export class RealtimeVoiceBridge {
         }
 
         this.audioChunks += 1;
-
         this.audioBytes += pcm.length;
 
         this.emitAudio(pcm);
@@ -342,8 +386,7 @@ export class RealtimeVoiceBridge {
     }
 
     if (event.kind === "function-call") {
-      void this.handleFunctionCall(event);
-
+      this.handleFunctionCall(event);
       return;
     }
 
@@ -366,13 +409,17 @@ export class RealtimeVoiceBridge {
     }
 
     if (event.kind === "speech-started") {
-      this.emit({ kind: "speech-started" });
+      this.emit({
+        kind: "speech-started",
+      });
 
       return;
     }
 
     if (event.kind === "speech-stopped") {
-      this.emit({ kind: "speech-stopped" });
+      this.emit({
+        kind: "speech-stopped",
+      });
 
       return;
     }
@@ -400,28 +447,32 @@ export class RealtimeVoiceBridge {
         usage: event.usage,
       });
 
+      /*
+       * Execute ALL calls from this response through one AgentRunner.run()
+       * call so maxCallsPerTurn is enforced correctly.
+       */
+      if (this.pendingToolCalls.length > 0 && !this.toolBatchStarted) {
+        this.startToolBatch();
+        return;
+      }
+
+      /*
+       * end_session succeeded in the previous tool batch.
+       *
+       * Let Qwen's goodbye audio play briefly, then close the session.
+       */
       if (this.pendingSessionEnd) {
         this.pendingSessionEnd = false;
 
-        /*
-         * Her goodbye is generated; let the audio play out locally,
-         * then tell the controller to end the session cleanly.
-         */
         setTimeout(() => {
-          this.emit({ kind: "session-ended" });
+          this.emit({
+            kind: "session-ended",
+          });
 
           this.closeSocket(1000);
         }, 1500);
 
         return;
-      }
-
-      if (this.inFlightTools > 0) {
-        this.followUpQueued = true;
-      } else if (this.sawToolCall) {
-        this.sawToolCall = false;
-
-        this.send(buildResponseCreate());
       }
 
       return;
@@ -430,7 +481,17 @@ export class RealtimeVoiceBridge {
     if (event.kind === "response-cancelled") {
       this.responseStartedAt = 0;
 
-      this.emit({ kind: "response-cancelled" });
+      /*
+       * Do not execute tool calls that were waiting for response.done
+       * if the user cancelled the response.
+       */
+      this.toolBatchCancelled = true;
+      this.pendingToolCalls = [];
+      this.toolBatchStarted = false;
+
+      this.emit({
+        kind: "response-cancelled",
+      });
 
       return;
     }
@@ -446,7 +507,6 @@ export class RealtimeVoiceBridge {
 
       if (event.fatal) {
         this.failPending(event.message, true);
-
         this.closeSocket(1000);
       }
 
@@ -454,19 +514,8 @@ export class RealtimeVoiceBridge {
     }
   }
 
-  private async handleFunctionCall(event: FunctionCallEvent): Promise<void> {
-    this.sawToolCall = true;
-
-    this.inFlightTools += 1;
-
-    /*
-     * GOODBYE: end_session lets her speak the goodbye first; the real
-     * disconnect happens when her goodbye response finishes
-     * (response-done below).
-     */
-    if (event.name === "end_session") {
-      this.pendingSessionEnd = true;
-    }
+  private handleFunctionCall(event: FunctionCallEvent): void {
+    this.pendingToolCalls.push(event);
 
     this.emit({
       kind: "tool-call",
@@ -474,52 +523,124 @@ export class RealtimeVoiceBridge {
     });
 
     console.log(
-      `[Starfire Voice] 🔧 tool call: ${event.name} (id=${event.callId})`,
+      `[Starfire Voice] 🔧 tool call: ${event.name} ` + `(id=${event.callId})`,
     );
+  }
 
-    const results = await this.runner.run(
-      [
-        {
-          callId: event.callId,
-
-          name: event.name,
-
-          args: event.args,
-        },
-      ],
-
-      {
-        log: (message) => console.log(`[Starfire Voice] ${message}`),
-      },
-    );
-
-    this.inFlightTools -= 1;
-
-    const result = results[0];
-
-    if (!result) {
+  private startToolBatch(): void {
+    if (this.toolBatchStarted) {
       return;
     }
 
-    this.emit({
-      kind: "tool-result",
-
-      ok: result.ok,
-
-      summary: result.summary,
-    });
-
-    this.send(buildFunctionCallOutput(result));
-
-    console.log(
-      `[Starfire Voice] 🔧 ${result.ok ? "ok" : "failed"}: ${result.summary}`,
-    );
-
-    if (this.inFlightTools === 0 && this.followUpQueued) {
-      this.followUpQueued = false;
-
-      this.send(buildResponseCreate());
+    if (this.toolBatchCancelled) {
+      return;
     }
+
+    if (this.pendingToolCalls.length === 0) {
+      return;
+    }
+
+    this.toolBatchStarted = true;
+
+    const calls = this.pendingToolCalls;
+
+    this.pendingToolCalls = [];
+
+    void this.executeToolBatch(calls);
+  }
+
+  private async executeToolBatch(calls: FunctionCallEvent[]): Promise<void> {
+    const batchConn = this.conn;
+
+    const runnerCalls = calls.map((call) => ({
+      callId: call.callId,
+      name: call.name,
+      args: this.normalizeToolArgs(call.args),
+    }));
+
+    try {
+      const results = await this.runner.run(runnerCalls, {
+        log: (message) => {
+          console.log(`[Starfire Voice] ${message}`);
+        },
+      });
+
+      /*
+       * The session may have been closed/replaced while tools were running.
+       * Never send an old batch into a new connection.
+       */
+      if (
+        batchConn !== this.conn ||
+        !this.socket ||
+        this.socket.readyState !== WebSocket.OPEN ||
+        this.toolBatchCancelled
+      ) {
+        this.toolBatchStarted = false;
+        return;
+      }
+
+      /*
+       * Match results by callId, not array position.
+       *
+       * AgentRunner may skip malformed calls, so positional matching could
+       * accidentally send one tool's result to another tool call.
+       */
+      const resultsByCallId = new Map(
+        results.map((result) => [result.callId, result]),
+      );
+
+      for (const call of calls) {
+        const result = resultsByCallId.get(call.callId);
+
+        if (!result) {
+          continue;
+        }
+
+        this.emit({
+          kind: "tool-result",
+          name: call.name,
+          ok: result.ok,
+          summary: result.summary,
+        });
+
+        console.log(
+          `[Starfire Voice] ✅ tool result: ${call.name} ` +
+            `(ok=${String(result.ok)})`,
+        );
+
+        if (call.name === "end_session" && result.ok) {
+          this.pendingSessionEnd = true;
+        }
+
+        this.send(buildFunctionCallOutput(result));
+      }
+
+      this.toolBatchStarted = false;
+
+      /*
+       * Ask Qwen to continue and speak the tool results.
+       */
+      if (
+        batchConn === this.conn &&
+        this.socket &&
+        this.socket.readyState === WebSocket.OPEN &&
+        !this.toolBatchCancelled
+      ) {
+        this.send(buildResponseCreate());
+      }
+    } catch (error) {
+      this.toolBatchStarted = false;
+
+      console.error("[Starfire Voice] agent batch failed:", error);
+    }
+  }
+
+  private normalizeToolArgs(args: unknown): Record<string, unknown> {
+    if (args && typeof args === "object" && !Array.isArray(args)) {
+      return args as Record<string, unknown>;
+    }
+
+    return {};
   }
 
   private handleAudio(audio: unknown): void {
@@ -553,11 +674,13 @@ export class RealtimeVoiceBridge {
 
     this.socket = null;
 
-    this.sawToolCall = false;
-
-    this.followUpQueued = false;
-
-    this.inFlightTools = 0;
+    /*
+     * Invalidate any pending tool batch.
+     */
+    this.pendingToolCalls = [];
+    this.toolBatchStarted = false;
+    this.toolBatchCancelled = true;
+    this.pendingSessionEnd = false;
 
     if (!socket) {
       return;

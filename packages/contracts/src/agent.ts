@@ -101,6 +101,7 @@ export type ToolResult = {
     | "policy-denied"
     | "confirmation-required"
     | "confirmation-denied"
+    | "tool-limit-exceeded"
     | "tool-error"
     | "internal-error";
 };

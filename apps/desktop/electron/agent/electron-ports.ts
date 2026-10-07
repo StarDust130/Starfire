@@ -200,9 +200,36 @@ async function resolveHomePath(
   raw: string,
   kind: "folder" | "file",
 ): Promise<string> {
-  const resolved = path.resolve(expandHome(raw.trim()));
+  const input = raw.trim();
 
-  const home = os.homedir();
+  if (!input) {
+    throw new ToolError("Please provide a file or folder path.");
+  }
+
+  const home = await fs.realpath(os.homedir());
+
+  const expanded = expandHome(input);
+
+  /*
+   * Bare paths like "Documents" mean a path relative
+   * to the user's home, not Electron's working directory.
+   */
+  const candidate = path.isAbsolute(expanded)
+    ? expanded
+    : path.join(home, expanded);
+
+  /*
+   * realpath follows symlinks.
+   *
+   * This is the important security check:
+   * /home/thor/link -> /outside
+   * becomes /outside here and gets rejected.
+   */
+  const resolved = await fs.realpath(candidate).catch(() => null);
+
+  if (!resolved) {
+    throw new ToolError(`I couldn't find "${raw}" — does it exist?`);
+  }
 
   if (resolved !== home && !resolved.startsWith(home + path.sep)) {
     throw new ToolError(

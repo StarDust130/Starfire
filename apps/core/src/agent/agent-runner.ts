@@ -1,9 +1,8 @@
 import type { ToolCall, ToolContext, ToolResult } from "@starfire/contracts";
 
 /**
- * The one method the runner needs. ToolRegistry satisfies this
- * structurally — tests can inject minimal fakes without the real
- * class.
+ * The one method the runner needs.
+ * ToolRegistry satisfies this structurally.
  */
 export type ToolExecutor = {
   execute(call: ToolCall, ctx?: ToolContext): Promise<ToolResult>;
@@ -13,9 +12,11 @@ export type AgentRunnerOptions = {
   executor: ToolExecutor;
 
   /**
-   * Safety cap: how many tool calls the model may request in one
-   * turn. Extras are skipped and logged. Prevents a confused model
-   * from machine-gunning the OS.
+   * Maximum number of tool calls allowed in one turn.
+   *
+   * IMPORTANT:
+   * The caller must pass all calls belonging to the same
+   * model response to ONE run() call.
    */
   maxCallsPerTurn?: number;
 
@@ -23,16 +24,30 @@ export type AgentRunnerOptions = {
 };
 
 export type AgentTurnEvent =
-  | { kind: "turn-started"; received: number; executing: number }
-  | { kind: "call-result"; result: ToolResult }
-  | { kind: "turn-completed"; total: number; ok: number; failed: number };
+  | {
+      kind: "turn-started";
+      received: number;
+      executing: number;
+    }
+  | {
+      kind: "call-result";
+      result: ToolResult;
+    }
+  | {
+      kind: "turn-completed";
+      total: number;
+      ok: number;
+      failed: number;
+    };
 
 const DEFAULT_MAX_CALLS_PER_TURN = 4;
 
 /*
- * V0 tool calls are executed SEQUENTIALLY, in the order the model
- * emitted them. Parallel OS actions (open two apps at once) can race
- * and confuse the user; there is no latency win worth that in V0.
+ * V0 executes tool calls sequentially.
+ *
+ * The runner also returns explicit failures for calls above the cap.
+ * This is important because the realtime model still needs a result
+ * for every valid function call it emitted.
  */
 export class AgentRunner {
   private readonly executor: ToolExecutor;
@@ -52,6 +67,10 @@ export class AgentRunner {
 
     this.maxCallsPerTurn =
       options.maxCallsPerTurn ?? DEFAULT_MAX_CALLS_PER_TURN;
+
+    if (!Number.isInteger(this.maxCallsPerTurn) || this.maxCallsPerTurn < 1) {
+      throw new Error("maxCallsPerTurn must be a positive integer.");
+    }
 
     this.log = options.log ?? (() => {});
 
@@ -73,35 +92,68 @@ export class AgentRunner {
 
     const executing = usable.slice(0, this.maxCallsPerTurn);
 
-    const overflow = usable.length - executing.length;
+    const overflow = usable.slice(this.maxCallsPerTurn);
 
     if (malformed > 0) {
       this.log(`agent: skipped ${malformed} malformed tool call(s)`);
     }
 
-    if (overflow > 0) {
+    if (overflow.length > 0) {
       this.log(
         `agent: turn requested ${usable.length} calls — ` +
-          `executing first ${executing.length} (cap ${this.maxCallsPerTurn})`,
+          `executing first ${executing.length} ` +
+          `(cap ${this.maxCallsPerTurn})`,
       );
     }
 
     this.listener?.({
       kind: "turn-started",
-
       received,
-
       executing: executing.length,
     });
 
     const results: ToolResult[] = [];
 
+    /*
+     * Execute allowed calls sequentially.
+     */
     for (const call of executing) {
       const result = await this.executeSafely(call, ctx);
 
       results.push(result);
 
-      this.listener?.({ kind: "call-result", result });
+      this.listener?.({
+        kind: "call-result",
+        result,
+      });
+    }
+
+    /*
+     * Calls above the cap are rejected explicitly.
+     *
+     * Do NOT silently drop them because the realtime model needs
+     * a function_call_output for every valid call it emitted.
+     */
+    for (const call of overflow) {
+      const result: ToolResult = {
+        callId: call.callId,
+
+        ok: false,
+
+        summary:
+          `I can only perform up to ` +
+          `${this.maxCallsPerTurn} actions ` +
+          `in one turn.`,
+
+        error: "tool-limit-exceeded",
+      };
+
+      results.push(result);
+
+      this.listener?.({
+        kind: "call-result",
+        result,
+      });
     }
 
     const ok = results.filter((result) => result.ok).length;
@@ -119,11 +171,6 @@ export class AgentRunner {
     return results;
   }
 
-  /*
-   * The registry already never throws, but the executor is injected —
-   * a broken one must degrade to a per-call failure, never kill the
-   * voice session.
-   */
   private async executeSafely(
     call: ToolCall,
     ctx: ToolContext,

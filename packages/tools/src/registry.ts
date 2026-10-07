@@ -189,9 +189,7 @@ export class ToolRegistry {
 
           ok: false,
 
-          summary:
-            `The ${tool.manifest.name} action requires ` + `your confirmation.`,
-
+          summary: `The ${tool.manifest.name} action requires your confirmation.`,
           error: "confirmation-required",
         };
       }
