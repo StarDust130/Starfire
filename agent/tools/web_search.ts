@@ -1,22 +1,21 @@
 import { defineTool } from "eve/tools";
-import { z } from "zod";
+
+import { getStarfireCapability } from "../../packages/contracts/src/capabilities.js";
 
 import { desktop } from "../lib/desktop.js";
 
+const capability = getStarfireCapability("web_search");
+
 export default defineTool({
-  description:
-    "Search the web for current information, news, prices, " +
-    "releases, facts, and other information that may have changed.",
+  description: capability.description,
 
-  inputSchema: z.object({
-    query: z.string().min(1),
-  }),
+  inputSchema: capability.parameters,
 
-  async execute({ query }) {
-    const result = await desktop.web.search(query);
+  async execute(input: { query: string }) {
+    const result = await desktop.web.search(input.query);
 
     if (result.results.length === 0 && result.answer.length === 0) {
-      throw new Error(`I found nothing for "${query}".`);
+      throw new Error(`I found nothing for "${input.query}".`);
     }
 
     return {
