@@ -1,16 +1,19 @@
 import { defineTool } from "eve/tools";
-import { z } from "zod";
+
+import { getStarfireCapability } from "../../packages/contracts/src/capabilities.js";
 
 import { desktop } from "../lib/desktop.js";
 
+const capability = getStarfireCapability("close_app");
+
 export default defineTool({
-  description: "Close a running desktop application gracefully.",
+  description: capability.description,
 
-  inputSchema: z.object({
-    app: z.string().min(1),
-  }),
+  inputSchema: capability.parameters,
 
-  async execute({ app }) {
+  async execute(input: { app: string }) {
+    const { app } = input;
+
     const result = await desktop.apps.close(app);
 
     if (!result.closed) {
