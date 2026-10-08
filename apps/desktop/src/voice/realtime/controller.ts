@@ -841,6 +841,19 @@ export class VoiceController {
       busy.push("user-speaking");
     }
 
+    /*
+     * While the model is generating her reply the watchdog must not
+     * disconnect — but the protection is bounded to the tool-round
+     * stall budget so a permanently stuck session still recovers.
+     */
+    if (
+      this.stateName === "thinking" &&
+      now - Math.max(this.turnEndAt, this.lastToolEventAt, this.lastAudioAt) <
+        TOOL_ROUND_IDLE_MS
+    ) {
+      busy.push("thinking");
+    }
+
     if (busy.length > 0) {
       this.log(
         `event=idle-timer-postponed reason=${busy.join("+")} ` +

@@ -1,3 +1,5 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import type { AgentPorts } from "@starfire/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -7,7 +9,26 @@ import { startDeviceBridge } from "./deviceBridge";
  * Device bridge regressions: the HTTP boundary Eve tools call must
  * dispatch through the shared Starfire capability layer, fail safely
  * on bad input, and shut down cleanly.
+ *
+ * Ports are OS-assigned per test — a live Starfire app owns the real
+ * device-bridge port, and tests must never collide with it.
  */
+
+async function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+
+    probe.once("error", reject);
+
+    probe.listen(0, "127.0.0.1", () => {
+      const { port } = probe.address() as AddressInfo;
+
+      probe.close(() => {
+        resolve(port);
+      });
+    });
+  });
+}
 
 function makePorts(): AgentPorts {
   return {
@@ -62,9 +83,11 @@ let baseUrl = "";
 beforeEach(async () => {
   const ports = makePorts();
 
-  stop = await startDeviceBridge(ports, 17321);
+  const port = await freePort();
 
-  baseUrl = "http://127.0.0.1:17321";
+  stop = await startDeviceBridge(ports, port);
+
+  baseUrl = `http://127.0.0.1:${port}`;
 });
 
 afterEach(async () => {
@@ -141,10 +164,12 @@ describe("device bridge", () => {
   it("canonicalizes window action synonyms", async () => {
     const ports = makePorts();
 
-    const stopLocal = await startDeviceBridge(ports, 17322);
+    const port = await freePort();
+
+    const stopLocal = await startDeviceBridge(ports, port);
 
     try {
-      await fetch("http://127.0.0.1:17322/v1/tool", {
+      await fetch(`http://127.0.0.1:${port}/v1/tool`, {
         method: "POST",
 
         headers: { "content-type": "application/json" },

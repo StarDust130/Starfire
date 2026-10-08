@@ -1284,3 +1284,84 @@ describe("P0 foundation regressions", () => {
     expect(controller.getState().state).toBe("listening");
   });
 });
+
+describe("idle watchdog: thinking state", () => {
+  it("thinking past the idle timeout stays alive; a stuck session still recovers", async () => {
+    const { deps, emitEvent } = makeDeps();
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    emitEvent({ conn: 1, kind: "speech-started" });
+
+    emitEvent({ conn: 1, kind: "speech-stopped" });
+
+    expect(controller.getState().state).toBe("thinking");
+
+    /*
+     * The model is still generating her reply — the watchdog fires at
+     * the 12s boundary but must postpone, not disconnect.
+     */
+    await vi.advanceTimersByTimeAsync(11000);
+
+    expect(controller.getState().state).toBe("thinking");
+
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(controller.getState().state).toBe("thinking");
+
+    /*
+     * The protection is bounded: a permanently stuck "thinking" session
+     * is closed by the stall watchdog instead of hanging forever.
+     */
+    await vi.advanceTimersByTimeAsync(15000);
+
+    expect(["closing", "idle"]).toContain(controller.getState().state);
+
+    expect(deps.onStartWakeEngine).toHaveBeenCalled();
+  });
+
+  it("a response arriving while thinking keeps the session alive", async () => {
+    const { deps, emitEvent, onAudioCall, emitDrained } = makeDeps();
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    emitEvent({ conn: 1, kind: "speech-started" });
+
+    emitEvent({ conn: 1, kind: "speech-stopped" });
+
+    /*
+     * A slow (but not stuck) reply: her audio arrives before the
+     * watchdog's bounded stall budget expires.
+     */
+    await vi.advanceTimersByTimeAsync(10000);
+
+    expect(controller.getState().state).toBe("thinking");
+
+    emitEvent({ conn: 1, kind: "response-created" });
+
+    onAudioCall()(new ArrayBuffer(48 * 400));
+
+    expect(controller.getState().state).toBe("assistant-speaking");
+
+    emitEvent({ conn: 1, kind: "response-done", usage: null });
+
+    emitDrained();
+
+    expect(controller.getState().state).toBe("listening");
+
+    /*
+     * And true idle afterwards still closes normally.
+     */
+    await vi.advanceTimersByTimeAsync(VOICE_IDLE_AFTER_RESPONSE_MS + 200);
+
+    expect(["closing", "idle"]).toContain(controller.getState().state);
+  });
+});

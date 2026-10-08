@@ -13,13 +13,50 @@
 
 import type { AgentPorts } from "./agent.js";
 
-import { WINDOW_ACTION_SYNONYMS } from "./capabilities.js";
+import {
+  getStarfireCapability,
+  WINDOW_ACTION_SYNONYMS,
+} from "./capabilities.js";
+
+/*
+ * Enum constraints are derived from the canonical capability
+ * definitions — the single source of truth — so runtime validation
+ * can never drift from what the models are told.
+ */
+const SYSTEM_INFO_QUERIES: readonly string[] =
+  getStarfireCapability("system_info").parameters.properties.query.enum ?? [];
+
+const WINDOW_CONTROL_ACTIONS: readonly string[] =
+  getStarfireCapability("window_control").parameters.properties.action.enum ??
+  [];
 
 function requireString(args: Record<string, unknown>, name: string): string {
   const value = args[name];
 
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new Error(`Missing "${name}".`);
+  }
+
+  return value;
+}
+
+/**
+ * Enforces the canonical enum schema at runtime: missing, non-string,
+ * empty, or out-of-enum values are rejected before a port is touched.
+ */
+function requireEnum(
+  args: Record<string, unknown>,
+  name: string,
+  allowed: readonly string[],
+  tool: string,
+): string {
+  const value = requireString(args, name);
+
+  if (!allowed.includes(value)) {
+    throw new Error(
+      `Invalid "${name}" for ${tool} — must be one of ` +
+        `[${allowed.join(", ")}].`,
+    );
   }
 
   return value;
@@ -130,7 +167,9 @@ export async function executeDeviceTool(
     }
 
     case "system_info":
-      return ports.system.info(requireString(args, "query") as never);
+      return ports.system.info(
+        requireEnum(args, "query", SYSTEM_INFO_QUERIES, "system_info") as never,
+      );
 
     case "web_search":
       return ports.web.search(requireString(args, "query"));
@@ -139,7 +178,12 @@ export async function executeDeviceTool(
       return ports.weather.current(optionalString(args, "place"));
 
     case "window_control": {
-      const raw = requireString(args, "action");
+      const raw = requireEnum(
+        args,
+        "action",
+        WINDOW_CONTROL_ACTIONS,
+        "window_control",
+      );
 
       return ports.windows.control(
         (WINDOW_ACTION_SYNONYMS[raw] ?? raw) as never,

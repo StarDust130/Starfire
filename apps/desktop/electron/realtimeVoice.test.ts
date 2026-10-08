@@ -318,6 +318,70 @@ describe("RealtimeVoiceBridge stale-socket safety", () => {
     expect(socketB.closed).toBe(false);
   });
 
+  it("socket error during connect resolves the start and frees an immediate retry", async () => {
+    const bridge = makeBridge();
+
+    bridge.register();
+
+    const first = startHandler()();
+
+    const socketA = FakeWebSocket.instances[0];
+
+    socketA.emit("error", new Error("ECONNREFUSED"));
+
+    const firstResult = await first;
+
+    expect(firstResult.ok).toBe(false);
+
+    expect(socketA.closed).toBe(true);
+
+    /*
+     * The errored socket must not linger: a retry started immediately
+     * (same tick) has to be able to open a fresh connection.
+     */
+    const second = startHandler()();
+
+    const socketB = FakeWebSocket.instances[1];
+
+    socketB.open();
+
+    socketB.emit("message", sessionCreatedMessage());
+
+    await expect(second).resolves.toEqual({ ok: true, conn: 2 });
+  });
+
+  it("socket error mid-session closes the socket immediately and a new start works", async () => {
+    const bridge = makeBridge();
+
+    bridge.register();
+
+    const first = startHandler()();
+
+    const socketA = FakeWebSocket.instances[0];
+
+    socketA.open();
+
+    socketA.emit("message", sessionCreatedMessage());
+
+    await expect(first).resolves.toEqual({ ok: true, conn: 1 });
+
+    socketA.emit("error", new Error("connection reset"));
+
+    expect(socketA.closed).toBe(true);
+
+    const second = startHandler()();
+
+    const socketB = FakeWebSocket.instances[1];
+
+    socketB.open();
+
+    socketB.emit("message", sessionCreatedMessage());
+
+    await expect(second).resolves.toEqual({ ok: true, conn: 2 });
+
+    expect(socketB.closed).toBe(false);
+  });
+
   it("the goodbye-close timer never closes a newer connection", async () => {
     const bridge = makeBridge();
 
