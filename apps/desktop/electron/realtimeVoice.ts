@@ -1,9 +1,10 @@
 import type { AgentPorts } from "@starfire/contracts";
-import { STARFIRE_FUNCTION_SPECS } from "@starfire/contracts";
+import {
+  executeDeviceTool,
+  STARFIRE_FUNCTION_SPECS,
+} from "@starfire/contracts";
 import { type BrowserWindow, ipcMain } from "electron";
 import WebSocket from "ws";
-
-import { executeDeviceTool } from "./deviceBridge.js";
 
 import {
   buildAudioAppend,
@@ -39,16 +40,6 @@ type ToolOutcome = {
   result?: unknown;
   error?: string;
 };
-
-const DAYS = [
-  "Sunday",
-  "Monday",
-  "Tuesday",
-  "Wednesday",
-  "Thursday",
-  "Friday",
-  "Saturday",
-];
 
 /*
  * Owns the EmpirioLabs realtime WebSocket, the API key, and the tool
@@ -637,59 +628,12 @@ export class RealtimeVoiceBridge {
     args: Record<string, unknown>,
   ): Promise<unknown> {
     /*
-     * Conversation-local tools handled by the voice bridge itself.
+     * Everything goes through the single shared Starfire capability
+     * dispatch — the same layer the Eve tools use. Conversation-local
+     * capabilities (current_date_time, end_session), clipboard
+     * actions, and window action synonyms are handled there.
      */
-    if (name === "end_session") {
-      return {
-        summary: "Waving goodbye and going to sleep. See you soon! ♡",
-        endSession: true,
-      };
-    }
-
-    if (name === "current_date_time") {
-      return this.currentDateTime();
-    }
-
-    /*
-     * Everything else goes through the single Starfire platform
-     * dispatch — the same boundary the Eve tools use.
-     */
-    if (name === "clipboard") {
-      const action = args.action;
-
-      if (action === "read") {
-        return executeDeviceTool(this.ports, "clipboard_read");
-      }
-
-      if (action === "write") {
-        return executeDeviceTool(this.ports, "clipboard_write", {
-          text: args.text,
-        });
-      }
-
-      throw new Error('Clipboard needs an action: "read" or "write".');
-    }
-
     return executeDeviceTool(this.ports, name, args);
-  }
-
-  private currentDateTime(): Record<string, unknown> {
-    const now = new Date();
-
-    const date = now.toLocaleDateString("en-CA");
-    const time = now.toLocaleTimeString("en-GB");
-    const day = DAYS[now.getDay()] ?? "unknown day";
-
-    const timezone =
-      Intl.DateTimeFormat().resolvedOptions().timeZone ?? "local timezone";
-
-    return {
-      summary: `It's ${time} on ${day}, ${date} (${timezone}).`,
-      date,
-      time,
-      day,
-      timezone,
-    };
   }
 
   private normalizeToolArgs(args: unknown): Record<string, unknown> {
