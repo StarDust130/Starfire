@@ -3,7 +3,7 @@
 > **Forget the code? Read this file first.**
 >
 > Starfire is a realtime desktop AI companion.
-> **Qwen thinks → Registry routes → Tools act → Ports touch the computer → Electron keeps it safe.**
+> **Eve is the agent runtime → Tools act → Ports touch the computer → Electron keeps it safe.**
 
 ---
 
@@ -14,26 +14,25 @@
   ↓
 🖥️ React UI
   ↓
-🔌 Electron / Realtime Voice
+☁️ Eve Agent (agent/)
   ↓
-🧠 Qwen Realtime
+🔧 Eve Tool (agent/tools/)
   ↓
-🧰 AgentRunner
-  ↓
-📦 Tool Registry
-  ↓
-🔧 Tool
+🌐 Starfire platform dispatch (device bridge)
   ↓
 🖐️ Port
   ↓
 💻 OS / Web / External Service
   ↓
-↩️ Result → Qwen → Starfire speaks
+↩️ Result → Eve → Starfire speaks
 ```
+
+(Voice runs through the Electron realtime session and dispatches tool
+calls through the same platform boundary.)
 
 ### Easy rule
 
-**Qwen decides WHAT.**  
+**Eve runs the agent.**  
 **Tool describes WHAT.**  
 **Port knows HOW.**  
 **Electron gives trusted access to the computer.**  
@@ -45,14 +44,11 @@
 
 ```text
 Starfire/
+├── agent/          ☁️ Eve agent definition + tools
 ├── apps/
-│   ├── desktop/
-│   └── core/
-│
+│   └── desktop/    🖥️ Desktop app
 ├── packages/
-│   ├── contracts/
-│   └── tools/
-│
+│   └── contracts/  📜 Shared platform types + function specs
 ├── eval/
 ├── docs/
 └── public/
@@ -165,7 +161,7 @@ Starfire ↔ Qwen Realtime
 
 Also:
 - receives tool calls
-- sends them to AgentRunner
+- executes them through the platform dispatch (`deviceBridge.ts`)
 - sends tool results back to Qwen
 - handles voice/session events
 
@@ -240,27 +236,29 @@ Think:
 
 ---
 
-# 🧠 `apps/core`
+# ☁️ `agent/`
 
-Small reusable agent logic.
+The Eve agent — Starfire's agent runtime (V1.0 foundation).
 
-### `agent/agent-runner.ts`
+### `agent.ts`
 
-Controls tool execution.
+Agent configuration:
 
-It:
-- receives tool calls
-- filters bad calls
-- runs tools
-- catches failures
-- returns results
+```text
+defineAgent({ model, reasoning })
+```
+
+### `instructions.md`
+Starfire's personality + behavior rules.
+
+### `tools/`
+One Eve tool per file. Eve discovers them from the filesystem; each
+`execute()` is a thin call into Starfire's platform layer
+(`agent/lib/desktop.ts` → device bridge → Electron ports).
 
 Think:
 
-> **“Tool traffic controller.”**
-
-### `index.ts`
-Exports the core package.
+> **“Eve runs the agent, Starfire provides the hands.”**
 
 ---
 
@@ -270,14 +268,16 @@ Shared language between everything.
 
 ### `agent.ts`
 
-Defines important shared types:
+Defines the platform port interfaces:
 
-- `ToolCall`
-- `ToolResult`
-- `ToolManifest`
-- `ToolName`
 - `AgentPorts`
-- port interfaces
+- port interfaces (apps, files, urls, clipboard, system, web, weather, windows)
+
+### `functions.ts`
+
+The model-facing function specs (`STARFIRE_FUNCTION_SPECS`) for the
+same capabilities — used by the realtime voice session and the eval
+driver.
 
 Think:
 
@@ -286,109 +286,36 @@ Think:
 Example:
 
 ```text
-Tool says → I need AppPort
+Eve tool says → I need AppPort (via the device bridge)
 
 Electron says → I provide AppPort
 ```
 
 ---
 
-# 🧰 `packages/tools`
+# 🌐 Device bridge (Electron ↔ Eve)
 
-The actual tool layer.
-
-## Main pieces
-
-### `tools/`
-The 13 Starfire tools.
-
-Examples:
+### `deviceBridge.ts`
+A tiny local HTTP server (default `http://127.0.0.1:17321`) that the
+Eve tools call. It exposes ONE dispatch function:
 
 ```text
-open_app
-close_app
-focus_app
-open_folder
-open_file
-open_url
-clipboard
-system_info
-web_search
-get_weather
-window_control
-current_date_time
-end_session
+executeDeviceTool(ports, tool, args)
 ```
 
-Each tool mainly has:
-
-### `manifest`
-Tells Qwen:
-
-> “I am this tool. Here is what I do and what arguments I need.”
-
-### `handle`
-Runs when the tool is selected.
-
-Usually:
+Every action path goes through it:
 
 ```text
-handle()
-   ↓
-port.someAction()
+Eve agent → Eve tool → HTTP /v1/tool → executeDeviceTool → ports
+voice function call → executeDeviceTool → ports
+eval → executeDeviceTool → MockOS
 ```
 
-So the tool does not contain all OS-specific code.
-
----
-
-### `registry.ts`
-
-The **tool manager**.
-
-It:
-- stores tools
-- gives Qwen the tool definitions
-- checks arguments
-- finds the requested tool
-- runs the tool
-- handles timeout/errors
+Optional shared secret: `STARFIRE_DEVICE_TOKEN`.
 
 Think:
 
-> **“Qwen asked for this tool. Do we have it? Are the arguments okay? Run it.”**
-
-### `defaults.ts`
-
-Creates the default Starfire registry with all current tools.
-
-### `validate.ts`
-
-Checks tool arguments.
-
-Example:
-
-```text
-app must be a string ✅
-missing app ❌
-```
-
-### `policy.ts`
-
-Safety policy definitions.
-
-Defines ideas like:
-
-```text
-low
-medium
-high
-critical
-```
-
-and confirmation requirements.
-
-> ⚠️ **Current note:** policy metadata exists, but the registry does not fully enforce it yet.
+> **“The single door into Starfire's computer capabilities.”**
 
 ---
 
@@ -503,9 +430,7 @@ Example:
 "open_app"
 { app: "Discord" }
  ↓
-🧰 Registry
- ↓
-🔧 open_app.handle()
+🔧 Eve tool / platform dispatch
  ↓
 🖐️ ports.apps.open("Discord")
  ↓
@@ -529,8 +454,8 @@ Example:
 ```text
 1. React       = Starfire's face
 2. Electron    = trusted computer access
-3. Qwen        = brain / decision maker
-4. Registry    = tool manager
+3. Eve         = agent runtime + tool discovery/execution
+4. Qwen        = brain / decision maker
 5. Tool        = what Starfire wants to do
 6. Port        = how it actually does it
 7. Eval        = proves it works
