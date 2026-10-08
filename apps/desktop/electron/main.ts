@@ -308,15 +308,29 @@ app.whenReady().then(() => {
 
   voiceBridge.register();
 
+  /*
+   * The device bridge MUST be listening before the Eve runtime starts:
+   * Eve tools call it over HTTP, and an early tool call would otherwise
+   * hit a closed port.
+   */
   startDeviceBridge(ports)
     .then((stop) => {
       stopDeviceBridge = stop;
+
+      console.log("[Starfire Device] event=bridge-started");
+
+      return startEveRuntime();
     })
     .catch((error) => {
-      console.error("[main] ❌ device bridge failed to start:", error);
-    });
+      console.error(
+        "[Starfire Device] event=bridge-start-failed:",
+        error instanceof Error ? error.message : error,
+      );
 
-  void startEveRuntime();
+      console.error(
+        "[Starfire Device] Eve tools will not be able to reach the device bridge.",
+      );
+    });
 });
 
 app.on("second-instance", () => {
@@ -347,6 +361,8 @@ app.on("will-quit", (event) => {
   };
 
   const teardown = async (): Promise<void> => {
+    const teardownStartedAt = Date.now();
+
     await voiceBridge?.dispose();
 
     voiceBridge = null;
@@ -355,7 +371,13 @@ app.on("will-quit", (event) => {
 
     stopDeviceBridge = null;
 
+    console.log("[Starfire Device] event=bridge-stopped");
+
     await stopEveRuntime();
+
+    console.log(
+      `[Starfire Device] event=shutdown-complete durationMs=${Date.now() - teardownStartedAt}`,
+    );
   };
 
   teardown().then(finish).catch(finish);
