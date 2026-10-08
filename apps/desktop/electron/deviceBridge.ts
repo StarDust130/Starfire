@@ -1,10 +1,18 @@
 import { createServer, type IncomingMessage } from "node:http";
-
 import type { AgentPorts } from "@starfire/contracts";
+import { executeDeviceTool } from "@starfire/contracts";
 
 const DEFAULT_PORT = 17321;
 
 const DEVICE_TOKEN = process.env.STARFIRE_DEVICE_TOKEN;
+
+/*
+ * executeDeviceTool is Starfire's shared capability dispatch, re-exported
+ * here for the Eve HTTP boundary (and imported by the realtime voice
+ * bridge). The dispatch lives in @starfire/contracts so voice and Eve
+ * share one execution layer; this file only serves it over HTTP.
+ */
+export { executeDeviceTool };
 
 async function readJson(
   request: IncomingMessage,
@@ -48,91 +56,6 @@ function sendJson(
   response.statusCode = status;
   response.setHeader("content-type", "application/json");
   response.end(JSON.stringify(value));
-}
-
-function requireString(args: Record<string, unknown>, name: string): string {
-  const value = args[name];
-
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`Missing "${name}".`);
-  }
-
-  return value;
-}
-
-function optionalString(
-  args: Record<string, unknown>,
-  name: string,
-): string | undefined {
-  const value = args[name];
-
-  return typeof value === "string" && value.trim().length > 0
-    ? value
-    : undefined;
-}
-
-/**
- * The single Starfire platform dispatch: one capability name + args in,
- * a plain result (or thrown error) out.
- *
- * Every path goes through here:
- *   Eve agent  → Eve tool  → HTTP /v1/tool  → this dispatch
- *   voice      → function call                  → this dispatch
- *
- * It knows nothing about Linux, KWin, or Electron internals —
- * those live behind the ports.
- */
-export async function executeDeviceTool(
-  ports: AgentPorts,
-  tool: string,
-  args: Record<string, unknown> = {},
-): Promise<unknown> {
-  switch (tool) {
-    case "open_app":
-      return ports.apps.open(requireString(args, "app"));
-
-    case "close_app":
-      return ports.apps.close(requireString(args, "app"));
-
-    case "focus_app":
-      return ports.apps.focus(requireString(args, "app"));
-
-    case "open_file":
-      return ports.files.openFile(requireString(args, "path"));
-
-    case "open_folder":
-      return ports.files.openFolder(requireString(args, "path"));
-
-    case "open_url":
-      return ports.urls.open(requireString(args, "url"));
-
-    case "clipboard_read":
-      return { text: await ports.clipboard.read() };
-
-    case "clipboard_write": {
-      await ports.clipboard.write(requireString(args, "text"));
-
-      return undefined;
-    }
-
-    case "system_info":
-      return ports.system.info(requireString(args, "query") as never);
-
-    case "web_search":
-      return ports.web.search(requireString(args, "query"));
-
-    case "get_weather":
-      return ports.weather.current(optionalString(args, "place"));
-
-    case "window_control":
-      return ports.windows.control(
-        requireString(args, "action") as never,
-        optionalString(args, "app"),
-      );
-
-    default:
-      throw new Error(`Unknown device tool "${tool}".`);
-  }
 }
 
 export async function startDeviceBridge(
