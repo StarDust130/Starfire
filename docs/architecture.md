@@ -170,8 +170,9 @@ The agent runtime is **Eve** — see section 0. There is no Starfire-owned
 runner, registry, or validation layer anymore.
 
 When the realtime voice model produces function calls, the Electron main
-process executes them through the same platform dispatch Eve uses
-(`executeDeviceTool` in `deviceBridge.ts`).
+process executes them through the shared Starfire capability dispatch
+(`executeDeviceTool` in `packages/contracts/src/dispatch.ts`) — the same
+execution layer Eve tools reach over the device bridge HTTP boundary.
 
 ---
 
@@ -267,9 +268,18 @@ Tool discovery, argument validation, and execution are **Eve's job**
 (section 0). The old registry/validation files were removed in the
 V1.0 migration.
 
-The model-facing function specs (`STARFIRE_FUNCTION_SPECS` in
-`packages/contracts`) describe the same capabilities for the realtime
-voice session and the eval driver.
+The ONE canonical definition of every Starfire capability (name,
+description, arguments/schema, metadata) lives in
+`packages/contracts/src/capabilities.ts`. From it:
+
+- `functions.ts` derives the model-facing specs
+  (`STARFIRE_FUNCTION_SPECS`) for the realtime voice session and the
+  eval driver.
+- `dispatch.ts` provides the shared execution layer
+  (`executeDeviceTool`) that voice, Eve (via the device bridge), and
+  eval all route through.
+- Each Eve tool in `agent/tools/` is a thin adapter that takes its
+  description + input schema from the canonical definition.
 
 ---
 
