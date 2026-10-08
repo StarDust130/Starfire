@@ -3,10 +3,9 @@ import WebSocket from "ws";
 import { diffState, MockOS } from "./mock/os.js";
 import { type DriverConfig, ProviderError } from "./provider.js";
 import {
-  AgentRunner,
-  createDefaultRegistry,
-  toolPolicies,
-  validateToolArgs,
+  checkToolArgs,
+  runDeviceTool,
+  STARFIRE_FUNCTION_SPECS,
 } from "./starfire.js";
 import type { CaseResult, EvalCase, ToolCallRecord } from "./types.js";
 
@@ -46,6 +45,59 @@ function safeJson(s: string | null | undefined): unknown {
   } catch {
     return s;
   }
+}
+
+/*
+ * Map a model function call onto the Starfire platform dispatch.
+ * Conversation-local tools (date/time, end_session) never reach the
+ * device layer; clipboard fans out to its read/write device tools.
+ */
+function deviceToolFor(
+  name: string,
+  args: unknown,
+): { tool: string; args: Record<string, unknown> } | null {
+  const safe =
+    args && typeof args === "object" && !Array.isArray(args)
+      ? (args as Record<string, unknown>)
+      : {};
+
+  if (name === "end_session" || name === "current_date_time") return null;
+
+  if (name === "clipboard") {
+    if (safe.action === "write") {
+      return { tool: "clipboard_write", args: { text: safe.text } };
+    }
+
+    return { tool: "clipboard_read", args: {} };
+  }
+
+  return { tool: name, args: safe };
+}
+
+function localToolResult(name: string): unknown {
+  if (name === "end_session") {
+    return { summary: "Waving goodbye and going to sleep.", endSession: true };
+  }
+
+  const now = new Date();
+
+  return {
+    date: now.toLocaleDateString("en-CA"),
+    time: now.toLocaleTimeString("en-GB"),
+    day: now.toLocaleDateString("en-US", { weekday: "long" }),
+  };
+}
+
+function summarize(result: unknown): string {
+  if (result && typeof result === "object" && "summary" in result) {
+    const s = (result as { summary?: unknown }).summary;
+
+    if (typeof s === "string") return s;
+  }
+
+  if (typeof result === "string") return result;
+
+  return "";
 }
 
 class RealtimeSession {
@@ -414,11 +466,7 @@ export async function runCaseWithModel(
     injectedContent: c.setup.injectedContent,
     injections: c.setup.injections,
   });
-  const registry = createDefaultRegistry(os, {
-    timeoutMs: REGISTRY_TIMEOUT_MS,
-  });
-  const functionTools = registry.functionTools();
-  const manifests = registry.manifests();
+  const functionTools = STARFIRE_FUNCTION_SPECS;
   const stateBefore = os.snapshot();
 
   const records: ToolCallRecord[] = [];
@@ -516,39 +564,32 @@ export async function runCaseWithModel(
           raw: cl.args,
         }));
         const batchBefore = os.snapshot();
-        const runner = new AgentRunner({
-          executor: registry,
-          maxCallsPerTurn: 4,
-        });
         const bt0 = performance.now();
-        const results = await runner.run(
-          calls.map((cl) => ({
-            callId: cl.callId,
-            name: cl.name,
-            args: cl.parsed,
-          })),
-        );
+        const outcomes = new Map<
+          string,
+          { ok: boolean; result?: unknown; error?: string }
+        >();
+        for (const cl of calls) {
+          const dispatch = deviceToolFor(cl.name, cl.parsed);
+          outcomes.set(
+            cl.callId,
+            dispatch
+              ? await runDeviceTool(
+                  os,
+                  dispatch.tool,
+                  dispatch.args,
+                  REGISTRY_TIMEOUT_MS,
+                )
+              : { ok: true, result: localToolResult(cl.name) },
+          );
+        }
         toolMs += performance.now() - bt0;
         const batchChanged =
           JSON.stringify(batchBefore) !== JSON.stringify(os.snapshot());
 
         for (const cl of calls) {
-          const result = results.find((r) => r.callId === cl.callId) ?? null;
-          const manifest = manifests.find((m) => m.name === cl.name);
-          const validation = manifest
-            ? (() => {
-                const v = validateToolArgs(manifest.parameters, cl.parsed);
-                return v.ok
-                  ? { ok: true, errors: [] }
-                  : { ok: false, errors: [v.error] };
-              })()
-            : { ok: false, errors: [`unknown tool "${cl.name}"`] };
-          const pol = (
-            toolPolicies as Record<
-              string,
-              { requiresConfirmation: boolean } | undefined
-            >
-          )[cl.name];
+          const outcome = outcomes.get(cl.callId) ?? null;
+          const validation = checkToolArgs(cl.name, cl.parsed);
           records.push({
             index: records.length,
             turn: 0,
@@ -556,25 +597,21 @@ export async function runCaseWithModel(
             rawArgs: cl.raw,
             parsedArgs: cl.parsed,
             validation,
-            policy: {
-              declared: pol != null,
-              requiresConfirmation: pol?.requiresConfirmation ?? false,
-            },
-            executed: result != null,
-            ok: result ? result.ok : null,
-            summary: result?.summary ?? null,
-            error: result?.error ?? (manifest ? null : "unknown-tool"),
+            executed: true,
+            ok: outcome ? outcome.ok : null,
+            summary: outcome?.ok ? summarize(outcome.result) : null,
+            error: outcome?.error ?? (validation.ok ? null : "invalid-args"),
             batchStateChanged: batchChanged,
           });
-          const toolMsg = result
+          const toolMsg = outcome
             ? {
-                ok: result.ok,
-                summary: result.summary,
-                error: result.error ?? null,
+                ok: outcome.ok,
+                summary: outcome.ok ? summarize(outcome.result) : "",
+                error: outcome.error ?? null,
               }
             : {
                 ok: false,
-                summary: "This call was skipped (per-turn tool limit).",
+                summary: "",
                 error: "internal-error",
               };
           session.send({
@@ -587,9 +624,9 @@ export async function runCaseWithModel(
           });
           transcript.push({
             role: "tool",
-            content: `[${cl.name}] ${toolMsg.ok ? "ok" : "error"}: ${toolMsg.summary}`,
+            content: `[${cl.name}] ${toolMsg.ok ? "ok" : "error"}`,
           });
-          if (cl.name === "end_session" && result?.ok) os.finishSession();
+          if (cl.name === "end_session" && outcome?.ok) os.finishSession();
         }
       }
     }
