@@ -201,22 +201,6 @@ importers:
         specifier: ^8.22.0
         version: 8.22.0
 
-  apps/core:
-    dependencies:
-      '@starfire/contracts':
-        specifier: workspace:*
-        version: link:../../packages/contracts
-    devDependencies:
-      '@starfire/tools':
-        specifier: workspace:*
-        version: link:../../packages/tools
-      typescript:
-        specifier: 7.0.2
-        version: 7.0.2
-      vitest:
-        specifier: ^5.0.1
-        version: 5.0.1(@types/node@26.6.3)(vite@8.3.0(@types/node@26.6.3)(esbuild@0.28.2)(tsx@4.23.15))
-
   apps/desktop:
     dependencies:
       '@edyrkaj/openwakeword-wasm-browser':
@@ -225,6 +209,9 @@ importers:
       '@pixiv/three-vrm':
         specifier: 3.5.5
         version: 3.5.5(three@0.180.0)
+      eve:
+        specifier: ^0.72.1
+        version: 0.72.1(ai@7.0.130(zod@4.5.4))
       react:
         specifier: ^19.1.0
         version: 19.3.0
@@ -241,12 +228,6 @@ importers:
       '@starfire/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
-      '@starfire/core':
-        specifier: workspace:*
-        version: link:../core
-      '@starfire/tools':
-        specifier: workspace:*
-        version: link:../../packages/tools
       '@types/node':
         specifier: ^26.6.3
         version: 26.6.3
@@ -283,12 +264,6 @@ importers:
       '@starfire/contracts':
         specifier: workspace:*
         version: link:../packages/contracts
-      '@starfire/core':
-        specifier: workspace:*
-        version: link:../apps/core
-      '@starfire/tools':
-        specifier: workspace:*
-        version: link:../packages/tools
       zod:
         specifier: ^4.6.5
         version: 4.6.5
@@ -306,22 +281,6 @@ importers:
       typescript:
         specifier: 7.0.2
         version: 7.0.2
-
-  packages/tools:
-    dependencies:
-      '@starfire/contracts':
-        specifier: workspace:*
-        version: link:../contracts
-    devDependencies:
-      '@types/node':
-        specifier: ^26.6.3
-        version: 26.6.3
-      typescript:
-        specifier: 7.0.2
-        version: 7.0.2
-      vitest:
-        specifier: ^5.0.1
-        version: 5.0.1(@types/node@26.6.3)(vite@8.3.0(@types/node@26.6.3)(esbuild@0.28.2)(tsx@4.23.15))
 
 packages:
 
