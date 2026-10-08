@@ -1,49 +1,26 @@
 import { defineTool } from "eve/tools";
-import { z } from "zod";
+
+import {
+  getStarfireCapability,
+  WINDOW_ACTION_SYNONYMS,
+} from "../../packages/contracts/src/capabilities.js";
 
 import { desktop } from "../lib/desktop.js";
 
-const SYNONYMS = {
-  focus: "focus",
-  raise: "focus",
-  front: "focus",
-  "bring-to-front": "focus",
-  "bring-to-the-front": "focus",
-  activate: "focus",
-
-  lower: "lower",
-  back: "lower",
-  "send-to-back": "lower",
-  "send-behind": "lower",
-
-  minimize: "minimize",
-  maximize: "maximize",
-
-  restore: "restore",
-  unminimize: "restore",
-} as const;
-
-const actionSchema = z.enum(
-  Object.keys(SYNONYMS) as [
-    keyof typeof SYNONYMS,
-    ...(keyof typeof SYNONYMS)[],
-  ],
-);
+const capability = getStarfireCapability("window_control");
 
 export default defineTool({
-  description:
-    "Control a desktop window: focus, lower, minimize, " +
-    "maximize, or restore.",
+  description: capability.description,
 
-  inputSchema: z.object({
-    action: actionSchema,
-    app: z.string().optional(),
-  }),
+  inputSchema: capability.parameters,
 
-  async execute({ action, app }) {
-    const canonical = SYNONYMS[action];
+  async execute(input: {
+    action: keyof typeof WINDOW_ACTION_SYNONYMS;
+    app?: string;
+  }) {
+    const canonical = WINDOW_ACTION_SYNONYMS[input.action];
 
-    const result = await desktop.windows.control(canonical, app);
+    const result = await desktop.windows.control(canonical, input.app);
 
     if (!result.done) {
       throw new Error(
@@ -62,7 +39,7 @@ export default defineTool({
     return {
       summary: messages[canonical],
       action: canonical,
-      app: app ?? null,
+      app: input.app ?? null,
     };
   },
 });
