@@ -7,8 +7,6 @@
   },
   "dependencies": {
     "@starfire/contracts": "workspace:*",
-    "@starfire/core": "workspace:*",
-    "@starfire/tools": "workspace:*",
     "zod": "^4.6.5"
   },
   "devDependencies": {
