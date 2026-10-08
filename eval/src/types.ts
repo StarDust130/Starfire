@@ -109,7 +109,6 @@ export type ToolCallRecord = {
   rawArgs: string | null;
   parsedArgs: unknown;
   validation: { ok: boolean; errors: string[] };
-  policy: { declared: boolean; requiresConfirmation: boolean };
   executed: boolean;
   ok: boolean | null;
   summary: string | null;
