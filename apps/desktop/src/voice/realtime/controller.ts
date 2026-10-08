@@ -212,6 +212,8 @@ export class VoiceController {
 
   private cleanupTimer: ReturnType<typeof setTimeout> | null = null;
 
+  private goodbyeTimer: ReturnType<typeof setTimeout> | null = null;
+
   private micStallTimer: ReturnType<typeof setTimeout> | null = null;
 
   private failOpenTimer: ReturnType<typeof setTimeout> | null = null;
@@ -247,6 +249,19 @@ export class VoiceController {
   private loggedFirstAudio = false;
 
   private turnEndAt = 0;
+
+  /*
+   * Recent-activity timestamps for the idle watchdog. The idle timer
+   * must never close a session that is actively using tools, receiving
+   * a model response, playing audio, or hearing the user.
+   */
+  private lastAudioAt = 0;
+
+  private lastToolEventAt = 0;
+
+  private lastSentAt = 0;
+
+  private lastLevelAt = 0;
 
   private audioChunks = 0;
 
@@ -296,6 +311,30 @@ export class VoiceController {
     this.deps.onLog?.(message);
   }
 
+  /*
+   * Structured lifecycle log: connection + state + event, so terminal
+   * lines can be correlated across the renderer and the main process.
+   */
+  private logEvent(message: string): void {
+    this.log(`conn=${this.conn} state=${this.stateName} ${message}`);
+  }
+
+  private sendAudioChunk(b64: string): void {
+    this.lastSentAt = Date.now();
+
+    this.deps.bridge?.sendAudio(b64);
+  }
+
+  private clearGoodbyeTimer(): void {
+    if (this.goodbyeTimer) {
+      clearTimeout(this.goodbyeTimer);
+
+      this.goodbyeTimer = null;
+
+      this.log("event=goodbye-timer-cleared");
+    }
+  }
+
   private emitSnapshot(): void {
     const snapshot = this.getState();
 
@@ -312,7 +351,7 @@ export class VoiceController {
     if (prev !== next) {
       this.stateName = next;
 
-      this.log(`state ${prev} -> ${next}`);
+      this.logEvent(`event=state-change from=${prev} to=${next}`);
 
       this.emitSnapshot();
     }
@@ -376,7 +415,7 @@ export class VoiceController {
     let result = await bridge.start();
 
     if (!result.ok && !result.fatal) {
-      this.log(`connect failed (${result.error}) — retrying once...`);
+      this.logEvent(`event=connect-retry error=${result.error}`);
 
       await new Promise((resolve) => {
         setTimeout(resolve, CONNECT_RETRY_DELAY_MS);
@@ -395,11 +434,14 @@ export class VoiceController {
   async start(source?: string): Promise<void> {
     if (this.disposed || this.stateName !== "idle") {
       this.log(
-        `activation ignored (source=${source ?? "?"}, state=${this.stateName})`,
+        `conn=${this.conn} event=activation-ignored ` +
+          `source=${source ?? "?"} state=${this.stateName}`,
       );
 
       return;
     }
+
+    this.logEvent(`event=activation source=${source ?? "?"}`);
 
     if (!this.deps.bridge) {
       this.message = "Voice bridge is unavailable.";
@@ -485,6 +527,14 @@ export class VoiceController {
 
     this.latencySamples = [];
 
+    this.lastAudioAt = 0;
+
+    this.lastToolEventAt = 0;
+
+    this.lastSentAt = 0;
+
+    this.lastLevelAt = 0;
+
     this.captureReady = false;
 
     this.toolRoundActive = false;
@@ -528,6 +578,8 @@ export class VoiceController {
       onLevel: (rms) => {
         this.outputLevel = rms;
 
+        this.lastLevelAt = Date.now();
+
         this.mouth.raw = mouthFromRms(rms);
       },
 
@@ -546,6 +598,13 @@ export class VoiceController {
 
     if (this.aborted()) {
       void mic.stop();
+
+      /*
+       * A start that resolved while we were already stopping may have
+       * opened a socket AFTER the last cleanup's bridge.stop() — close
+       * it so no zombie connection survives.
+       */
+      this.deps.bridge?.stop();
 
       return;
     }
@@ -567,7 +626,7 @@ export class VoiceController {
 
       this.message = connect.error;
 
-      this.log(`start failed: ${connect.error}`);
+      this.logEvent(`event=start-failed error=${connect.error}`);
 
       if (connect.fatal) {
         this.dispatch({ type: "fatal-error" });
@@ -590,8 +649,8 @@ export class VoiceController {
     this.captureReady = true;
 
     this.log(
-      `capture rate=${inputRate}Hz` +
-        (inputRate === VOICE_INPUT_RATE ? "" : " (software resampled to 16k)"),
+      `conn=${connect.conn} event=capture-open rate=${inputRate}Hz` +
+        (inputRate === VOICE_INPUT_RATE ? "" : " (resampled to 16k)"),
     );
 
     this.micStallTimer = setTimeout(() => {
@@ -599,7 +658,7 @@ export class VoiceController {
         return;
       }
 
-      this.log("fatal: no microphone frames received");
+      this.logEvent("event=fatal-error reason=no microphone frames received");
 
       this.message = "Microphone capture stalled.";
 
@@ -614,7 +673,7 @@ export class VoiceController {
 
     this.dispatch({ type: "session-ready" });
 
-    this.scheduleIdle(VOICE_IDLE_AFTER_ACTIVATION_MS);
+    this.scheduleIdle(VOICE_IDLE_AFTER_ACTIVATION_MS, "activation");
 
     this.failOpenTimer = setTimeout(() => {
       if (this.disposed || this.failOpen || this.gateEverStarted) {
@@ -627,12 +686,12 @@ export class VoiceController {
 
       this.failOpen = true;
 
-      this.log(
-        "local gate never fired — fail-open: streaming continuously (server VAD authoritative)",
+      this.logEvent(
+        "event=fail-open reason=local gate never fired note=server VAD authoritative",
       );
     }, FAIL_OPEN_AFTER_MS);
 
-    this.log("session ready (listening)");
+    this.logEvent("event=session-ready");
   }
 
   stop(reason = "stop"): void {
@@ -647,7 +706,7 @@ export class VoiceController {
 
     this.stopRequested = true;
 
-    this.log(`closing (${reason})`);
+    this.logEvent(`event=stop reason=${reason}`);
 
     this.dispatch({
       type: reason === "idle-timeout" ? "idle-timeout" : "stop",
@@ -657,9 +716,32 @@ export class VoiceController {
   }
 
   dispose(): void {
+    if (this.disposed && !this.cleaningUp) {
+      return;
+    }
+
     this.disposed = true;
 
-    this.stop("dispose");
+    this.logEvent("event=dispose");
+
+    /*
+     * stop() early-returns once disposed, so dispose must perform the
+     * full teardown itself — microphone, playback, socket bridge,
+     * timers, and listeners — no matter which state we are in.
+     */
+    this.clearIdleTimer("dispose");
+
+    this.clearMicStallTimer();
+
+    this.clearGoodbyeTimer();
+
+    this.cancelDrainWait();
+
+    if (this.failOpenTimer) {
+      clearTimeout(this.failOpenTimer);
+
+      this.failOpenTimer = null;
+    }
 
     if (this.cleanupTimer) {
       clearTimeout(this.cleanupTimer);
@@ -667,29 +749,139 @@ export class VoiceController {
       this.cleanupTimer = null;
     }
 
-    if (this.drainTimer) {
-      clearTimeout(this.drainTimer);
-
-      this.drainTimer = null;
+    for (const unsub of this.unsubs) {
+      unsub();
     }
+
+    this.unsubs = [];
+
+    const playback = this.playback;
+
+    this.playback = null;
+
+    void playback?.stop();
+
+    const mic = this.mic;
+
+    this.mic = null;
+
+    void mic?.stop();
+
+    this.deps.bridge?.stop();
+
+    this.mouth.raw = 0;
+
+    this.outputLevel = 0;
+
+    this.transmitting = false;
+
+    this.localSpeech = false;
+
+    this.resampler = null;
+
+    this.captureReady = false;
+
+    this.toolRoundActive = false;
+
+    this.cleaningUp = false;
+
+    this.preRoll.clear();
 
     this.listeners.clear();
   }
 
-  private scheduleIdle(ms: number): void {
-    this.clearIdleTimer();
+  private scheduleIdle(ms: number, reason: string): void {
+    this.clearIdleTimer("replaced");
 
     this.idleTimer = setTimeout(() => {
-      this.stop("idle-timeout");
+      this.handleIdleTimerFired(ms, reason);
     }, ms);
+
+    this.log(`event=idle-timer-set ms=${ms} reason=${reason}`);
   }
 
-  private clearIdleTimer(): void {
+  /*
+   * The idle watchdog may only close a session that is TRULY idle.
+   * When it fires while Starfire is busy (tool round, model response,
+   * assistant audio, playback drain, user speaking), it postpones
+   * itself instead — a stale timer must never kill an active session.
+   */
+  private handleIdleTimerFired(ms: number, reason: string): void {
+    this.idleTimer = null;
+
+    const now = Date.now();
+
+    const busy: string[] = [];
+
+    if (
+      this.toolRoundActive &&
+      now - this.lastToolEventAt < TOOL_ROUND_IDLE_MS
+    ) {
+      busy.push("tool-round-active");
+    }
+
+    if (this.awaitingDrain) {
+      busy.push("awaiting-playback-drain");
+    }
+
+    /*
+     * She is audible either while audio chunks are still arriving or
+     * while the playback pipeline is actively playing out its queue
+     * (the worklet reports levels ~every 16ms while playing).
+     */
+    if (
+      this.stateName === "assistant-speaking" &&
+      (now - this.lastAudioAt < DRAIN_TIMEOUT_MS ||
+        (this.outputLevel > 0 && now - this.lastLevelAt < DRAIN_TIMEOUT_MS))
+    ) {
+      busy.push("assistant-audio-active");
+    }
+
+    if (this.stateName === "user-speaking" && now - this.lastSentAt < 10000) {
+      busy.push("user-speaking");
+    }
+
+    if (busy.length > 0) {
+      this.log(
+        `event=idle-timer-postponed reason=${busy.join("+")} ` +
+          `state=${this.stateName}`,
+      );
+
+      this.idleTimer = setTimeout(() => {
+        this.handleIdleTimerFired(ms, reason);
+      }, ms);
+
+      return;
+    }
+
+    this.log(`event=idle-timer-fired reason=${reason}`);
+
+    this.stop("idle-timeout");
+  }
+
+  private clearIdleTimer(reason = "cleared"): void {
     if (this.idleTimer) {
       clearTimeout(this.idleTimer);
 
       this.idleTimer = null;
+
+      this.log(
+        `event=idle-timer-cleared reason=${reason} ` +
+          `state=${this.stateName}`,
+      );
     }
+  }
+
+  /*
+   * Arms the watchdog only when nothing is pending — used from
+   * per-audio-chunk paths so timers are never churned chunk by chunk.
+   */
+  private armIdleIfEmpty(ms: number, reason: string): void {
+    if (this.idleTimer) {
+      return;
+    }
+
+    this.scheduleIdle(ms, reason);
   }
 
   private clearMicStallTimer(): void {
@@ -727,11 +919,18 @@ export class VoiceController {
   private flushPreRoll(): void {
     for (const b64 of this.preRoll.flush()) {
       if (canSendFrom(this.stateName) && !this.disposed) {
-        this.deps.bridge?.sendAudio(b64);
+        this.sendAudioChunk(b64);
       }
     }
   }
 
+  /*
+   * Rebuilds the capture pipeline with the next mic variant.
+   *
+   * Failure handling (P0-4): a failed rebuild must never leave a deaf
+   * session — the remaining variants are tried, and if none opens the
+   * session fails loudly through the existing fatal path.
+   */
   private async rebuildMic(): Promise<void> {
     if (this.rebuilding || this.disposed) {
       return;
@@ -739,49 +938,96 @@ export class VoiceController {
 
     this.rebuilding = true;
 
-    const old = this.mic;
-
-    this.mic = null;
-
-    void old?.stop();
-
-    const variant = MIC_VARIANTS[this.micAttempt];
-
     try {
-      const mic = this.deps.createMic(
-        {
-          onChunk: (chunk) => this.handleMicChunk(chunk),
+      const old = this.mic;
 
-          onDiagnostic: (message) => this.log(message),
-        },
-        variant,
-        this.chosenDeviceId,
-      );
+      this.mic = null;
 
-      const rate = await mic.start();
+      /*
+       * Fully release the old pipeline BEFORE opening a new one — a
+       * concurrently-open device can fail or duplicate the pipeline.
+       */
+      await old?.stop().catch((error: unknown) => {
+        this.log(
+          `event=mic-stop-failed ` +
+            `error=${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
 
-      if (this.disposed) {
-        void mic.stop();
+      while (this.micAttempt < MIC_VARIANTS.length) {
+        if (this.disposed || this.stopRequested) {
+          return;
+        }
 
-        return;
+        const variant = MIC_VARIANTS[this.micAttempt];
+
+        try {
+          const mic = this.deps.createMic(
+            {
+              onChunk: (chunk) => this.handleMicChunk(chunk),
+
+              onDiagnostic: (message) => this.log(message),
+            },
+            variant,
+            this.chosenDeviceId,
+          );
+
+          const rate = await mic.start();
+
+          if (this.disposed || this.stopRequested) {
+            void mic.stop();
+
+            return;
+          }
+
+          this.mic = mic;
+
+          this.resampler =
+            rate === VOICE_INPUT_RATE
+              ? null
+              : new LinearResampler(rate, VOICE_INPUT_RATE);
+
+          this.silentStreak = 0;
+
+          this.logEvent(
+            `event=mic-rebuilt attempt=${this.micAttempt + 1}/` +
+              `${MIC_VARIANTS.length} processing=${variant.processing ? "on" : "off"} ` +
+              `source=${variant.useDeviceId && this.chosenDeviceId ? "chosen-device" : "default"} ` +
+              `rate=${rate}`,
+          );
+
+          return;
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+
+          this.logEvent(
+            `event=mic-rebuild-failed attempt=${this.micAttempt + 1}/` +
+              `${MIC_VARIANTS.length} reason=${reason}`,
+          );
+
+          if (this.micAttempt >= MIC_VARIANTS.length - 1) {
+            break;
+          }
+
+          this.micAttempt += 1;
+        }
       }
 
-      this.mic = mic;
+      /*
+       * Every capture configuration failed — end the session loudly
+       * instead of leaving Starfire alive but unable to hear.
+       */
+      if (!this.disposed && !this.stopRequested) {
+        this.silenceFatal = true;
 
-      this.resampler =
-        rate === VOICE_INPUT_RATE
-          ? null
-          : new LinearResampler(rate, VOICE_INPUT_RATE);
+        this.message = "Microphone is not delivering audio.";
 
-      this.silentStreak = 0;
+        this.logEvent("event=mic-exhausted note=all capture variants failed");
 
-      this.log(
-        `mic attempt ${this.micAttempt + 1}/${MIC_VARIANTS.length} opened ` +
-          `(processing=${variant.processing ? "on" : "off"}, ` +
-          `source=${variant.useDeviceId && this.chosenDeviceId ? "chosen device" : "system default"})`,
-      );
-    } catch {
-      this.log("microphone rebuild failed");
+        this.dispatch({ type: "fatal-error" });
+
+        this.cleanup();
+      }
     } finally {
       this.rebuilding = false;
     }
@@ -804,8 +1050,17 @@ export class VoiceController {
       );
     }
 
-    if (chunk.rms < SILENT_RMS_THRESHOLD) {
-      this.silentStreak += 1;
+    /*
+     * Echo-cancelled capture is digitally silent while she speaks —
+     * that is normal, so silence only counts as a mic problem when
+     * Starfire is NOT the one making sound.
+     */
+    if (this.stateName !== "assistant-speaking") {
+      if (chunk.rms < SILENT_RMS_THRESHOLD) {
+        this.silentStreak += 1;
+      } else {
+        this.silentStreak = 0;
+      }
     } else {
       this.silentStreak = 0;
     }
@@ -818,9 +1073,9 @@ export class VoiceController {
       if (this.micAttempt < MIC_VARIANTS.length - 1) {
         this.micAttempt += 1;
 
-        this.log(
-          `microphone silent — switching capture configuration ` +
-            `(attempt ${this.micAttempt + 1}/${MIC_VARIANTS.length})`,
+        this.logEvent(
+          `event=mic-silent-rebuild attempt=${this.micAttempt + 1}/` +
+            `${MIC_VARIANTS.length}`,
         );
 
         void this.rebuildMic();
@@ -833,9 +1088,8 @@ export class VoiceController {
 
         this.message = "Microphone is not delivering audio.";
 
-        this.log(
-          "fatal: silence persisted across all capture configurations " +
-            "(check the system input device in KDE audio settings)",
+        this.logEvent(
+          "event=mic-exhausted note=silence persisted across all capture configurations",
         );
 
         this.dispatch({ type: "fatal-error" });
@@ -871,9 +1125,9 @@ export class VoiceController {
       const echoFloor = Math.max(ECHO_UPLOAD_FLOOR, this.outputLevel * 0.9);
 
       if (chunk.rms >= echoFloor) {
-        this.clearIdleTimer();
+        this.armIdleIfEmpty(TOOL_ROUND_IDLE_MS, "assistant-active");
 
-        this.deps.bridge?.sendAudio(b64);
+        this.sendAudioChunk(b64);
       }
 
       if (chunk.rms >= LOCAL_BARGE_FLOOR) {
@@ -893,9 +1147,7 @@ export class VoiceController {
 
         this.deps.bridge?.interrupt();
 
-        this.log(
-          "assistant interrupted (local fallback — sustained loud speech)",
-        );
+        this.logEvent("event=barge-in source=local-fallback");
       }
 
       return;
@@ -904,18 +1156,18 @@ export class VoiceController {
     if (now < this.echoCooldownUntil) {
       if (chunk.rms >= ECHO_UPLOAD_FLOOR) {
         if (!this.localSpeech) {
-          this.log("user speaking (local)");
+          this.logEvent("event=user-turn-start source=local-echo");
 
           this.localSpeech = true;
 
           this.dispatch({ type: "local-speech-start" });
         }
 
-        this.clearIdleTimer();
+        this.armIdleIfEmpty(VOICE_IDLE_AFTER_ACTIVATION_MS, "user-turn");
 
         this.gate = new SpeechGate();
 
-        this.deps.bridge?.sendAudio(b64);
+        this.sendAudioChunk(b64);
       } else {
         this.gate = new SpeechGate();
       }
@@ -928,11 +1180,9 @@ export class VoiceController {
     if (gate.started) {
       this.gateEverStarted = true;
 
-      this.clearIdleTimer();
-    }
+      this.armIdleIfEmpty(VOICE_IDLE_AFTER_ACTIVATION_MS, "user-turn");
 
-    if (gate.started) {
-      this.log("user speaking (local)");
+      this.logEvent("event=user-turn-start source=local-gate");
 
       this.localSpeech = true;
 
@@ -942,18 +1192,24 @@ export class VoiceController {
 
       this.transmitting = true;
 
-      this.deps.bridge?.sendAudio(b64);
+      this.sendAudioChunk(b64);
 
       return;
     }
 
     if (this.localSpeech) {
-      this.deps.bridge?.sendAudio(b64);
+      this.sendAudioChunk(b64);
 
       if (gate.ended) {
         this.localSpeech = false;
 
         this.speechEndedAt = now;
+
+        /*
+         * The user's turn ended locally — re-arm the idle watchdog so
+         * a model that never responds cannot leave the session hanging.
+         */
+        this.scheduleIdle(VOICE_IDLE_AFTER_RESPONSE_MS, "local-turn-end");
       }
 
       return;
@@ -961,7 +1217,7 @@ export class VoiceController {
 
     if (this.transmitting) {
       if (now - this.speechEndedAt <= VOICE_TAIL_MS) {
-        this.deps.bridge?.sendAudio(b64);
+        this.sendAudioChunk(b64);
 
         return;
       }
@@ -972,7 +1228,7 @@ export class VoiceController {
     }
 
     if (this.failOpen) {
-      this.deps.bridge?.sendAudio(b64);
+      this.sendAudioChunk(b64);
 
       return;
     }
@@ -987,7 +1243,12 @@ export class VoiceController {
 
     switch (event.kind) {
       case "speech-started": {
-        this.clearIdleTimer();
+        /*
+         * Re-arm the watchdog for the user's turn instead of leaving
+         * no timer at all — the fire-time busy guard postpones it
+         * while she hears the user or waits for playback.
+         */
+        this.scheduleIdle(VOICE_IDLE_AFTER_ACTIVATION_MS, "user-turn");
 
         this.transcript.user = "";
 
@@ -1000,7 +1261,7 @@ export class VoiceController {
 
           this.markResponseInterrupted();
 
-          this.log("assistant interrupted (server VAD)");
+          this.logEvent("event=barge-in source=server-vad");
         }
 
         if (!this.transmitting) {
@@ -1011,7 +1272,7 @@ export class VoiceController {
 
         this.turnEndAt = 0;
 
-        this.log("user speaking (server)");
+        this.logEvent("event=user-turn-start source=server");
 
         this.dispatch({ type: "server-speech-start" });
 
@@ -1019,7 +1280,7 @@ export class VoiceController {
       }
 
       case "speech-stopped": {
-        this.log("user turn ended");
+        this.logEvent("event=user-turn-end");
 
         this.transmitting = false;
 
@@ -1052,6 +1313,13 @@ export class VoiceController {
           this.deps.onToolEvent?.({ kind: "tool-end" });
 
           this.dispatch({ type: "tool-followup-start" });
+
+          /*
+           * The tool round is over; give the spoken follow-up its own
+           * stall budget instead of leaving the old tool timer armed
+           * across her response.
+           */
+          this.scheduleIdle(TOOL_ROUND_IDLE_MS, "tool-followup");
         }
 
         break;
@@ -1060,23 +1328,33 @@ export class VoiceController {
       case "tool-call": {
         this.toolRoundActive = true;
 
-        this.log(`🔧 tool: ${event.name}`);
+        this.lastToolEventAt = Date.now();
+
+        this.logEvent(`event=tool-start tool=${event.name}`);
 
         this.deps.onToolEvent?.({ kind: "tool-call", name: event.name });
 
-        this.clearIdleTimer();
-
-        this.scheduleIdle(TOOL_ROUND_IDLE_MS);
+        this.scheduleIdle(TOOL_ROUND_IDLE_MS, "tool-round");
 
         break;
       }
 
       case "tool-result": {
-        this.log(
-          event.ok ? `🔧 ok: ${event.summary}` : `🔧 failed: ${event.summary}`,
+        this.lastToolEventAt = Date.now();
+
+        this.logEvent(
+          `event=tool-result tool-ok=${event.ok ? "true" : "false"}` +
+            (event.summary ? ` summary=${event.summary}` : ""),
         );
 
         this.deps.onToolEvent?.({ kind: "tool-result" });
+
+        /*
+         * Restart the tool-round stall watchdog from the LAST result so
+         * a slow tool + slow follow-up can never fire the timer armed
+         * at tool-call while her response is already playing.
+         */
+        this.scheduleIdle(TOOL_ROUND_IDLE_MS, "tool-result");
 
         break;
       }
@@ -1085,15 +1363,20 @@ export class VoiceController {
         /*
          * She said her goodbye via end_session. Let the farewell audio
          * finish playing, then end cleanly (no reconnect; the wake
-         * word resumes).
+         * word resumes). The timer is tracked so it can never leak
+         * into a newer session.
          */
         this.goodbyeActive = true;
 
-        this.log("👋 goodbye — ending the session after her farewell");
+        this.logEvent("event=goodbye source=end_session");
 
-        this.clearIdleTimer();
+        this.clearIdleTimer("goodbye");
 
-        setTimeout(() => {
+        this.clearGoodbyeTimer();
+
+        this.goodbyeTimer = setTimeout(() => {
+          this.goodbyeTimer = null;
+
           this.stop("goodbye");
         }, GOODBYE_GRACE_MS);
 
@@ -1126,16 +1409,14 @@ export class VoiceController {
 
         if (this.audioChunks === 0) {
           if (isToolRound) {
-            this.log("tool turn complete — waiting for her spoken follow-up");
+            this.logEvent("event=response-empty kind=tool-turn");
           } else {
-            this.log(
-              "model returned an empty response (no audio) — likely a garbled turn; just speak again",
-            );
+            this.logEvent("event=response-empty note=garbled-turn");
           }
         } else {
-          this.log(
-            `⏱ assistant buffered: ${this.audioChunks} chunks, ` +
-              `${Math.round(buffered)}ms of audio`,
+          this.logEvent(
+            `event=response-complete chunks=${this.audioChunks} ` +
+              `bufferedMs=${Math.round(buffered)}`,
           );
         }
 
@@ -1149,7 +1430,7 @@ export class VoiceController {
         ) {
           this.awaitingDrain = true;
 
-          this.log("response complete — waiting for playback to drain");
+          this.logEvent("event=awaiting-playback-drain");
 
           if (this.drainTimer) {
             clearTimeout(this.drainTimer);
@@ -1160,7 +1441,7 @@ export class VoiceController {
           }, DRAIN_TIMEOUT_MS);
 
           if (this.goodbyeDetected) {
-            this.log("👋 goodbye — will close after drain");
+            this.logEvent("event=goodbye source=transcript phase=drain");
           }
         } else {
           this.finishResponseDone(
@@ -1168,9 +1449,13 @@ export class VoiceController {
           );
 
           if (this.goodbyeDetected && !isToolRound) {
-            this.log("👋 goodbye — ending the session");
+            this.logEvent("event=goodbye source=transcript");
 
-            setTimeout(() => {
+            this.clearGoodbyeTimer();
+
+            this.goodbyeTimer = setTimeout(() => {
+              this.goodbyeTimer = null;
+
               this.stop("goodbye");
             }, 3000);
           }
@@ -1180,12 +1465,12 @@ export class VoiceController {
       }
 
       case "response-cancelled": {
-        this.log("response cancelled by server");
+        this.logEvent("event=response-cancelled");
 
         if (this.stateName === "assistant-speaking") {
           this.dispatch({ type: "interrupted" });
 
-          this.scheduleIdle(TOOL_ROUND_IDLE_MS);
+          this.scheduleIdle(TOOL_ROUND_IDLE_MS, "interrupted");
         }
 
         break;
@@ -1197,13 +1482,16 @@ export class VoiceController {
             ? event.message
             : "EmpirioLabs authentication failed.";
 
-          this.log(`fatal: ${this.message}`);
+          this.logEvent(`event=fatal-error error=${this.message}`);
 
           this.dispatch({ type: "fatal-error" });
 
           this.cleanup();
         } else {
-          console.error("[Starfire Voice] server error:", event.message);
+          console.error(
+            `[Starfire Voice] server error (conn=${event.conn}):`,
+            event.message,
+          );
         }
 
         break;
@@ -1218,15 +1506,16 @@ export class VoiceController {
           if (this.reconnectsUsed < MAX_RECONNECTS_PER_SESSION) {
             this.reconnectsUsed += 1;
 
-            this.log(
-              `connection lost — reconnecting automatically (${this.reconnectsUsed}/${MAX_RECONNECTS_PER_SESSION})`,
+            this.logEvent(
+              `event=reconnect attempt=${this.reconnectsUsed}/` +
+                `${MAX_RECONNECTS_PER_SESSION}`,
             );
 
             void this.reconnect();
           } else {
             this.message = "Voice connection closed.";
 
-            this.log("connection lost (reconnect budget exhausted)");
+            this.logEvent("event=reconnect-exhausted");
 
             this.dispatch({ type: "stop" });
 
@@ -1255,6 +1544,8 @@ export class VoiceController {
 
     this.toolRoundActive = false;
 
+    this.lastToolEventAt = 0;
+
     await new Promise((resolve) => {
       setTimeout(resolve, RECONNECT_DELAY_MS);
     });
@@ -1270,6 +1561,12 @@ export class VoiceController {
     const connect = await this.connectBridge();
 
     if (this.disposed || this.stopRequested) {
+      /*
+       * The reconnect may have opened a socket after cleanup's
+       * bridge.stop() — close it so no zombie connection survives.
+       */
+      this.deps.bridge?.stop();
+
       this.dispatch({ type: "stop" });
 
       this.cleanup();
@@ -1280,7 +1577,7 @@ export class VoiceController {
     if (!connect.ok) {
       this.message = connect.error;
 
-      this.log(`reconnect failed: ${connect.error}`);
+      this.logEvent(`event=reconnect-failed error=${connect.error}`);
 
       this.dispatch({ type: "stop" });
 
@@ -1292,6 +1589,8 @@ export class VoiceController {
     this.playback = this.deps.createPlayback({
       onLevel: (rms) => {
         this.outputLevel = rms;
+
+        this.lastLevelAt = Date.now();
 
         this.mouth.raw = mouthFromRms(rms);
       },
@@ -1313,11 +1612,15 @@ export class VoiceController {
 
     this.turnEndAt = 0;
 
+    this.lastAudioAt = 0;
+
+    this.lastLevelAt = 0;
+
     this.dispatch({ type: "session-ready" });
 
-    this.scheduleIdle(VOICE_IDLE_AFTER_ACTIVATION_MS);
+    this.scheduleIdle(VOICE_IDLE_AFTER_ACTIVATION_MS, "reconnected");
 
-    this.log("reconnected — session ready (listening)");
+    this.logEvent("event=reconnected");
   }
 
   private handlePlaybackDrained(): void {
@@ -1334,9 +1637,24 @@ export class VoiceController {
     }
 
     if (this.awaitingDrain) {
-      this.log("playback drained");
+      this.logEvent("event=playback-drained");
 
       this.finishResponseDone();
+
+      return;
+    }
+
+    /*
+     * Playback ended without a response.done (server stalled) — finish
+     * the response anyway so the session can never hang in
+     * assistant-speaking with no watchdog armed.
+     */
+    if (this.stateName === "assistant-speaking") {
+      this.logEvent(
+        "event=playback-drained note=no response.done — finishing response",
+      );
+
+      this.finishResponseDone(TOOL_ROUND_IDLE_MS);
     }
   }
 
@@ -1351,7 +1669,7 @@ export class VoiceController {
 
     this.dispatch({ type: "response-done" });
 
-    this.scheduleIdle(idleMs);
+    this.scheduleIdle(idleMs, "response-done");
   }
 
   private handlePcm(pcm: ArrayBuffer): void {
@@ -1374,7 +1692,7 @@ export class VoiceController {
         if (!this.staleDropLogged) {
           this.staleDropLogged = true;
 
-          this.log("dropping stale audio from the interrupted response");
+          this.logEvent("event=stale-audio-dropped source=interrupted");
         }
 
         return;
@@ -1383,10 +1701,12 @@ export class VoiceController {
 
     this.toolRoundActive = false;
 
+    this.lastAudioAt = Date.now();
+
     if (!this.loggedFirstAudio) {
       this.loggedFirstAudio = true;
 
-      this.log("playback: assistant audio streaming (24 kHz PCM)");
+      this.logEvent("event=assistant-audio-start");
 
       if (this.turnEndAt > 0) {
         const sample = Date.now() - this.turnEndAt;
@@ -1429,9 +1749,11 @@ export class VoiceController {
 
     this.cleaningUp = true;
 
-    this.clearIdleTimer();
+    this.clearIdleTimer("cleanup");
 
     this.clearMicStallTimer();
+
+    this.clearGoodbyeTimer();
 
     if (this.failOpenTimer) {
       clearTimeout(this.failOpenTimer);
