@@ -1,17 +1,18 @@
 import { defineTool } from "eve/tools";
-import { z } from "zod";
+
+import { getStarfireCapability } from "../../packages/contracts/src/capabilities.js";
 
 import { desktop } from "../lib/desktop.js";
 
+const capability = getStarfireCapability("open_folder");
+
 export default defineTool({
-  description: "Open a folder in the system file manager.",
+  description: capability.description,
 
-  inputSchema: z.object({
-    path: z.string().min(1),
-  }),
+  inputSchema: capability.parameters,
 
-  async execute({ path }) {
-    const result = await desktop.files.openFolder(path);
+  async execute(input: { path: string }) {
+    const result = await desktop.files.openFolder(input.path);
 
     return {
       summary: `Opening ${result.opened}.`,
