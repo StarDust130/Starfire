@@ -1,7 +1,9 @@
 /**
- * Shared contracts. agent.ts is the SINGLE SOURCE OF TRUTH for the
- * tool system (manifests, calls, results, OS ports). The older
- * inline ToolRequest/ToolResult scaffold that lived here is retired —
- * its replacement lives in agent.ts.
+ * Starfire platform contracts.
+ *
+ * Eve owns the agent runtime and tool orchestration.
+ * These types only describe what Starfire's local computer can do
+ * and how those capabilities are exposed to models.
  */
 export * from "./agent.js";
+export * from "./functions.js";
