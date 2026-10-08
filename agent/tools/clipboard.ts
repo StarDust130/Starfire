@@ -1,20 +1,20 @@
 import { defineTool } from "eve/tools";
-import { z } from "zod";
+
+import { getStarfireCapability } from "../../packages/contracts/src/capabilities.js";
 
 import { desktop } from "../lib/desktop.js";
 
+const capability = getStarfireCapability("clipboard");
+
 export default defineTool({
-  description:
-    "Read or write the system clipboard. Use read for " +
-    '"what did I copy?" and write to copy text for the user.',
+  description: capability.description,
 
-  inputSchema: z.object({
-    action: z.enum(["read", "write"]),
-    text: z.string().optional(),
-  }),
+  inputSchema: capability.parameters,
 
-  async execute({ action, text }) {
-    if (action === "write") {
+  async execute(input: { action: "read" | "write"; text?: string }) {
+    if (input.action === "write") {
+      const text = input.text;
+
       if (!text || text.trim().length === 0) {
         throw new Error("What should I copy? Tell me the text first.");
       }
