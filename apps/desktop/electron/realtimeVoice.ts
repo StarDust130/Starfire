@@ -275,6 +275,19 @@ export class RealtimeVoiceBridge {
         );
 
         this.failPending(`Voice connection failed: ${error.message}`, false);
+
+        /*
+         * A socket that errored may never emit close on its own — close
+         * it NOW so it cannot stay active and block a new connection.
+         * closeSocket releases ownership first, so the socket's own
+         * late close event is ignored as stale; emitting "closed" lets
+         * an active session reconnect.
+         */
+        this.closeSocket(1000);
+
+        this.emit({
+          kind: "closed",
+        });
       });
 
       socket.on("close", (code) => {
