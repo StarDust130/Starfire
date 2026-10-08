@@ -8,26 +8,22 @@ Starfire is built as a small modular system:
 🎤 You
   │
   ▼
-🧠 Qwen Realtime
-  │
-  │ tool call
-  ▼
-🚦 AgentRunner
+⭐ Starfire
   │
   ▼
-🧰 Tool Registry
+☁️ Eve Agent            (agent/ — agent runtime, tool discovery, tool calling)
   │
   ▼
-🛠️ Tool
+🔧 Eve Tool             (agent/tools/ — one file per capability)
+  │
+  ▼
+🌐 Starfire platform    (device bridge dispatch → Electron ports)
   │
   ▼
 💻 Electron / Linux
   │
   ▼
 ✅ Result
-  │
-  ▼
-🧠 Qwen
   │
   ▼
 🎀 Starfire speaks
@@ -40,16 +36,19 @@ Starfire is built as a small modular system:
 ```text
 Starfire/
 │
+├── agent/                ☁️ Eve agent definition + tools
+│   ├── agent.ts          ⚙️ Model config (defineAgent)
+│   ├── instructions.md   💬 Starfire personality
+│   ├── lib/              🌉 Device bridge client
+│   └── tools/            🔧 One Eve tool per file
+│
 ├── apps/
-│   ├── desktop/          🖥️ Desktop app
-│   │   ├── src/          🎨 React UI + voice UI
-│   │   └── electron/     🔐 Trusted desktop layer
-│   │
-│   └── core/             🧠 Agent execution logic
+│   └── desktop/          🖥️ Desktop app
+│       ├── src/          🎨 React UI + voice UI
+│       └── electron/     🔐 Trusted desktop layer (ports, device bridge, voice)
 │
 ├── packages/
-│   ├── contracts/        📜 Shared types + interfaces
-│   └── tools/            🧰 Tools + registry + validation
+│   └── contracts/        📜 Shared platform types + function specs
 │
 ├── eval/                 🧪 Agent evaluation
 │
@@ -57,6 +56,25 @@ Starfire/
 │
 └── public/               🖼️ Images + assets
 ```
+
+---
+
+# ☁️ 0. Eve Agent
+
+### `agent/`
+
+Eve (Vercel's agent framework) is Starfire's **agent runtime** — V1.0 foundation.
+
+```text
+agent/agent.ts           defineAgent({ model, reasoning })
+agent/instructions.md    Starfire's personality + behavior rules
+agent/tools/*.ts         one defineTool per file — Eve discovers them
+agent/lib/desktop.ts     calls Starfire's device bridge over HTTP
+```
+
+There is **no custom AgentRunner, no ToolRegistry, no custom agent loop** —
+Eve owns tool discovery, validation, and execution. Starfire keeps the
+desktop capabilities and the personality.
 
 ---
 
@@ -146,34 +164,14 @@ qwen3-8-omni-flash-realtime
 
 ---
 
-# 🚦 4. Agent Core
+# 🚦 4. Agent Runtime (Eve)
 
-### `apps/core`
+The agent runtime is **Eve** — see section 0. There is no Starfire-owned
+runner, registry, or validation layer anymore.
 
-The core currently contains the **AgentRunner**.
-
-Its job is simple:
-
-```text
-Model gives tool calls
-        ↓
-Validate the calls
-        ↓
-Limit the number of calls
-        ↓
-Execute safely
-        ↓
-Return results
-```
-
-The runner:
-
-- ignores malformed calls
-- limits calls per turn
-- executes calls sequentially
-- catches executor failures
-
-Think of it as the **traffic controller** for tool execution.
+When the realtime voice model produces function calls, the Electron main
+process executes them through the same platform dispatch Eve uses
+(`executeDeviceTool` in `deviceBridge.ts`).
 
 ---
 
@@ -216,11 +214,11 @@ Everyone speaks the same TypeScript language.
 
 # 🧰 6. Tools
 
-### `packages/tools`
+### `agent/tools/`
 
 Tools are the things Starfire can actually **do**.
 
-Current V0 tools:
+Current tools (one Eve tool per file):
 
 ```text
 🖥️ open_app
@@ -243,46 +241,35 @@ Current V0 tools:
 👋 end_session
 ```
 
-Each tool contains:
+Each tool file:
 
 ```text
-📜 Manifest
+📜 description + zod input schema
    ↓
 What the model should know
 
-⚙️ Handler
+⚙️ execute()
    ↓
-What the tool actually does
+What the tool actually does — a thin call into
+Starfire's platform layer (agent/lib/desktop.ts
+→ device bridge → Electron ports)
 ```
+
+Eve discovers tools from the filesystem: a tool at
+`agent/tools/open_app.ts` is `open_app`. There is no central tool
+index, registry, or manual registration.
 
 ---
 
-# 🗃️ 7. Tool Registry
+# 🗃️ 7. Tool Execution
 
-### `packages/tools/src/registry.ts`
+Tool discovery, argument validation, and execution are **Eve's job**
+(section 0). The old registry/validation files were removed in the
+V1.0 migration.
 
-The Registry is Starfire's **toolbox manager**.
-
-It:
-
-```text
-📦 stores tools
-🔎 finds tools
-📋 exposes tool definitions to Qwen
-✅ validates arguments
-⏱️ applies execution timeout
-🛑 handles unknown/broken tools
-```
-
-The model sees the tool manifests through:
-
-```text
-registry.functionTools()
-```
-
-So the model knows:
-
-> **"These are the capabilities I have."**
+The model-facing function specs (`STARFIRE_FUNCTION_SPECS` in
+`packages/contracts`) describe the same capabilities for the realtime
+voice session and the eval driver.
 
 ---
 
@@ -362,7 +349,6 @@ It checks things like:
 It also checks the architecture itself for issues such as:
 
 ```text
-🔐 missing policy coverage
 ⚠️ stale configuration
 🧩 tool mismatches
 ```
@@ -383,16 +369,9 @@ Instead:
 💻 Controlled OS operations
 ```
 
-Tools also declare danger metadata:
-
-```text
-safe
-confirm
-```
-
-and the project has a separate `policy.ts` for risk/confirmation rules.
-
-> ⚠️ **Current V0 note:** policy metadata exists, but confirmation enforcement still needs to be connected to `ToolRegistry.execute()`.
+Danger/risk policy is **Eve's approval system** (not configured in
+V1.0 — the platform layer keeps its own denylist and home-folder
+restrictions).
 
 ---
 
@@ -417,9 +396,7 @@ Starfire does:
       ↓
 "open_app(discord)"
       ↓
-🚦 AgentRunner
-      ↓
-🧰 ToolRegistry
+🔧 Eve Tool / platform dispatch
       ↓
 🛠️ open_app
       ↓
@@ -434,6 +411,8 @@ Starfire does:
 🔊 "Discord is open."
 ```
 
+(The same dispatch is used by the Eve agent path — see section 0.)
+
 ---
 
 # 🧠 The Core Idea
@@ -444,11 +423,8 @@ Starfire is built around one simple separation:
 🧠 Model
     decides WHAT to do
 
-🚦 AgentRunner
-    controls HOW tool calls execute
-
-🧰 Registry
-    manages WHICH tools exist
+☁️ Eve
+    owns the agent runtime, tool discovery, and execution
 
 🛠️ Tools
     define WHAT Starfire can do
