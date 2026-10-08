@@ -4,7 +4,6 @@ import { buildDataset } from "./dataset/index.js";
 import { loadDotEnv } from "./env.js";
 import { type DriverConfig, loadProviderConfig } from "./provider.js";
 import { renderCaseDetail } from "./render.js";
-import { policyAudit } from "./report.js";
 import { runEval } from "./runner.js";
 import { TOOL_NAMES } from "./starfire.js";
 import type { CaseResult } from "./types.js";
@@ -111,8 +110,6 @@ async function main(): Promise<void> {
   if (cmd === "tools") {
     console.log(`Starfire tools (${TOOL_NAMES.length}):`);
     for (const n of TOOL_NAMES) console.log(`  • ${n}`);
-    console.log(`\nPolicy audit (static, from your source):`);
-    for (const fnd of policyAudit()) console.log(`  ${fnd.level}  ${fnd.text}`);
     return;
   }
 
