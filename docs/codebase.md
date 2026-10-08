@@ -254,7 +254,9 @@ Starfire's personality + behavior rules.
 ### `tools/`
 One Eve tool per file. Eve discovers them from the filesystem; each
 `execute()` is a thin call into Starfire's platform layer
-(`agent/lib/desktop.ts` → device bridge → Electron ports).
+(`agent/lib/desktop.ts` → device bridge → Electron ports). Each tool
+takes its description + input schema from the canonical Starfire
+capability definitions (`packages/contracts/src/capabilities.ts`).
 
 Think:
 
@@ -264,7 +266,28 @@ Think:
 
 # 📜 `packages/contracts`
 
-Shared language between everything.
+Shared language between everything. This is the shared Starfire
+capability layer: canonical definitions + shared execution.
+
+### `capabilities.ts`
+
+The ONE canonical definition of every Starfire capability — name,
+description, arguments/schema, and basic metadata (`device` = touches
+the computer via ports, `session` = conversation-local). Both Eve and
+the realtime voice derive their tool forms from this file.
+
+### `dispatch.ts`
+
+The shared execution layer:
+
+```text
+executeDeviceTool(ports, tool, args)
+```
+
+Every consumer routes through it — voice directly, Eve over the device
+bridge HTTP boundary, eval in-process. The ports carry the actual OS
+implementation, so Linux/Windows/macOS backends can change without
+touching Eve or the voice agent.
 
 ### `agent.ts`
 
@@ -275,9 +298,9 @@ Defines the platform port interfaces:
 
 ### `functions.ts`
 
-The model-facing function specs (`STARFIRE_FUNCTION_SPECS`) for the
-same capabilities — used by the realtime voice session and the eval
-driver.
+The model-facing function specs (`STARFIRE_FUNCTION_SPECS`) — DERIVED
+from `capabilities.ts` — used by the realtime voice session and the
+eval driver.
 
 Think:
 
@@ -297,7 +320,8 @@ Electron says → I provide AppPort
 
 ### `deviceBridge.ts`
 A tiny local HTTP server (default `http://127.0.0.1:17321`) that the
-Eve tools call. It exposes ONE dispatch function:
+Eve tools call. It serves the shared dispatch from
+`@starfire/contracts` (`executeDeviceTool`) over HTTP:
 
 ```text
 executeDeviceTool(ports, tool, args)
