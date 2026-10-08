@@ -103,3 +103,67 @@ describe("device dispatch behaves against mock ports", () => {
     expect(res.error).toContain("Unknown device tool");
   });
 });
+
+describe("capability runtime validation", () => {
+  it("rejects invalid system_info query values", async () => {
+    const os = new MockOS();
+    const res = await runDeviceTool(
+      os,
+      "system_info",
+      { query: "banana" },
+      2000,
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain('Invalid "query"');
+    expect(res.error).toContain("system_info");
+  });
+
+  it("still executes valid system_info queries", async () => {
+    const os = new MockOS();
+    const res = await runDeviceTool(
+      os,
+      "system_info",
+      { query: "memory" },
+      2000,
+    );
+    expect(res.ok).toBe(true);
+    expect(res.result).toEqual({
+      summary: "Memory usage is at 62% (8.0 of 12.8 GB).",
+      data: { usedPct: 62 },
+    });
+  });
+
+  it("rejects invalid window_control actions", async () => {
+    const os = new MockOS();
+    const res = await runDeviceTool(
+      os,
+      "window_control",
+      { action: "banana" },
+      2000,
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain('Invalid "action"');
+  });
+
+  it("still canonicalizes valid window_control synonyms", async () => {
+    const os = new MockOS();
+    await runDeviceTool(os, "open_app", { app: "Discord" }, 2000);
+
+    await runDeviceTool(
+      os,
+      "window_control",
+      { action: "minimize", app: "Discord" },
+      2000,
+    );
+    expect(os.snapshot().apps.discord?.window).toBe("minimized");
+
+    const res = await runDeviceTool(
+      os,
+      "window_control",
+      { action: "unminimize", app: "Discord" },
+      2000,
+    );
+    expect(res.ok).toBe(true);
+    expect(os.snapshot().apps.discord?.window).toBe("normal");
+  });
+});
