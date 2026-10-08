@@ -1,19 +1,20 @@
 import { defineTool } from "eve/tools";
-import { z } from "zod";
+
+import { getStarfireCapability } from "../../packages/contracts/src/capabilities.js";
 
 import { desktop } from "../lib/desktop.js";
 
+const capability = getStarfireCapability("system_info");
+
 export default defineTool({
-  description:
-    "Check system status such as RAM, CPU, uptime, disk, " +
-    "battery, or host information.",
+  description: capability.description,
 
-  inputSchema: z.object({
-    query: z.enum(["memory", "cpu", "uptime", "disk", "battery", "host"]),
-  }),
+  inputSchema: capability.parameters,
 
-  async execute({ query }) {
-    const result = await desktop.system.info(query);
+  async execute(input: {
+    query: "memory" | "cpu" | "uptime" | "disk" | "battery" | "host";
+  }) {
+    const result = await desktop.system.info(input.query);
 
     return {
       summary: result.summary,
