@@ -1,9 +1,10 @@
-import { AgentRunner } from "@starfire/core";
-import { createDefaultRegistry } from "@starfire/tools";
+import type { AgentPorts } from "@starfire/contracts";
+import {
+  executeDeviceTool,
+  STARFIRE_FUNCTION_SPECS,
+} from "@starfire/contracts";
 import { type BrowserWindow, ipcMain } from "electron";
 import WebSocket from "ws";
-
-import { createElectronPorts } from "./agent/electron-ports.js";
 
 import {
   buildAudioAppend,
@@ -34,24 +35,29 @@ type FunctionCallEvent = {
   args: unknown;
 };
 
+type ToolOutcome = {
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+};
+
 /*
- * Owns the EmpirioLabs realtime WebSocket, the API key, and the agent bridge.
+ * Owns the EmpirioLabs realtime WebSocket, the API key, and the tool
+ * dispatch into Starfire's platform layer.
  *
  * Flow:
  *
- *   Qwen function calls
+ *   realtime function calls
  *        ↓
  *   collect all calls from this response
  *        ↓
- *   AgentRunner.run(...)
- *        ↓
- *   ToolRegistry
+ *   executeDeviceTool (same dispatch the Eve tools use)
  *        ↓
  *   real Electron ports
  *        ↓
- *   send every tool result back to Qwen
+ *   send every tool result back to the realtime model
  *        ↓
- *   Qwen speaks the result
+ *   the model speaks the result
  */
 export class RealtimeVoiceBridge {
   private socket: WebSocket | null = null;
@@ -76,13 +82,9 @@ export class RealtimeVoiceBridge {
 
   /*
    * A single model response can contain multiple function calls.
-   * We collect them and execute them together through ONE AgentRunner.run()
-   * call so maxCallsPerTurn is actually enforced.
+   * They are collected and executed together once the response
+   * completes, so the model speaks about results in one turn.
    */
-  private readonly registry: ReturnType<typeof createDefaultRegistry>;
-
-  private readonly runner: AgentRunner;
-
   private pendingToolCalls: FunctionCallEvent[] = [];
 
   private toolBatchStarted = false;
@@ -91,14 +93,10 @@ export class RealtimeVoiceBridge {
 
   private pendingSessionEnd = false;
 
-  constructor(private readonly getWindow: () => BrowserWindow | null) {
-    this.registry = createDefaultRegistry(createElectronPorts());
-
-    this.runner = new AgentRunner({
-      executor: this.registry,
-      log: (message) => console.log(`[Starfire Voice] ${message}`),
-    });
-  }
+  constructor(
+    private readonly getWindow: () => BrowserWindow | null,
+    private readonly ports: AgentPorts,
+  ) {}
 
   register(): void {
     ipcMain.handle("starfire-voice:start", () => this.handleStart());
@@ -301,7 +299,7 @@ export class RealtimeVoiceBridge {
             `in=${String(event.info.inputAudioFormat ?? "?")}, ` +
             `out=${String(event.info.outputAudioFormat ?? "?")}, ` +
             `vad=${String(event.info.turnDetection ?? "off")}, ` +
-            `tools=${this.registry.names().length})`,
+            `tools=${STARFIRE_FUNCTION_SPECS.length})`,
         );
 
         this.resolvePending();
@@ -314,11 +312,10 @@ export class RealtimeVoiceBridge {
         this.sessionConfigured = true;
 
         /*
-         * Tell the model which tools exist.
-         * The manifests are the single source of truth shared
-         * with the registry.
+         * Tell the model which Starfire capabilities exist.
+         * The specs are the platform contract shared with Eve.
          */
-        this.send(buildSessionUpdate(this.registry.functionTools()));
+        this.send(buildSessionUpdate(STARFIRE_FUNCTION_SPECS));
 
         return;
       }
@@ -448,8 +445,7 @@ export class RealtimeVoiceBridge {
       });
 
       /*
-       * Execute ALL calls from this response through one AgentRunner.run()
-       * call so maxCallsPerTurn is enforced correctly.
+       * Execute ALL calls collected from this response in one batch.
        */
       if (this.pendingToolCalls.length > 0 && !this.toolBatchStarted) {
         this.startToolBatch();
@@ -459,7 +455,7 @@ export class RealtimeVoiceBridge {
       /*
        * end_session succeeded in the previous tool batch.
        *
-       * Let Qwen's goodbye audio play briefly, then close the session.
+       * Let the goodbye audio play briefly, then close the session.
        */
       if (this.pendingSessionEnd) {
         this.pendingSessionEnd = false;
@@ -549,90 +545,95 @@ export class RealtimeVoiceBridge {
     void this.executeToolBatch(calls);
   }
 
+  private batchStale(batchConn: number): boolean {
+    return (
+      batchConn !== this.conn ||
+      !this.socket ||
+      this.socket.readyState !== WebSocket.OPEN ||
+      this.toolBatchCancelled
+    );
+  }
+
   private async executeToolBatch(calls: FunctionCallEvent[]): Promise<void> {
     const batchConn = this.conn;
 
-    const runnerCalls = calls.map((call) => ({
-      callId: call.callId,
-      name: call.name,
-      args: this.normalizeToolArgs(call.args),
-    }));
-
-    try {
-      const results = await this.runner.run(runnerCalls, {
-        log: (message) => {
-          console.log(`[Starfire Voice] ${message}`);
-        },
-      });
-
-      /*
-       * The session may have been closed/replaced while tools were running.
-       * Never send an old batch into a new connection.
-       */
-      if (
-        batchConn !== this.conn ||
-        !this.socket ||
-        this.socket.readyState !== WebSocket.OPEN ||
-        this.toolBatchCancelled
-      ) {
+    for (const call of calls) {
+      if (this.batchStale(batchConn)) {
         this.toolBatchStarted = false;
+
         return;
       }
 
-      /*
-       * Match results by callId, not array position.
-       *
-       * AgentRunner may skip malformed calls, so positional matching could
-       * accidentally send one tool's result to another tool call.
-       */
-      const resultsByCallId = new Map(
-        results.map((result) => [result.callId, result]),
+      const outcome = await this.runToolCall(call);
+
+      this.emit({
+        kind: "tool-result",
+        name: call.name,
+        ok: outcome.ok,
+        summary: outcome.ok ? "done" : (outcome.error ?? "failed"),
+      });
+
+      console.log(
+        `[Starfire Voice] ✅ tool result: ${call.name} ` +
+          `(ok=${String(outcome.ok)})`,
       );
 
-      for (const call of calls) {
-        const result = resultsByCallId.get(call.callId);
-
-        if (!result) {
-          continue;
-        }
-
-        this.emit({
-          kind: "tool-result",
-          name: call.name,
-          ok: result.ok,
-          summary: result.summary,
-        });
-
-        console.log(
-          `[Starfire Voice] ✅ tool result: ${call.name} ` +
-            `(ok=${String(result.ok)})`,
-        );
-
-        if (call.name === "end_session" && result.ok) {
-          this.pendingSessionEnd = true;
-        }
-
-        this.send(buildFunctionCallOutput(result));
+      if (call.name === "end_session" && outcome.ok) {
+        this.pendingSessionEnd = true;
       }
 
-      this.toolBatchStarted = false;
-
-      /*
-       * Ask Qwen to continue and speak the tool results.
-       */
-      if (
-        batchConn === this.conn &&
-        this.socket &&
-        this.socket.readyState === WebSocket.OPEN &&
-        !this.toolBatchCancelled
-      ) {
-        this.send(buildResponseCreate());
-      }
-    } catch (error) {
-      this.toolBatchStarted = false;
-
-      console.error("[Starfire Voice] agent batch failed:", error);
+      this.send(
+        buildFunctionCallOutput({
+          callId: call.callId,
+          ok: outcome.ok,
+          result: outcome.result ?? null,
+          error: outcome.error ?? null,
+        }),
+      );
     }
+
+    this.toolBatchStarted = false;
+
+    /*
+     * Ask the model to continue and speak the tool results.
+     */
+    if (!this.batchStale(batchConn)) {
+      this.send(buildResponseCreate());
+    }
+  }
+
+  private async runToolCall(call: FunctionCallEvent): Promise<ToolOutcome> {
+    const args = this.normalizeToolArgs(call.args);
+
+    try {
+      const result = await this.execute(call.name, args);
+
+      return {
+        ok: true,
+        result,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "That didn't work right now.",
+      };
+    }
+  }
+
+  private async execute(
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    /*
+     * Everything goes through the single shared Starfire capability
+     * dispatch — the same layer the Eve tools use. Conversation-local
+     * capabilities (current_date_time, end_session), clipboard
+     * actions, and window action synonyms are handled there.
+     */
+    return executeDeviceTool(this.ports, name, args);
   }
 
   private normalizeToolArgs(args: unknown): Record<string, unknown> {

@@ -249,30 +249,16 @@ commit_message_for_file() {
       subject="strengthen shared contracts"
       ;;
 
-    packages/tools/*)
+    agent/*)
       type="fix"
-      scope="tools"
+      scope="eve-agent"
 
       case "$file" in
-        */policy.ts|*/registry.ts)
-          subject="lock down tool safety"
+        */instructions.md)
+          subject="refine Starfire's personality"
           ;;
-        */validate.ts)
-          subject="tighten tool validation"
-          ;;
-        *)
-          subject="$(random_subject fix)"
-          ;;
-      esac
-      ;;
-
-    apps/core/*)
-      type="fix"
-      scope="core"
-
-      case "$file" in
-        */agent-runner.ts)
-          subject="tighten agent execution"
+        */tools/*)
+          subject="sharpen Starfire's capabilities"
           ;;
         *)
           subject="$(random_subject fix)"

@@ -1,6 +1,6 @@
-import type { WebSearchResultItem } from "@starfire/contracts";
-import type { WebSearchAdapter } from "@starfire/tools";
-import { ToolError } from "@starfire/tools";
+import type { WebSearchResult, WebSearchResultItem } from "@starfire/contracts";
+
+import { ToolError } from "./tool-error.js";
 
 const EXA_ENDPOINT = "https://api.exa.ai/search";
 
@@ -11,14 +11,10 @@ const MAX_RESULTS = 5;
 /*
  * Exa adapter for the web_search tool. Runs in the Electron main
  * process ONLY — the API key never crosses the preload bridge.
- *
- * (V0 uses a direct fetch. When you later add more providers via the
- * Vercel AI SDK, swap this file — tools/contracts/registry are
- * untouched.)
  */
-export function createExaSearchAdapter(
-  apiKey: string | undefined,
-): WebSearchAdapter {
+export function createExaSearchAdapter(apiKey: string | undefined): {
+  search(query: string): Promise<WebSearchResult>;
+} {
   return {
     async search(query: string) {
       if (!apiKey || apiKey.trim().length === 0) {

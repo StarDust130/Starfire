@@ -263,9 +263,7 @@ describe("builders", () => {
 
         ok: true,
 
-        summary: "Opening VS Code.",
-
-        data: { app: "VS Code", pid: 4242 },
+        result: { app: "VS Code", pid: 4242 },
       }),
     ) as {
       type: string;
@@ -284,9 +282,7 @@ describe("builders", () => {
     expect(output).toEqual({
       ok: true,
 
-      summary: "Opening VS Code.",
-
-      data: { app: "VS Code", pid: 4242 },
+      result: { app: "VS Code", pid: 4242 },
 
       error: null,
     });
@@ -299,7 +295,7 @@ describe("builders", () => {
 
         ok: false,
 
-        summary: "I couldn't find that app.",
+        error: "I couldn't find that app.",
       }),
     ) as { item: { output: string } };
 
@@ -308,11 +304,9 @@ describe("builders", () => {
     expect(output).toEqual({
       ok: false,
 
-      summary: "I couldn't find that app.",
+      result: null,
 
-      data: null,
-
-      error: null,
+      error: "I couldn't find that app.",
     });
   });
 

@@ -11,17 +11,19 @@
     "format": "pnpm -w format",
     "lint": "pnpm -w lint",
     "check": "pnpm -w check",
-    "build": "pnpm -w build"
+    "build": "tsc -p tsconfig.electron.json"
   },
   "dependencies": {
     "@edyrkaj/openwakeword-wasm-browser": "1.0.1",
     "@pixiv/three-vrm": "3.5.5",
+    "eve": "^0.72.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "three": "0.180.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@starfire/contracts": "workspace:*",
     "@types/node": "^26.6.3",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
@@ -31,10 +33,7 @@
     "electron": "44.4.5",
     "typescript": "~6.0.3",
     "vite": "^8.0.16",
-    "vitest": "^5.0.1",
-    "@starfire/contracts": "workspace:*",
-    "@starfire/core": "workspace:*",
-    "@starfire/tools": "workspace:*"
+    "vitest": "^5.0.1"
   },
   "main": "electron/main.ts"
 }

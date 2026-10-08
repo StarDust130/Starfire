@@ -2,42 +2,45 @@
 
 > **Forget the code? Read this file first.**
 >
-> Starfire is a realtime desktop AI companion.
-> **Qwen thinks → Registry routes → Tools act → Ports touch the computer → Electron keeps it safe.**
+> Starfire is a personal desktop AI companion.
+> **Starfire talks → capabilities act → ports touch the computer → Electron provides trusted access → Eve handles deep background work → Eval checks everything.**
 
 ---
 
-## 🧠 The Whole System
+# 🧠 The Whole System
+
+Starfire has **one user experience** with two execution paths:
 
 ```text
-🎤 User
-  ↓
-🖥️ React UI
-  ↓
-🔌 Electron / Realtime Voice
-  ↓
-🧠 Qwen Realtime
-  ↓
-🧰 AgentRunner
-  ↓
-📦 Tool Registry
-  ↓
-🔧 Tool
-  ↓
-🖐️ Port
-  ↓
-💻 OS / Web / External Service
-  ↓
-↩️ Result → Qwen → Starfire speaks
+                         ⭐ STARFIRE
+                              │
+                 ┌────────────┴────────────┐
+                 │                         │
+            ⚡ FAST PATH               🧠 DEEP PATH
+            Realtime Voice               Eve Worker
+                 │                         │
+          talk + basic work          complex/background work
+                 │                         │
+                 └────────────┬────────────┘
+                              │
+                    🧩 Shared Capabilities
+                              │
+                       💪 Platform Layer
+                              │
+                         💻 Computer
 ```
 
-### Easy rule
+The important idea:
 
-**Qwen decides WHAT.**  
-**Tool describes WHAT.**  
-**Port knows HOW.**  
-**Electron gives trusted access to the computer.**  
-**Eval checks whether everything worked correctly.**
+```text
+⭐ Starfire = the product
+⚡ Voice = fast path
+🧠 Eve = background worker
+🧩 Capability = what Starfire can do
+💪 Port = how it touches the platform
+🔐 Electron = trusted desktop access
+🧪 Eval = proves it works
+```
 
 ---
 
@@ -45,17 +48,14 @@
 
 ```text
 Starfire/
+├── agent/                       🧠 Eve worker
 ├── apps/
-│   ├── desktop/
-│   └── core/
-│
+│   └── desktop/                 🖥️ Desktop application
 ├── packages/
-│   ├── contracts/
-│   └── tools/
-│
-├── eval/
-├── docs/
-└── public/
+│   └── contracts/               📜 Shared capabilities + platform contracts
+├── eval/                        🧪 Evaluation
+├── docs/                        📚 Documentation
+└── public/                      🖼️ Assets
 ```
 
 ---
@@ -64,348 +64,680 @@ Starfire/
 
 The actual Starfire desktop application.
 
-## `apps/desktop/src`
+```text
+apps/desktop/
+├── src/                         🎨 React UI
+└── electron/                    🔐 Trusted desktop layer
+```
 
-### `App.tsx`
+---
+
+# 🎨 `apps/desktop/src`
+
+This is Starfire's **face and user interface**.
+
+## `App.tsx`
+
 Main React controller.
 
-Connects:
-- voice
-- wake word
-- microphone
-- UI state
-- Starfire 3D scene
+Connects things such as:
+
+```text
+🎤 Voice
+👂 Wake word
+🎙️ Microphone
+🎭 UI state
+🌌 Starfire scene
+```
 
 Think:
 
-> **“What is Starfire doing right now?”**
+> **"What is Starfire doing right now?"**
 
-### `App.css`
+---
+
+## `App.css`
+
 Main desktop UI styling.
 
-### `main.tsx`
-React entry point.
+---
+
+## `main.tsx`
+
+React application entry point.
 
 Starts the frontend.
 
-### `components/`
+---
+
+## `components/`
+
 Normal React UI components.
 
-### `voice/`
-Everything related to hearing and speaking.
+Use this folder for reusable visual components.
 
-Includes:
-- microphone
-- wake word
-- realtime voice controller
-- audio playback
-- voice state
+---
+
+## `voice/`
+
+Frontend voice-related logic.
+
+Handles things such as:
+
+```text
+🎤 Microphone
+👂 Wake word
+🔊 Audio playback
+⚡ Voice state
+🔄 Voice session UI
+```
 
 Think:
 
-> **“How does Starfire hear and talk?”**
+> **"How does the Starfire UI handle voice?"**
 
-### `three/`
-3D Starfire character.
+---
+
+## `three/`
+
+Starfire's 3D character.
 
 Handles:
-- model
-- animation
-- expressions
-- reactions
-- voice animation
-- dragging
-- activities
+
+```text
+🎭 Character model
+✨ Animation
+😊 Expressions
+🎙️ Voice animation
+🖱️ Interaction
+🎬 Activities
+```
 
 Think:
 
-> **“Starfire's body and personality.”**
+> **"Starfire's body."**
 
-### `types/`
+---
+
+## `types/`
+
 Frontend-specific TypeScript types.
 
 ---
 
-# ⚡ `apps/desktop/electron`
+# 🔐 `apps/desktop/electron`
 
-This is the **trusted computer side** of Starfire.
+This is Starfire's **trusted desktop side**.
 
-React should not directly control Linux, files, secrets, APIs, etc.
+React should not directly control the operating system.
 
-Electron does that.
-
-## Important files
-
-### `main.ts`
-Starts Electron.
-
-Creates the Starfire window and handles desktop-level behavior such as shortcuts.
-
-Think:
-
-> **“Start Starfire's trusted desktop process.”**
-
-### `preload.ts`
-Safe bridge between React and Electron.
-
-Only exposes the things the frontend is allowed to use.
-
-Think:
-
-> **“Security gate.”**
-
-### `realtimeVoice.ts`
-The main voice bridge.
-
-Connects:
+Electron provides access to privileged capabilities.
 
 ```text
-Starfire ↔ Qwen Realtime
+React
+  ↓
+safe IPC
+  ↓
+Electron
+  ↓
+Operating System
 ```
-
-Also:
-- receives tool calls
-- sends them to AgentRunner
-- sends tool results back to Qwen
-- handles voice/session events
-
-Think:
-
-> **“Qwen ↔ Starfire translator.”**
-
-### `realtimeProtocol.ts`
-Defines the realtime session configuration.
-
-Contains:
-- model
-- voice
-- system instructions
-- tool definitions
-- realtime settings
-
-Think:
-
-> **“Rules for talking to Qwen.”**
 
 ---
 
-# 🛠️ `apps/desktop/electron/agent`
+# ⚙️ `apps/desktop/electron/main.ts`
 
-Real-world implementations.
+Main Electron process.
 
-### `electron-ports.ts`
-The main **OS hands**.
+Responsible for starting Starfire's desktop process and connecting the major
+desktop services.
 
-Actually performs things like:
+It creates the shared platform ports and starts:
 
-- open app
-- close app
-- open files/folders
-- clipboard
-- system info
-- URLs
-- window actions
+```text
+⚡ Realtime voice
+🌐 Device bridge
+🧠 Eve runtime
+🖥️ Desktop window
+```
 
 Think:
 
-> **“How Starfire actually touches Linux.”**
+> **"Start Starfire's trusted desktop runtime."**
 
-### `exa-search.ts`
+---
+
+# 🔑 `apps/desktop/electron/preload.ts`
+
+Safe bridge between React and Electron.
+
+Only exposes approved functionality to the renderer.
+
+Think:
+
+> **"Security gate between UI and Electron."**
+
+---
+
+# ⚡ `apps/desktop/electron/realtimeVoice.ts`
+
+Starfire's **fast realtime execution path**.
+
+It connects Starfire to the realtime voice model.
+
+Main responsibilities:
+
+```text
+🎤 Receive / send realtime audio
+🧠 Receive model events
+🛠️ Receive capability calls
+⚡ Execute basic capabilities quickly
+📤 Send capability results back
+🔊 Continue conversation
+```
+
+Important:
+
+**Realtime voice does not need to run through Eve.**
+
+Instead:
+
+```text
+Voice
+  ↓
+Canonical capability
+  ↓
+Shared dispatch
+  ↓
+Electron ports
+  ↓
+OS
+```
+
+Think:
+
+> **"Fast voice ↔ Starfire capabilities."**
+
+---
+
+# 🌐 `apps/desktop/electron/realtimeProtocol.ts`
+
+Defines the realtime session configuration.
+
+Includes things such as:
+
+```text
+🧠 Model
+🎙️ Voice
+📜 System instructions
+🧩 Realtime capability specs
+⚙️ Session settings
+```
+
+Think:
+
+> **"Rules for the realtime voice model."**
+
+---
+
+# 🌉 `apps/desktop/electron/deviceBridge.ts`
+
+A small local HTTP bridge used by Eve to reach Starfire's desktop capabilities.
+
+Default address:
+
+```text
+http://127.0.0.1:17321
+```
+
+Flow:
+
+```text
+🧠 Eve
+  ↓
+agent/lib/desktop.ts
+  ↓
+HTTP /v1/tool
+  ↓
+deviceBridge.ts
+  ↓
+executeDeviceTool()
+  ↓
+Electron ports
+  ↓
+💻 Computer
+```
+
+Optional authentication:
+
+```text
+STARFIRE_DEVICE_TOKEN
+```
+
+Important:
+
+The device bridge is **Eve's transport boundary**.
+
+Realtime voice can call the same shared dispatch directly without going through
+the HTTP bridge.
+
+Think:
+
+> **"Local bridge that lets Eve reach Starfire's computer capabilities."**
+
+---
+
+# 🧠 `apps/desktop/electron/eve-runtime.ts`
+
+Starts Eve inside Starfire's desktop runtime.
+
+Starfire uses Eve as an **internal background agent runtime**.
+
+There is no need for the user to interact with an Eve CLI/TUI.
+
+Think:
+
+> **"Run the Eve worker inside Starfire."**
+
+---
+
+# 💪 `apps/desktop/electron/agent`
+
+Platform-specific implementations.
+
+This is where Starfire's capabilities eventually reach the real operating system.
+
+---
+
+## `electron-ports.ts`
+
+The main **OS hands**.
+
+Implements platform ports such as:
+
+```text
+📱 Applications
+📂 Files
+🌐 URLs
+📋 Clipboard
+💻 System information
+🪟 Windows
+🌐 Web
+🌦️ Weather
+```
+
+Example:
+
+```text
+open_app
+   ↓
+ports.apps.open()
+   ↓
+electron-ports.ts
+   ↓
+Linux process
+   ↓
+Discord opens
+```
+
+Think:
+
+> **"How Starfire actually touches the computer."**
+
+---
+
+## `kwin-windows.ts`
+
+KDE/KWin-specific window implementation.
+
+Handles things such as:
+
+```text
+🎯 Focus
+➖ Minimize
+⬜ Maximize
+↩️ Restore
+⬇️ Lower
+```
+
+This is platform-specific implementation code.
+
+Later, Windows/macOS can have their own implementations behind the same
+platform interfaces.
+
+---
+
+## `exa-search.ts`
+
 Web search adapter.
 
 ```text
-web_search tool
-      ↓
+web_search
+    ↓
 Exa adapter
-      ↓
+    ↓
 Exa API
 ```
 
-Keeps the Exa API key inside Electron.
-
-### `kwin-windows.ts`
-KDE/KWin window controller.
-
-Actually performs:
-
-- focus
-- minimize
-- maximize
-- restore
-- lower
-
-Think:
-
-> **“How Starfire controls KDE windows.”**
+Keeps the external API integration separate from the capability itself.
 
 ---
 
-# 🧠 `apps/core`
+# 🧠 `agent/`
 
-Small reusable agent logic.
+This is Starfire's **Eve background worker**.
 
-### `agent/agent-runner.ts`
+```text
+agent/
+├── agent.ts
+├── instructions.md
+├── lib/
+└── tools/
+```
 
-Controls tool execution.
+Eve owns the agent runtime, reasoning loop, tool discovery, and background
+agent behavior.
 
-It:
-- receives tool calls
-- filters bad calls
-- runs tools
-- catches failures
-- returns results
+Starfire owns the actual desktop capabilities and platform layer.
+
+---
+
+# `agent/agent.ts`
+
+Defines the Eve agent.
+
+Example:
+
+```ts
+defineAgent({
+  model: "...",
+  reasoning: "high",
+})
+```
+
+The file is intentionally small.
+
+Eve owns the agent loop.
+
+Starfire does not need a custom `AgentRunner`, `ToolRegistry`, or custom
+agent orchestration layer.
 
 Think:
 
-> **“Tool traffic controller.”**
+> **"What Eve agent is Starfire using?"**
 
-### `index.ts`
-Exports the core package.
+---
+
+# `agent/instructions.md`
+
+Instructions for the Eve worker.
+
+This tells Eve things such as:
+
+```text
+🧠 How to behave
+🛠️ How to use Starfire capabilities
+🤝 How to work on delegated tasks
+🔐 Safety expectations
+```
+
+Eve is not the main personality the user talks to.
+
+Starfire is.
+
+---
+
+# `agent/tools/`
+
+One Eve capability adapter per file.
+
+Examples:
+
+```text
+open_app.ts
+close_app.ts
+focus_app.ts
+
+open_file.ts
+open_folder.ts
+open_url.ts
+
+clipboard.ts
+system_info.ts
+
+web_search.ts
+get_weather.ts
+
+window_control.ts
+```
+
+The important rule:
+
+> **Eve tools are thin adapters.**
+
+They should not contain large operating-system implementations.
+
+Their job is mainly:
+
+```text
+🧠 Eve
+   ↓
+Eve capability adapter
+   ↓
+🧩 Starfire capability
+   ↓
+Shared dispatch
+   ↓
+💪 Platform ports
+```
 
 ---
 
 # 📜 `packages/contracts`
 
-Shared language between everything.
+This is the **shared language of Starfire**.
 
-### `agent.ts`
-
-Defines important shared types:
-
-- `ToolCall`
-- `ToolResult`
-- `ToolManifest`
-- `ToolName`
-- `AgentPorts`
-- port interfaces
-
-Think:
-
-> **“Everyone agrees on the same rules and shapes.”**
-
-Example:
+It contains the canonical capability definitions, shared dispatch, and
+platform contracts.
 
 ```text
-Tool says → I need AppPort
-
-Electron says → I provide AppPort
+packages/contracts/src/
+├── capabilities.ts
+├── dispatch.ts
+├── functions.ts
+└── agent.ts
 ```
 
 ---
 
-# 🧰 `packages/tools`
+# 🧩 `packages/contracts/src/capabilities.ts`
 
-The actual tool layer.
+The **ONE canonical source of truth** for Starfire capabilities.
 
-## Main pieces
+Each capability defines things such as:
 
-### `tools/`
-The 13 Starfire tools.
+```text
+name
+description
+arguments / schema
+metadata
+```
 
-Examples:
+Example:
 
 ```text
 open_app
 close_app
-focus_app
-open_folder
 open_file
+open_folder
 open_url
 clipboard
 system_info
 web_search
 get_weather
 window_control
-current_date_time
-end_session
 ```
 
-Each tool mainly has:
-
-### `manifest`
-Tells Qwen:
-
-> “I am this tool. Here is what I do and what arguments I need.”
-
-### `handle`
-Runs when the tool is selected.
-
-Usually:
+Both Voice and Eve use these definitions.
 
 ```text
-handle()
-   ↓
-port.someAction()
+                 🧩 capabilities.ts
+                        │
+               ┌────────┴────────┐
+               ↓                 ↓
+         🎤 Voice specs      🧠 Eve adapters
+               │                 │
+               └────────┬────────┘
+                        ↓
+                 Shared dispatch
 ```
 
-So the tool does not contain all OS-specific code.
+This prevents duplicated capability definitions from drifting apart.
 
 ---
 
-### `registry.ts`
+# 🚦 `packages/contracts/src/dispatch.ts`
 
-The **tool manager**.
+Shared capability execution.
 
-It:
-- stores tools
-- gives Qwen the tool definitions
-- checks arguments
-- finds the requested tool
-- runs the tool
-- handles timeout/errors
+Main function:
+
+```text
+executeDeviceTool(ports, tool, args)
+```
+
+The dispatch layer connects a capability to the platform ports.
+
+```text
+⚡ Voice ───────┐
+               ├──→ executeDeviceTool()
+🧠 Eve ────────┘
+                      ↓
+                 Platform ports
+                      ↓
+                    💻 OS
+```
+
+This is the important shared boundary.
+
+---
+
+# 🎤 `packages/contracts/src/functions.ts`
+
+Realtime model-facing capability specifications.
+
+These are **derived from `capabilities.ts`**.
+
+Used by:
+
+```text
+⚡ Realtime voice
+🧪 Eval
+```
+
+There should not be a separate manually maintained copy of the capability
+schema here.
 
 Think:
 
-> **“Qwen asked for this tool. Do we have it? Are the arguments okay? Run it.”**
+> **"Convert Starfire's canonical capabilities into the format the realtime model needs."**
 
-### `defaults.ts`
+---
 
-Creates the default Starfire registry with all current tools.
+# 💪 `packages/contracts/src/agent.ts`
 
-### `validate.ts`
+Defines Starfire's platform contracts and ports.
 
-Checks tool arguments.
+Examples:
+
+```text
+AgentPorts
+AppPort
+FilePort
+UrlPort
+ClipboardPort
+SystemPort
+WebPort
+WeatherPort
+WindowPort
+```
+
+These describe **what the platform can provide** without tying the agent
+logic to Linux-specific code.
+
+Think:
+
+> **"The interface between capabilities and the real platform."**
+
+---
+
+# 🔗 Capability Flow
+
+A capability should follow this shape:
+
+```text
+🧠 Model
+   ↓
+🧩 Capability
+   ↓
+🚦 Shared dispatch
+   ↓
+💪 Port
+   ↓
+🔐 Electron implementation
+   ↓
+💻 Operating System
+```
 
 Example:
 
 ```text
-app must be a string ✅
-missing app ❌
+open_app
+   ↓
+executeDeviceTool()
+   ↓
+ports.apps.open()
+   ↓
+electron-ports.ts
+   ↓
+Linux
+   ↓
+Discord opens
 ```
-
-### `policy.ts`
-
-Safety policy definitions.
-
-Defines ideas like:
-
-```text
-low
-medium
-high
-critical
-```
-
-and confirmation requirements.
-
-> ⚠️ **Current note:** policy metadata exists, but the registry does not fully enforce it yet.
 
 ---
 
 # 🧪 `eval`
 
-Starfire's testing laboratory.
+Starfire's **testing laboratory**.
 
-It uses real Qwen + real tool definitions + fake computer state.
+It tests real model behavior using controlled computer state.
 
-Main pieces:
+```text
+Test case
+   ↓
+⚡ Voice / 🧠 Eve
+   ↓
+Canonical capabilities
+   ↓
+Shared dispatch
+   ↓
+Mock / controlled platform
+   ↓
+Result
+   ↓
+Grade
+```
 
-### `dataset/`
+---
+
+# `eval/dataset/`
+
 Test cases.
 
 Example:
 
-> “Open Discord”
+> "Open Discord"
 
 Expected:
 
@@ -414,42 +746,74 @@ open_app
 app = Discord
 ```
 
-### `driver.ts`
-Talks to the realtime model.
+---
 
-### `runner.ts`
-Runs many test cases.
+# `eval/driver.ts`
 
-### `grade.ts`
+Connects the evaluation system to the realtime model.
+
+---
+
+# `eval/runner.ts`
+
+Runs test cases.
+
+---
+
+# `eval/grade.ts`
+
 Checks whether the result is correct.
 
-Checks things like:
-- right tool
-- right arguments
-- safety
-- state
-- task completion
-- response quality
+Can check:
 
-### `mock/`
-Fake computer.
+```text
+🎯 Capability selection
+🧩 Arguments
+🛡️ Safety
+💻 State changes
+✅ Task completion
+💬 Response quality
+```
 
-Lets Starfire test actions without actually damaging/touching the real machine.
+---
 
-### `provider.ts`
-Provider/model configuration.
+# `eval/mock/`
 
-### `quota.ts`
+Fake computer state.
+
+Lets Starfire test capability behavior without touching the real machine.
+
+---
+
+# `eval/provider.ts`
+
+Model/provider configuration for evaluation.
+
+---
+
+# `eval/quota.ts`
+
 Protects API usage and budget.
 
-### `report.ts`
-Builds the final scorecard.
+---
 
-### `render.ts` / `html.ts`
-Creates human-friendly reports/UI.
+# `eval/report.ts`
 
-### `cli.ts`
-Commands like:
+Builds the final evaluation scorecard.
+
+---
+
+# `eval/render.ts` / `eval/html.ts`
+
+Creates human-readable reports.
+
+---
+
+# `eval/cli.ts`
+
+Evaluation commands.
+
+Examples:
 
 ```bash
 pnpm eval
@@ -457,113 +821,401 @@ pnpm eval:case C017
 pnpm eval:selftest
 ```
 
-### `starfire.ts`
-Connects the evaluation system to Starfire's tool setup.
+---
 
-### `types.ts`
-Shared evaluation types.
+# `eval/starfire.ts`
+
+Connects the evaluation system to Starfire's canonical capabilities and
+shared execution layer.
+
+---
+
+# `eval/types.ts`
+
+Shared evaluation-specific TypeScript types.
 
 ---
 
 # 📚 `docs`
 
-Architecture and learning notes.
+Documentation about the project.
 
 Use this folder for:
 
-- architecture
-- decisions
-- how things work
-- future plans
-- security notes
+```text
+🏗️ Architecture
+🧠 Design decisions
+🔐 Security
+📖 How things work
+🗺️ Future plans
+```
 
-This file is the **quick codebase map**.
+Important files include:
+
+```text
+docs/architecture.md
+docs/codebase.md
+```
+
+This file is the **quick map of where the code lives**.
 
 ---
 
 # 🌐 `public`
 
-Static assets used by the desktop app.
+Static assets used by the desktop application.
 
 ---
 
-# 🔗 How Everything Connects
+# 🔄 Simple Request: Basic Task
 
 Example:
 
-> **“Open Discord.”**
+> **"Open Discord."**
 
 ```text
 👤 User
- ↓
+   ↓
 🎤 Microphone
- ↓
-🧠 Qwen
- ↓
-"open_app"
-{ app: "Discord" }
- ↓
-🧰 Registry
- ↓
-🔧 open_app.handle()
- ↓
-🖐️ ports.apps.open("Discord")
- ↓
-⚡ electron-ports.ts
- ↓
-🐧 Linux
- ↓
-🎮 Discord opens
- ↓
-↩️ Result
- ↓
-🧠 Qwen
- ↓
-🗣️ “Opening Discord.”
+   ↓
+⚡ Realtime Voice Model
+   ↓
+⭐ Starfire
+   ↓
+open_app()
+   ↓
+🧩 Canonical Capability
+   ↓
+🚦 executeDeviceTool()
+   ↓
+💪 Electron Port
+   ↓
+💻 Linux
+   ↓
+Discord opens
+   ↓
+✅ Result
+   ↓
+⚡ Realtime Voice
+   ↓
+🗣️ "Discord is open."
 ```
 
 ---
 
-# 🧠 The 6 Things To Remember
+# 🔄 Complex Request: Background Task
+
+Example:
+
+> **"Research the best AI companies for me and make a shortlist."**
 
 ```text
-1. React       = Starfire's face
-2. Electron    = trusted computer access
-3. Qwen        = brain / decision maker
-4. Registry    = tool manager
-5. Tool        = what Starfire wants to do
-6. Port        = how it actually does it
-7. Eval        = proves it works
+👤 User
+   ↓
+🎤 Voice
+   ↓
+⭐ Starfire
+   ↓
+delegate_task()
+   ↓
+🧠 Eve
+   ↓
+Skills + Tools + Models
+   ↓
+Research / Browse / Think
+   ↓
+📊 Task Progress
+   ↓
+✅ Result
+   ↓
+⭐ Starfire
+   ↓
+🎤 Explains result to user
 ```
 
-### One sentence
+If Eve needs user input:
 
-> **Starfire is a voice AI brain connected to real computer actions through tools and ports, with Electron providing trusted access and Eval checking that the whole system behaves correctly.** 🔥
+```text
+🧠 Eve
+   ↓
+Needs user input
+   ↓
+⭐ Starfire
+   ↓
+asks user
+   ↓
+👤 User answers
+   ↓
+🧠 Eve continues
+```
+
+The user never needs to talk directly to Eve.
 
 ---
 
-# 🚀 Future
+# 🧠 Memory + Context — Future
 
-The architecture is designed to grow toward:
+Memory and context are Starfire services, not Eve-only features.
+
+Future structure:
 
 ```text
-Memory
-   ↓
-MCP
-   ↓
-Vision
-   ↓
-Better planning
-   ↓
-Multi-step tasks
-   ↓
-Background agents
-   ↓
-Personalization
-   ↓
-🤖 JARVIS-like Starfire
+                 ⭐ STARFIRE
+                      │
+            ┌─────────┴─────────┐
+            ↓                   ↓
+         🧠 Memory          🧩 Context
+            │                   │
+            └─────────┬─────────┘
+                      ↓
+             ┌────────┴────────┐
+             ↓                 ↓
+          ⚡ Voice            🧠 Eve
 ```
 
-The important rule:
+One shared memory source should be used by both execution paths.
 
-> **Add new capabilities without turning the whole system into one giant file.**
+This keeps Starfire's knowledge about the user consistent.
+
+---
+
+# 👀 Screen Awareness — Future
+
+Screen awareness becomes another shared Starfire capability.
+
+```text
+👀 Screen Awareness
+        ↓
+🧩 Starfire capability
+        ↓
+   ┌────┴─────┐
+   ↓          ↓
+ Voice       Eve
+```
+
+Small questions can be handled by Voice.
+
+Large screen-based tasks can be delegated to Eve.
+
+---
+
+# 🖐️ Computer Use — Future
+
+Computer use follows the same capability architecture.
+
+```text
+🖐️ Computer Use
+       ↓
+🧩 Starfire capability
+       ↓
+💪 Platform layer
+       ↓
+💻 Operating System
+```
+
+Both Voice and Eve can use the same computer capabilities.
+
+---
+
+# 🧠 Skills — Future
+
+Skills describe **how an agent should perform a type of work**.
+
+```text
+Tool
+ ↓
+What the agent CAN do
+
+Skill
+ ↓
+How the agent SHOULD do a type of work
+```
+
+Example:
+
+```text
+Research task
+      ↓
+Research skill
+      ↓
+Browser + search + tools
+      ↓
+Better result
+```
+
+Skills are agent knowledge/procedure.
+
+Capabilities are Starfire's actual powers.
+
+---
+
+# 🔐 Safety
+
+Starfire should never give the model unrestricted access to the computer.
+
+Instead:
+
+```text
+🧠 Model
+   ↓
+🧩 Explicit capability
+   ↓
+🔐 Permission / policy
+   ↓
+💪 Platform
+   ↓
+💻 Computer
+```
+
+Examples:
+
+```text
+✅ Open application
+✅ Open file
+✅ Read clipboard
+
+⚠️ Delete important files
+⚠️ Send messages
+⚠️ Make purchases
+⚠️ Change sensitive system settings
+```
+
+Sensitive operations can later require confirmation or stronger permissions.
+
+---
+
+# 🧠 The 7 Things To Remember
+
+```text
+1. ⭐ Starfire
+   The product and the user-facing companion.
+
+2. ⚡ Realtime Voice
+   The fast path for conversation and immediate actions.
+
+3. 🧠 Eve
+   The background worker for complex / long-running work.
+
+4. 🧩 Capability
+   What Starfire can do.
+
+5. 💪 Port
+   The interface used to perform that capability on a platform.
+
+6. 🔐 Electron
+   The trusted desktop process that provides privileged access.
+
+7. 🧪 Eval
+   Tests whether the whole system actually works.
+```
+
+---
+
+# 🚀 The Core Architecture
+
+```text
+                         ⭐ STARFIRE
+                              │
+              ┌───────────────┴───────────────┐
+              ↓                               ↓
+        ⚡ Realtime                       🧠 Eve
+         Companion                        Worker
+              │                               │
+              └───────────────┬───────────────┘
+                              ↓
+                     🧩 Shared Capabilities
+                              ↓
+                       🚦 Shared Dispatch
+                              ↓
+                          💪 Ports
+                              ↓
+                         🔐 Electron
+                              ↓
+                      💻 Operating System
+```
+
+---
+
+# 🌌 The Future
+
+Starfire grows by adding capabilities and services **on top of the same
+foundation**:
+
+```text
+V1.0  🏗️ Foundation
+        ↓
+V1.1  🧠 Memory
+        ↓
+V1.2  🧩 Context Engine
+        ↓
+V1.3  👀 Screen Awareness
+        ↓
+V1.4  🖐️ Computer Use
+        ↓
+V1.5  ⏰ Tasks + Reminders
+        ↓
+V1.6  🤖 Proactive Agent
+        ↓
+V1.7  ❤️ Personality + Continuity
+        ↓
+V1.8  🏠 Local LLM + Model Router
+        ↓
+V1.9  🧪 Massive Eval
+        ↓
+V1.10 ✨ JARVIS Polish
+```
+
+The architecture should remain simple as these features are added.
+
+---
+
+# 🌌 Final Mental Model
+
+```text
+⭐ Starfire
+    = companion + coordinator
+
+⚡ Voice
+    = fast path
+
+🧠 Eve
+    = background worker
+
+🧩 Capabilities
+    = Starfire's powers
+
+💪 Ports
+    = platform interface
+
+🔐 Electron
+    = trusted computer access
+
+🧠 Memory
+    = what Starfire remembers
+
+🧩 Context
+    = what Starfire needs right now
+
+🧪 Eval
+    = proof that Starfire works
+```
+
+> **🌌 Starfire is the companion.**
+>
+> **🧠 Eve is the worker.**
+>
+> **🛠️ Capabilities are the hands.**
+>
+> **💪 Ports connect those hands to the platform.**
+>
+> **🔐 Electron protects the computer boundary.**
+>
+> **🧪 Eval makes sure the whole thing actually works.**
+
+---
+
+# 🔥 One Sentence
+
+> **Starfire is a personal AI companion with a fast realtime voice path,
+> a deep background worker powered by Eve, and one shared capability layer
+> that safely connects both to the real computer.**

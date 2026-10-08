@@ -14,13 +14,10 @@ import type {
   WindowAction,
   WindowControlResult,
 } from "@starfire/contracts";
-
-import { ToolError } from "@starfire/tools";
 import { clipboard, shell } from "electron";
-
 import { createExaSearchAdapter } from "./exa-search.js";
-
 import { createKwinWindowController } from "./kwin-windows.js";
+import { ToolError } from "./tool-error.js";
 
 /*
  * ---------------------------------------------------
