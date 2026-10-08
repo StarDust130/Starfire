@@ -1,300 +1,414 @@
 # 🌌 Starfire Architecture
 
-> **A realtime voice AI companion that can understand you, talk with you, and safely perform desktop actions.**
-
-Starfire is built as a small modular system:
-
-```text
-🎤 You
-  │
-  ▼
-⭐ Starfire
-  │
-  ▼
-☁️ Eve Agent            (agent/ — agent runtime, tool discovery, tool calling)
-  │
-  ▼
-🔧 Eve Tool             (agent/tools/ — one file per capability)
-  │
-  ▼
-🌐 Starfire platform    (device bridge dispatch → Electron ports)
-  │
-  ▼
-💻 Electron / Linux
-  │
-  ▼
-✅ Result
-  │
-  ▼
-🎀 Starfire speaks
-```
+> **Starfire is not just a chatbot.**
+>
+> It is a personal AI companion that talks with you, understands your context,
+> remembers what matters, safely controls your computer, and can delegate
+> complex work to a background agent.
 
 ---
 
-## 🏗️ Project Structure
+# 🧠 The Big Idea
+
+Starfire has **one user experience** with two execution paths:
+
+```text
+                         ⭐ STARFIRE
+                              │
+                 ┌────────────┴────────────┐
+                 │                         │
+            ⚡ FAST PATH               🧠 DEEP PATH
+            Realtime Voice               Eve Worker
+                 │                         │
+          talk + basic work          complex/background work
+                 │                         │
+                 └────────────┬────────────┘
+                              │
+                   🧩 Shared Capabilities
+                              │
+                    💻 Starfire Platform
+                              │
+                   ┌──────────┴──────────┐
+                   │                     │
+                 Linux                Future:
+                                  Windows / macOS
+```
+
+### Starfire is the product.
+
+### Eve is the worker.
+
+The user talks to **Starfire**, not Eve.
+
+Starfire can handle simple work itself and can delegate larger,
+multi-step, or background work to Eve.
+
+There is no separate classifier just to decide whether a task is big or small.
+The main Starfire voice agent can decide when to use its `delegate_task`
+capability.
+
+---
+
+# 🏗️ Project Structure
 
 ```text
 Starfire/
 │
-├── agent/                ☁️ Eve agent definition + tools
-│   ├── agent.ts          ⚙️ Model config (defineAgent)
-│   ├── instructions.md   💬 Starfire personality
-│   ├── lib/              🌉 Device bridge client
-│   └── tools/            🔧 One Eve tool per file
+├── agent/                         🧠 Eve worker
+│   ├── agent.ts                   Eve agent definition
+│   ├── instructions.md            Worker instructions
+│   ├── lib/                       Starfire capability client
+│   └── tools/                     Thin Eve capability adapters
 │
 ├── apps/
-│   └── desktop/          🖥️ Desktop app
-│       ├── src/          🎨 React UI + voice UI
-│       └── electron/     🔐 Trusted desktop layer (ports, device bridge, voice)
+│   └── desktop/
+│       ├── src/                   🎨 React + voice UI
+│       └── electron/
+│           ├── main.ts            🔐 Trusted desktop process
+│           ├── deviceBridge.ts   Shared capability dispatch
+│           ├── realtimeVoice.ts  ⚡ Realtime voice path
+│           └── agent/             Electron platform ports
 │
 ├── packages/
-│   └── contracts/        📜 Shared platform types + function specs
+│   └── contracts/
+│       └── src/
+│           ├── capabilities.ts    📜 Canonical capabilities
+│           ├── functions.ts       🎤 Voice-facing specs
+│           ├── dispatch.ts        🛠️ Shared execution
+│           └── agent.ts           💪 Platform contracts / ports
 │
-├── eval/                 🧪 Agent evaluation
+├── eval/                          🧪 Evaluation
 │
-├── docs/                 📚 Architecture + project docs
+├── docs/                          📚 Documentation
 │
-└── public/               🖼️ Images + assets
+└── public/                        🖼️ Assets
 ```
 
 ---
 
-# ☁️ 0. Eve Agent
+# ⭐ 0. Starfire Core
+
+Starfire is the **main companion and coordinator**.
+
+It is responsible for:
+
+```text
+🎤 Conversation
+🧠 Understanding the user
+❤️ Personality
+🧠 Memory
+🧩 Context
+🛠️ Basic actions
+🤝 Delegating complex work
+📊 Task status
+```
+
+The long-term goal is for Starfire to understand the user's goals,
+preferences, work, habits, and context and become increasingly useful
+over time.
+
+---
+
+# ⚡ 1. Realtime Voice Path
+
+### `apps/desktop/electron/realtimeVoice.ts`
+
+This is Starfire's **fast path**.
+
+It is optimized for low-latency conversation and immediate actions.
+
+```text
+🎤 User speaks
+      ↓
+⚡ Realtime voice model
+      ↓
+🧠 Starfire
+      ↓
+┌──────────────────────────────────┐
+│                                  │
+│  Talk normally                   │
+│  Use a basic capability          │
+│  Delegate complex work to Eve   │
+│                                  │
+└──────────────────────────────────┘
+```
+
+Example:
+
+```text
+"Open Discord"
+      ↓
+open_app()
+      ↓
+Discord opens
+```
+
+For a complex request:
+
+```text
+"Research the best AI startups
+hiring interns and compare them."
+      ↓
+delegate_task()
+      ↓
+🧠 Eve
+```
+
+The realtime path does **not** need to run through Eve.
+
+This keeps normal conversation and simple actions fast.
+
+---
+
+# 🧠 2. Eve — Background Worker
 
 ### `agent/`
 
-Eve (Vercel's agent framework) is Starfire's **agent runtime** — V1.0 foundation.
+Eve is Starfire's **background agent runtime**.
+
+Eve handles work such as:
 
 ```text
-agent/agent.ts           defineAgent({ model, reasoning })
-agent/instructions.md    Starfire's personality + behavior rules
-agent/tools/*.ts         one defineTool per file — Eve discovers them
-agent/lib/desktop.ts     calls Starfire's device bridge over HTTP
+🔎 Deep research
+🌐 Multi-step browsing
+📚 Large information gathering
+💻 Complex workflows
+🔁 Long-running tasks
+🤖 Subagents
 ```
 
-There is **no custom AgentRunner, no ToolRegistry, no custom agent loop** —
-Eve owns tool discovery, validation, and execution. Starfire keeps the
-desktop capabilities and the personality.
+The user does not directly interact with Eve.
+
+Instead:
+
+```text
+⭐ Starfire
+      │
+      │ delegate_task()
+      ↓
+🧠 Eve
+      │
+      ├── works
+      ├── reports progress
+      ├── asks for help when needed
+      └── returns result
+      ↓
+⭐ Starfire
+      ↓
+🎤 Talks to the user
+```
+
+Eve can use different models depending on the task, including local
+models when they are capable enough.
 
 ---
 
-# 🎨 1. Desktop UI
+# 🤝 3. Task Delegation
 
-### `apps/desktop/src`
-
-This is Starfire's **face and voice interface**.
+Starfire can expose a capability such as:
 
 ```text
-🎀 React UI
-🎭 Three.js / VRM character
-🎤 Microphone
-👂 Wake word
-🔊 Audio playback
-🔄 Voice session state
+delegate_task()
 ```
 
-The UI handles how Starfire **looks, listens, speaks, and reacts**.
+A delegated task becomes a real background task.
 
-It does not directly control Linux.
+Example:
+
+```text
+User
+ ↓
+"Research 20 companies and make a shortlist."
+ ↓
+⭐ Starfire
+ ↓
+delegate_task()
+ ↓
+🧠 Eve
+```
+
+Tasks can eventually have states such as:
+
+```text
+queued
+running
+waiting_for_user
+paused
+completed
+failed
+cancelled
+```
+
+Starfire can then answer:
+
+```text
+"What is Eve doing?"
+"What is the task status?"
+"Stop that task."
+"Continue that task."
+```
+
+Eve can also request user input:
+
+```text
+🧠 Eve
+   ↓
+needs user input
+   ↓
+⭐ Starfire
+   ↓
+asks user
+   ↓
+user answers
+   ↓
+Eve continues
+```
+
+The user always interacts with Starfire.
 
 ---
 
-# 🔐 2. Electron
+# 🧩 4. Shared Capability Layer
 
-### `apps/desktop/electron`
+Starfire's actions are **capabilities**, not Eve-only tools.
 
-Electron is the **trusted side** of Starfire.
-
-It handles:
+Both execution paths use the same capability layer:
 
 ```text
-🔑 API secrets
-💻 OS access
-🪟 Desktop windows
-📂 Files
-📋 Clipboard
-🌐 External websites
-🔌 WebSocket connection
+⚡ Voice ───────┐
+               ├──→ 🧩 Starfire Capabilities
+🧠 Eve ────────┘
+                         ↓
+                  💻 Platform Layer
+                         ↓
+                       Linux
 ```
-
-The React renderer communicates with Electron through a small **IPC bridge**.
-
-```text
-React
-  │
-  │ safe IPC
-  ▼
-Electron
-  │
-  ▼
-Operating System
-```
-
-This keeps privileged operations away from the UI.
-
----
-
-# 🧠 3. Realtime Voice Bridge
-
-### `realtimeVoice.ts`
-
-This is the main connection between the **voice model and Starfire's agent system**.
-
-It:
-
-```text
-🎤 sends audio
-⬇️
-🧠 receives Qwen events
-⬇️
-🛠️ receives tool calls
-⬇️
-🚦 executes tools
-⬇️
-📤 sends tool results back
-⬇️
-🔊 returns Starfire's voice
-```
-
-The realtime model is:
-
-```text
-qwen3-8-omni-flash-realtime
-```
-
----
-
-# 🚦 4. Agent Runtime (Eve)
-
-The agent runtime is **Eve** — see section 0. There is no Starfire-owned
-runner, registry, or validation layer anymore.
-
-When the realtime voice model produces function calls, the Electron main
-process executes them through the shared Starfire capability dispatch
-(`executeDeviceTool` in `packages/contracts/src/dispatch.ts`) — the same
-execution layer Eve tools reach over the device bridge HTTP boundary.
-
----
-
-# 📜 5. Contracts
-
-### `packages/contracts`
-
-Contracts define the **shared language of Starfire**.
 
 Examples:
 
 ```text
-ToolCall
-ToolResult
-ToolManifest
-ToolParameter
-AgentPorts
-AppPort
-FilePort
-WindowPort
+open_app
+close_app
+focus_app
+
+open_file
+open_folder
+open_url
+
+clipboard_read
+clipboard_write
+
+system_info
+web_search
+get_weather
+
+window_control
 ```
 
-They make sure every part agrees on the same shapes.
+Voice and Eve may choose different capabilities,
+but the actual computer operation is shared.
 
-```text
-UI
- │
-Core
- │
-Tools
- │
-Electron
- │
-Eval
-```
-
-Everyone speaks the same TypeScript language.
+This makes future operating-system support much easier.
 
 ---
 
-# 🧰 6. Tools
+# 📜 5. One Canonical Capability Definition
+
+Every Starfire capability has **one source of truth**.
+
+### `packages/contracts/src/capabilities.ts`
+
+A capability defines:
+
+```text
+name
+description
+arguments / schema
+metadata
+```
+
+Different parts of Starfire consume the same definition:
+
+```text
+                 🧩 capabilities.ts
+                        │
+               ┌────────┴────────┐
+               ↓                 ↓
+         🎤 Voice specs      🧠 Eve adapters
+               │                 │
+               └────────┬────────┘
+                        ↓
+                 Shared dispatch
+```
+
+This prevents duplicated tool definitions from drifting apart.
+
+There is no manual central tool registry.
+
+---
+
+# 🛠️ 6. Eve Tools
 
 ### `agent/tools/`
 
-Tools are the things Starfire can actually **do**.
+Each Eve tool is a **thin adapter** around a Starfire capability.
 
-Current tools (one Eve tool per file):
-
-```text
-🖥️ open_app
-🛑 close_app
-🎯 focus_app
-
-📂 open_folder
-📄 open_file
-🌐 open_url
-
-📋 clipboard
-💻 system_info
-
-🔎 web_search
-🌦️ get_weather
-
-🪟 window_control
-🕐 current_date_time
-
-👋 end_session
-```
-
-Each tool file:
+Example:
 
 ```text
-📜 description + zod input schema
-   ↓
-What the model should know
-
-⚙️ execute()
-   ↓
-What the tool actually does — a thin call into
-Starfire's platform layer (agent/lib/desktop.ts
-→ device bridge → Electron ports)
+agent/tools/open_app.ts
 ```
 
-Eve discovers tools from the filesystem: a tool at
-`agent/tools/open_app.ts` is `open_app`. There is no central tool
-index, registry, or manual registration.
+Its job is mainly:
+
+```text
+🧠 Eve
+   ↓
+open_app capability
+   ↓
+Starfire shared dispatch
+```
+
+The actual operating-system implementation does not belong inside
+the Eve tool.
+
+This keeps Eve replaceable.
 
 ---
 
-# 🗃️ 7. Tool Execution
+# 🚦 7. Shared Dispatch
 
-Tool discovery, argument validation, and execution are **Eve's job**
-(section 0). The old registry/validation files were removed in the
-V1.0 migration.
+### `packages/contracts/src/dispatch.ts`
 
-The ONE canonical definition of every Starfire capability (name,
-description, arguments/schema, metadata) lives in
-`packages/contracts/src/capabilities.ts`. From it:
+`executeDeviceTool()` is the shared execution boundary.
 
-- `functions.ts` derives the model-facing specs
-  (`STARFIRE_FUNCTION_SPECS`) for the realtime voice session and the
-  eval driver.
-- `dispatch.ts` provides the shared execution layer
-  (`executeDeviceTool`) that voice, Eve (via the device bridge), and
-  eval all route through.
-- Each Eve tool in `agent/tools/` is a thin adapter that takes its
-  description + input schema from the canonical definition.
+```text
+⚡ Voice ───────┐
+               │
+               ├──→ executeDeviceTool()
+               │
+🧠 Eve ────────┘
+                     ↓
+               Starfire Platform
+```
+
+The dispatch layer maps a capability to the correct platform operation.
 
 ---
 
-# 💪 8. Ports
+# 💪 8. Platform Ports
 
-Starfire separates **tool logic** from **real OS actions**.
+Starfire separates **what a capability means**
+from **how the operating system performs it**.
 
 ```text
-Tool
- ↓
+Capability
+    ↓
 Port
- ↓
-Electron implementation
- ↓
-Linux
+    ↓
+Platform implementation
+    ↓
+Operating System
 ```
 
 Example:
@@ -304,174 +418,530 @@ open_app
    ↓
 ports.apps.open()
    ↓
-electron-ports.ts
+Electron platform implementation
    ↓
-Linux process
+Linux
    ↓
 Discord opens
 ```
 
-This makes tools easier to:
+Later the same capability can have different platform implementations:
 
 ```text
-🧪 test
-🔄 replace
-🧩 extend
+open_app
+   ↓
+┌──────────────┬──────────────┬──────────────┐
+│              │              │
+Linux        Windows        macOS
 ```
 
-The evaluator uses the same tools with a **MockOS** instead of touching the real computer.
+Voice and Eve do not need to know which operating system is underneath.
 
 ---
 
-# 🧪 9. Evaluation
+# 🔐 9. Electron — Trusted Desktop Layer
+
+### `apps/desktop/electron/`
+
+Electron is the trusted side of Starfire.
+
+It handles privileged operations such as:
+
+```text
+💻 OS access
+📂 Files
+📋 Clipboard
+🪟 Windows
+🌐 External apps / URLs
+🔑 Secrets
+🔌 Local bridges
+```
+
+The React renderer does not directly control the operating system.
+
+```text
+React UI
+   ↓
+safe IPC
+   ↓
+Electron
+   ↓
+Operating System
+```
+
+This keeps privileged operations away from the UI.
+
+---
+
+# 🎨 10. Desktop UI
+
+### `apps/desktop/src/`
+
+This is Starfire's face.
+
+It handles:
+
+```text
+🎀 Character / UI
+🎤 Microphone
+👂 Wake word
+🔊 Audio
+🎭 Visual state
+🔄 Conversation state
+```
+
+The UI focuses on the experience rather than privileged OS operations.
+
+---
+
+# 🧠 11. Memory + Context
+
+Memory is a **Starfire service**, not an Eve-only feature.
+
+Future architecture:
+
+```text
+                 ⭐ STARFIRE
+                      │
+            ┌─────────┴─────────┐
+            ↓                   ↓
+         🧠 Memory          🧩 Context
+            │                   │
+            └─────────┬─────────┘
+                      ↓
+             ┌────────┴────────┐
+             ↓                 ↓
+          ⚡ Voice            🧠 Eve
+```
+
+There is one shared memory source.
+
+Both Voice and Eve can use the same Starfire memory.
+
+Example:
+
+```text
+User:
+"I want to become an AI engineer."
+
+        ↓
+
+🧠 Starfire Memory
+
+        ↓
+
+Later:
+
+"Find me AI internships."
+
+        ↓
+
+⭐ Starfire understands the goal
+
+        ↓
+
+delegate_task()
+
+        ↓
+
+🧠 Eve
+```
+
+The Context Engine decides which memory, recent conversation,
+current task, screen state, goals, and other information are relevant
+for the current request.
+
+---
+
+# 👀 12. Screen Awareness
+
+Screen awareness is a **shared Starfire capability**.
+
+```text
+👀 Screen Awareness
+        ↓
+Shared capability
+        ↓
+   ┌────┴─────┐
+   ↓          ↓
+ Voice       Eve
+```
+
+Simple requests can use it directly.
+
+Large screen-based tasks can be delegated to Eve.
+
+Example:
+
+```text
+"What am I looking at?"
+        ↓
+⚡ Starfire
+        ↓
+👀 Screen
+```
+
+Versus:
+
+```text
+"Go through these 30 pages and collect the important information."
+        ↓
+⭐ Starfire
+        ↓
+🧠 Eve
+```
+
+---
+
+# 🖐️ 13. Computer Use
+
+Computer use follows the same architecture.
+
+```text
+🖐️ Computer Use
+       ↓
+Starfire capability
+       ↓
+Platform layer
+       ↓
+Operating System
+```
+
+Both Voice and Eve can use it.
+
+The difference is the amount and complexity of work.
+
+```text
+Small action
+   ↓
+⚡ Starfire
+
+Large multi-step task
+   ↓
+🧠 Eve
+```
+
+---
+
+# 🧠 14. Skills
+
+Skills describe **how an agent should perform a type of work**.
+
+```text
+Tool
+ ↓
+What the agent CAN do
+
+Skill
+ ↓
+How the agent SHOULD do a type of work
+```
+
+Example:
+
+```text
+Research task
+      ↓
+Research skill
+      ↓
+Browser + search + tools
+      ↓
+Better result
+```
+
+Skills stay separate from Starfire's core computer capabilities.
+
+They can be added or removed without changing the platform layer.
+
+---
+
+# 🧪 15. Evaluation
 
 ### `eval/`
 
-Starfire has its own evaluation system for testing real model behavior.
+Evaluation tests real Starfire behavior.
 
 ```text
 Test case
    ↓
-Real Qwen model
+⚡ Realtime Voice / 🧠 Eve
    ↓
-Real tool definitions
+Canonical capabilities
    ↓
-Real Registry
+Shared dispatch
    ↓
-MockOS
+Mock / controlled platform
    ↓
-Grade result
+Result
+   ↓
+Grade
 ```
 
-It checks things like:
+Important areas include:
 
 ```text
-🎯 Tool selection
+🎯 Capability selection
 🧩 Arguments
-✅ State changes
+✅ Result correctness
 🛡️ Safety
 🔄 Reliability
-💬 Response quality
+🤝 Delegation
 ⚡ Latency
 🪙 Token usage
 ```
 
-It also checks the architecture itself for issues such as:
-
-```text
-⚠️ stale configuration
-🧩 tool mismatches
-```
+The evaluator should eventually test both the fast path and the deep path.
 
 ---
 
-# 🔐 10. Safety
+# 🔐 16. Safety Boundary
 
-Starfire does **not** give the model unrestricted shell access.
+Starfire should never give a model unrestricted access to the computer.
 
 Instead:
 
 ```text
 🧠 Model
    ↓
-🧰 Explicit tools
+🧩 Explicit capability
    ↓
-💻 Controlled OS operations
+🔐 Policy / permission
+   ↓
+💻 Controlled platform action
 ```
 
-Danger/risk policy is **Eve's approval system** (not configured in
-V1.0 — the platform layer keeps its own denylist and home-folder
-restrictions).
+The model requests a capability.
+
+The platform controls how that capability is executed.
+
+Sensitive operations can later require confirmation or stronger permissions.
+
+Examples:
+
+```text
+✅ Open application
+✅ Read screen
+✅ Open file
+
+⚠️ Delete important files
+⚠️ Send messages
+⚠️ Make purchases
+⚠️ Change sensitive system settings
+```
 
 ---
 
-# 🔄 Complete Request Flow
+# 🔄 17. Simple Request Flow
 
 When you say:
 
 > **"Open Discord."**
 
-Starfire does:
-
 ```text
 🎤 Microphone
       ↓
-🎧 Voice Controller
+⚡ Realtime Voice Model
       ↓
-🔐 Electron
+⭐ Starfire
       ↓
-🌐 Realtime WebSocket
+open_app()
       ↓
-🧠 Qwen
+🧩 Shared Capability
       ↓
-"open_app(discord)"
+executeDeviceTool()
       ↓
-🔧 Eve Tool / platform dispatch
+💪 Electron Port
       ↓
-🛠️ open_app
+💻 Linux
       ↓
-💻 Electron Port
+Discord opens
       ↓
-🖥️ Discord opens
+✅ Result
       ↓
-✅ Tool result
-      ↓
-🧠 Qwen
+⭐ Starfire
       ↓
 🔊 "Discord is open."
 ```
 
-(The same dispatch is used by the Eve agent path — see section 0.)
-
 ---
 
-# 🧠 The Core Idea
+# 🔄 18. Complex Request Flow
 
-Starfire is built around one simple separation:
+When you say:
+
+> **"Research the best AI companies for me and make a shortlist."**
 
 ```text
-🧠 Model
-    decides WHAT to do
+🎤 User
+   ↓
+⭐ Starfire
+   ↓
+delegate_task()
+   ↓
+🧠 Eve
+   ↓
+Skills + Tools + Models
+   ↓
+Research / Browse / Think
+   ↓
+Task Progress
+   ↓
+✅ Result
+   ↓
+⭐ Starfire
+   ↓
+🎤 Explains the result to the user
+```
 
-☁️ Eve
-    owns the agent runtime, tool discovery, and execution
+If Eve needs the user:
 
-🛠️ Tools
-    define WHAT Starfire can do
-
-💪 Ports
-    connect tools to the real computer
-
-🔐 Electron
-    owns privileged desktop access
-
-📜 Contracts
-    keep everything consistent
-
-🧪 Eval
-    checks whether it actually works
+```text
+🧠 Eve
+   ↓
+"Need user input"
+   ↓
+⭐ Starfire
+   ↓
+asks user
+   ↓
+User answers
+   ↓
+🧠 Eve continues
 ```
 
 ---
 
-# 🚀 Current Direction
+# 🗺️ Starfire V1 Roadmap
 
 ```text
-Voice
-  ↓
-Tool use
-  ↓
-Desktop control
-  ↓
-Better safety
-  ↓
-Better evaluation
-  ↓
-Vision
-  ↓
-Memory
-  ↓
-More capable agents
+V1.0   🏗️ Foundation
+          ↓
+V1.1   🧠 Memory
+          ↓
+V1.2   🧩 Context Engine
+          ↓
+V1.3   👀 Screen Awareness
+          ↓
+V1.4   🖐️ Computer Use
+          ↓
+V1.5   ⏰ Tasks + Reminders
+          ↓
+V1.6   🤖 Proactive Agent
+          ↓
+V1.7   ❤️ Personality + Continuity
+          ↓
+V1.8   🏠 Local LLM + Model Router
+          ↓
+V1.9   🧪 Massive Evaluation
+          ↓
+V1.10  ✨ JARVIS Polish
 ```
 
-> **Give Starfire capabilities — not unrestricted access to the computer.** 🌌
+All future features build on the same foundation:
+
+```text
+                         ⭐ STARFIRE
+                              │
+              ┌───────────────┴───────────────┐
+              ↓                               ↓
+        ⚡ Realtime                       🧠 Eve
+         Companion                        Worker
+              │                               │
+              └───────────────┬───────────────┘
+                              ↓
+                     🧩 Shared Services
+                              ↓
+                     🛠️ Capabilities
+                              ↓
+                      💪 Platform Layer
+                              ↓
+                     💻 Operating System
+```
+
+---
+
+# 🌌 Core Principles
+
+```text
+1. ⭐ Starfire is the product.
+
+2. 🧠 Eve is infrastructure / background worker.
+
+3. ❤️ The user talks to Starfire, never directly to Eve.
+
+4. ⚡ Fast work stays on the realtime path.
+
+5. 🧠 Complex / long-running work can be delegated to Eve.
+
+6. 🧩 Voice and Eve use the same Starfire capabilities.
+
+7. 📜 Every capability has one canonical definition.
+
+8. 💪 Platform code stays separate from agent logic.
+
+9. 🏠 Private state and memory should be local-first whenever possible.
+
+10. 🔐 Models receive explicit capabilities, not unrestricted computer access.
+
+11. 🧪 Both execution paths must be evaluated.
+
+12. 🔄 Eve is replaceable infrastructure; Starfire remains the product.
+```
+
+---
+
+# 🚀 The Vision
+
+Starfire starts as:
+
+```text
+🎤 Talk
+   ↓
+🧠 Understand
+   ↓
+🛠️ Act
+```
+
+Then grows into:
+
+```text
+                         ⭐ STARFIRE
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        │                     │                     │
+        ↓                     ↓                     ↓
+      🎤 Talk             🧠 Remember           👀 See
+        │                     │                     │
+        ↓                     ↓                     ↓
+      💡 Think             🧩 Context           🖐️ Act
+        │                     │                     │
+        └─────────────────────┼─────────────────────┘
+                              ↓
+                       🤝 Delegate
+                              ↓
+                         🧠 Eve
+                              ↓
+                       🔎 Deep Work
+                              ↓
+                       ✅ Results
+                              ↓
+                         ⭐ Starfire
+                              ↓
+                         👤 User
+```
+
+> **🌌 Starfire is not another chatbot.**
+>
+> **It is a personal intelligent system designed to understand you,
+> remember what matters, take useful action, handle boring work,
+> and help you become more effective over time.**
+>
+> **⭐ Starfire is the companion.**
+>
+> **🧠 Eve is the worker.**
+>
+> **🛠️ Capabilities are the hands.**
+>
+> **💪 The platform is the body.**
+>
+> **🧠 Memory and context make Starfire know you.**
