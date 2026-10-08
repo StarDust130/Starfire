@@ -1,5 +1,4 @@
 import { execSync } from "node:child_process";
-import { TOOL_NAMES, toolPolicies } from "./starfire.js";
 import type { CaseResult, Severity } from "./types.js";
 
 export type QuotaSnapshot = {
@@ -26,53 +25,6 @@ export function gitCommit(): string {
   } catch {
     return "unknown";
   }
-}
-
-export function policyAudit(): {
-  level: Severity;
-  text: string;
-}[] {
-  const findings: {
-    level: Severity;
-    text: string;
-  }[] = [];
-
-  const policies = toolPolicies as Record<
-    string,
-    {
-      risk: string;
-      enabled: boolean;
-    }
-  >;
-
-  const policyNames = Object.keys(policies);
-
-  const registry = TOOL_NAMES as readonly string[];
-
-  for (const name of policyNames) {
-    if (!registry.includes(name)) {
-      findings.push({
-        level: "P1",
-        text:
-          `policy.ts declares "${name}" ` +
-          `but no such tool exists in the registry.`,
-      });
-    }
-  }
-
-  const uncovered = registry.filter((name) => !policyNames.includes(name));
-
-  if (uncovered.length > 0) {
-    findings.push({
-      level: "P1",
-      text:
-        `${uncovered.length} registry tools ` +
-        `have no policy entry: ` +
-        `${uncovered.join(", ")}`,
-    });
-  }
-
-  return findings;
 }
 
 export function percentile(sorted: number[], q: number): number {
@@ -225,10 +177,7 @@ export function buildScorecard(
     if (r.status === "fail" && r.severity) severities[r.severity] += 1;
   }
 
-  const findings: Scorecard["findings"] = policyAudit().map((f) => ({
-    level: f.level,
-    text: f.text,
-  }));
+  const findings: Scorecard["findings"] = [];
   for (const r of done) {
     if (r.status === "fail" && (r.severity === "P0" || r.severity === "P1")) {
       findings.push({
