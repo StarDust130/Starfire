@@ -1,19 +1,18 @@
 import { defineTool } from "eve/tools";
-import { z } from "zod";
+
+import { getStarfireCapability } from "../../packages/contracts/src/capabilities.js";
 
 import { desktop } from "../lib/desktop.js";
 
+const capability = getStarfireCapability("open_app");
+
 export default defineTool({
-  description:
-    "Launch a desktop application. Use for requests like " +
-    '"open VS Code", "start Discord", or "launch Calculator".',
+  description: capability.description,
 
-  inputSchema: z.object({
-    app: z.string().min(1),
-  }),
+  inputSchema: capability.parameters,
 
-  async execute({ app }) {
-    const opened = await desktop.apps.open(app);
+  async execute(input: { app: string }) {
+    const opened = await desktop.apps.open(input.app);
 
     return {
       summary: `Opening ${opened.name}.`,
