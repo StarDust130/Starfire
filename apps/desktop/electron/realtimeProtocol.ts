@@ -224,11 +224,9 @@ export type FunctionCallOutputInput = {
 
   ok: boolean;
 
-  summary: string;
+  result?: unknown;
 
-  data?: Record<string, unknown>;
-
-  error?: string;
+  error?: string | null;
 };
 
 export function buildFunctionCallOutput(
@@ -245,9 +243,7 @@ export function buildFunctionCallOutput(
       output: JSON.stringify({
         ok: result.ok,
 
-        summary: result.summary,
-
-        data: result.data ?? null,
+        result: result.result ?? null,
 
         error: result.error ?? null,
       }),
