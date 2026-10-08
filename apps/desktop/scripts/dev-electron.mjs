@@ -88,19 +88,13 @@ async function waitForVite() {
 }
 
 async function buildElectron() {
-  console.log(
-    "[dev] 📦 building workspace packages (contracts, tools, core)...",
-  );
+  console.log("[dev] 📦 building workspace packages (contracts)...");
 
   await run(
     "pnpm",
     ["--filter", "@starfire/contracts", "build"],
     "contracts build",
   );
-
-  await run("pnpm", ["--filter", "@starfire/tools", "build"], "tools build");
-
-  await run("pnpm", ["--filter", "@starfire/core", "build"], "core build");
 
   console.log("[dev] 📦 compiling electron main + preload...");
 
