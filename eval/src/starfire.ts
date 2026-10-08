@@ -4,8 +4,9 @@
  * no dist/, no exports-map, no stale-build class of bugs. Ever.
  *
  * Eve owns the agent runtime and tool validation. Evals exercise the
- * remaining Starfire behavior: the platform function specs and the
- * device dispatch (the same boundary Eve tools call over HTTP).
+ * remaining Starfire behavior: the canonical capability definitions and
+ * the shared capability dispatch (the same boundary Eve tools call over
+ * HTTP and the voice bridge calls in-process).
  */
 
 export * from "../../packages/contracts/src/index.js";
@@ -14,7 +15,7 @@ import { STARFIRE_FUNCTION_SPECS } from "../../packages/contracts/src/functions.
 
 export { ToolError } from "../../apps/desktop/electron/agent/tool-error.js";
 
-import { executeDeviceTool } from "../../apps/desktop/electron/deviceBridge.js";
+import { executeDeviceTool } from "../../packages/contracts/src/dispatch.js";
 
 export { executeDeviceTool };
 
