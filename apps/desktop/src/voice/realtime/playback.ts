@@ -58,62 +58,118 @@ export function createPlaybackPipeline(handlers: {
 
   let stopped = false;
 
-  async function ensureStarted(): Promise<void> {
-    if (context) {
+  let startPromise: Promise<void> | null = null;
+
+  async function createPipeline(): Promise<void> {
+    let created: AudioContext | null = null;
+
+    try {
+      created = new AudioContext();
+
+      if (stopped) {
+        throw new Error("Playback stopped while starting.");
+      }
+
+      context = created;
+
       if (context.state === "suspended") {
         await context.resume();
       }
 
-      return;
-    }
-
-    try {
-      context = new AudioContext();
-    } catch {
-      context = new AudioContext();
-    }
-
-    if (context.state === "suspended") {
-      await context.resume();
-    }
-
-    await context.audioWorklet.addModule(resolveWorkletUrl("play-worklet.js"));
-
-    node = new AudioWorkletNode(context, "starfire-play", {
-      numberOfInputs: 0,
-      numberOfOutputs: 1,
-      outputChannelCount: [1],
-    });
-
-    node.port.onmessage = (event: MessageEvent) => {
-      const data = event.data as { type?: string; rms?: number };
-
-      if (data?.type === "drained") {
-        handlers.onDrained?.();
-
-        return;
+      if (stopped) {
+        throw new Error("Playback stopped while starting.");
       }
 
-      if (data?.type === "level" && typeof data.rms === "number") {
-        handlers.onLevel(data.rms);
+      await context.audioWorklet.addModule(
+        resolveWorkletUrl("play-worklet.js"),
+      );
+
+      if (stopped) {
+        throw new Error("Playback stopped while starting.");
       }
-    };
 
-    node.connect(context.destination);
+      const worklet = new AudioWorkletNode(context, "starfire-play", {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+      });
 
-    resampler = new LinearResampler(OUTPUT_SAMPLE_RATE, context.sampleRate);
+      worklet.port.onmessage = (event: MessageEvent) => {
+        const data = event.data as { type?: string; rms?: number };
 
-    handlers.onDiagnostic?.(
-      `output pipeline live (${context.sampleRate} Hz, ` +
-        `${OUTPUT_SAMPLE_RATE}->${context.sampleRate} resampled)`,
-    );
+        if (data?.type === "drained") {
+          handlers.onDrained?.();
+
+          return;
+        }
+
+        if (data?.type === "level" && typeof data.rms === "number") {
+          handlers.onLevel(data.rms);
+        }
+      };
+
+      worklet.connect(context.destination);
+
+      node = worklet;
+
+      resampler = new LinearResampler(OUTPUT_SAMPLE_RATE, context.sampleRate);
+
+      handlers.onDiagnostic?.(
+        `output pipeline live (${context.sampleRate} Hz, ` +
+          `${OUTPUT_SAMPLE_RATE}->${context.sampleRate} resampled)`,
+      );
+
+      created = null;
+    } finally {
+      /*
+       * If the pipeline never came up (stop raced the startup, or an
+       * error occurred), close the context we created — never leak it.
+       */
+      if (created) {
+        if (context === created) {
+          context = null;
+        }
+
+        await closeContext(created);
+      }
+    }
+  }
+
+  async function closeContext(target: AudioContext): Promise<void> {
+    if (target.state !== "closed") {
+      await target.close().catch(() => {});
+    }
+  }
+
+  function ensureStarted(): Promise<void> {
+    if (context) {
+      if (context.state === "suspended") {
+        return context.resume().then(() => {});
+      }
+
+      return Promise.resolve();
+    }
+
+    /*
+     * Audio chunks arrive in bursts; concurrent startups must share ONE
+     * pipeline or every racing call would create its own AudioContext.
+     */
+    if (!startPromise) {
+      startPromise = createPipeline().finally(() => {
+        startPromise = null;
+      });
+    }
+
+    return startPromise;
   }
 
   async function warmup(): Promise<void> {
     try {
       await ensureStarted();
     } catch (error) {
-      console.error("[Starfire Voice] playback warmup failed:", error);
+      if (!stopped) {
+        console.error("[Starfire Voice] playback warmup failed:", error);
+      }
     }
   }
 
@@ -122,7 +178,7 @@ export function createPlaybackPipeline(handlers: {
       return;
     }
 
-    void ensureStarted()
+    ensureStarted()
       .then(() => {
         if (!node || stopped) {
           return;
@@ -137,7 +193,9 @@ export function createPlaybackPipeline(handlers: {
         node.port.postMessage(buildPlaybackMessage(copy), [copy.buffer]);
       })
       .catch((error) => {
-        console.error("[Starfire Voice] playback failed:", error);
+        if (!stopped) {
+          console.error("[Starfire Voice] playback failed:", error);
+        }
       });
   }
 
@@ -152,17 +210,27 @@ export function createPlaybackPipeline(handlers: {
 
     clear();
 
+    /*
+     * Wait for an in-flight startup so it cannot create resources
+     * after the teardown below, then tear everything down.
+     */
+    if (startPromise) {
+      await startPromise.catch(() => {});
+    }
+
     node?.disconnect();
 
     node = null;
 
-    if (context && context.state !== "closed") {
-      await context.close();
-    }
+    const closing = context;
 
     context = null;
 
     resampler = null;
+
+    if (closing) {
+      await closeContext(closing);
+    }
   }
 
   return { warmup, push, clear, stop };
