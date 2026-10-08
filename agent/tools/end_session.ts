@@ -1,20 +1,17 @@
 import { defineTool } from "eve/tools";
 
-export default defineTool({
-  description:
-    "End the current Starfire conversation. Use only when " +
-    "the user clearly says goodbye or wants to stop.",
+import { getStarfireCapability } from "../../packages/contracts/src/capabilities.js";
 
-  inputSchema: {
-    type: "object",
-    properties: {},
-    required: [],
-  },
+import { endSessionResult } from "../../packages/contracts/src/dispatch.js";
+
+const capability = getStarfireCapability("end_session");
+
+export default defineTool({
+  description: capability.description,
+
+  inputSchema: capability.parameters,
 
   async execute() {
-    return {
-      summary: "Waving goodbye and going to sleep. See you soon! ♡",
-      endSession: true,
-    };
+    return endSessionResult();
   },
 });
