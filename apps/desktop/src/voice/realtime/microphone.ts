@@ -113,6 +113,41 @@ export function createMicPipeline(
 
   let sink: GainNode | null = null;
 
+  /*
+   * Set as soon as stop() is requested — even while start() is still
+   * awaiting getUserMedia / worklet modules. start() re-checks it after
+   * every await so a stop can never leave a half-built, leaked pipeline.
+   */
+  let stopRequested = false;
+
+  async function teardown(): Promise<void> {
+    node?.port.close();
+
+    node?.disconnect();
+
+    node = null;
+
+    sink?.disconnect();
+
+    sink = null;
+
+    if (stream) {
+      for (const track of stream.getTracks()) {
+        track.stop();
+      }
+
+      stream = null;
+    }
+
+    const closing = context;
+
+    context = null;
+
+    if (closing && closing.state !== "closed") {
+      await closing.close().catch(() => {});
+    }
+  }
+
   async function acquireStream(): Promise<MediaStream> {
     const constraints = buildAudioConstraints(variant, deviceId);
 
@@ -144,19 +179,29 @@ export function createMicPipeline(
   }
 
   async function start(): Promise<number> {
+    stopRequested = false;
+
     stream = await acquireStream();
 
-    try {
-      context = new AudioContext();
-    } catch {
-      context = new AudioContext();
+    if (stopRequested) {
+      await teardown();
+
+      throw new Error("Microphone stopped while starting.");
     }
 
+    context = new AudioContext();
+
     if (context.state === "suspended") {
-      await context.resume();
+      await context.resume().catch(() => {});
     }
 
     await addWorkletModule(context, resolveWorkletUrl("mic-worklet.js"));
+
+    if (stopRequested) {
+      await teardown();
+
+      throw new Error("Microphone stopped while starting.");
+    }
 
     const source = context.createMediaStreamSource(stream);
 
@@ -198,8 +243,8 @@ export function createMicPipeline(
       const settings = track.getSettings();
 
       handlers.onDiagnostic?.(
-        `mic open (processing=${variant.processing ? "on" : "off"}, ` +
-          `source=${deviceId && variant.useDeviceId ? "chosen device" : "system default"}): ` +
+        `event=mic-open processing=${variant.processing ? "on" : "off"}, ` +
+          `source=${deviceId && variant.useDeviceId ? "chosen device" : "system default"}: ` +
           `label="${track.label || "?"}", id=${String(settings.deviceId ?? "?")}, ` +
           `captureRate=${context.sampleRate}, deviceRate=${String(settings.sampleRate ?? "?")}, ` +
           `ec=${String(settings.echoCancellation ?? "?")}, ns=${String(settings.noiseSuppression ?? "?")}, ` +
@@ -207,11 +252,11 @@ export function createMicPipeline(
       );
 
       track.addEventListener("ended", () => {
-        handlers.onDiagnostic?.("mic track ended unexpectedly");
+        handlers.onDiagnostic?.("event=mic-track-ended note=unexpected");
       });
 
       track.addEventListener("mute", () => {
-        handlers.onDiagnostic?.("mic track muted by the system");
+        handlers.onDiagnostic?.("event=mic-track-muted note=muted by system");
       });
     }
 
@@ -219,29 +264,9 @@ export function createMicPipeline(
   }
 
   async function stop(): Promise<void> {
-    node?.port.close();
+    stopRequested = true;
 
-    node?.disconnect();
-
-    node = null;
-
-    sink?.disconnect();
-
-    sink = null;
-
-    if (stream) {
-      for (const track of stream.getTracks()) {
-        track.stop();
-      }
-
-      stream = null;
-    }
-
-    if (context && context.state !== "closed") {
-      await context.close();
-    }
-
-    context = null;
+    await teardown();
   }
 
   return { start, stop };

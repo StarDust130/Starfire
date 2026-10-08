@@ -66,6 +66,8 @@ export class RealtimeVoiceBridge {
 
   private conn = 0;
 
+  private sessionEndTimer: ReturnType<typeof setTimeout> | null = null;
+
   private sessionConfigured = false;
 
   private sessionAnnounced = false;
@@ -132,6 +134,16 @@ export class RealtimeVoiceBridge {
     ipcMain.removeAllListeners("starfire-voice:interrupt");
     ipcMain.removeAllListeners("starfire-voice:log");
 
+    console.log("[Starfire Voice] event=bridge-dispose");
+
+    if (this.sessionEndTimer) {
+      clearTimeout(this.sessionEndTimer);
+
+      this.sessionEndTimer = null;
+    }
+
+    this.failPending("Voice bridge is shutting down.", false);
+
     this.closeSocket(1000);
   }
 
@@ -166,6 +178,10 @@ export class RealtimeVoiceBridge {
     }
 
     if (this.socket) {
+      console.log(
+        `[Starfire Voice] conn=${this.conn} event=start-rejected reason=session-already-active`,
+      );
+
       return Promise.resolve({
         ok: false,
         error: "A voice session is already active.",
@@ -174,6 +190,8 @@ export class RealtimeVoiceBridge {
     }
 
     this.conn += 1;
+
+    const conn = this.conn;
 
     this.sessionConfigured = false;
     this.sessionAnnounced = false;
@@ -189,6 +207,12 @@ export class RealtimeVoiceBridge {
     this.toolBatchCancelled = false;
     this.pendingSessionEnd = false;
 
+    if (this.sessionEndTimer) {
+      clearTimeout(this.sessionEndTimer);
+
+      this.sessionEndTimer = null;
+    }
+
     const endpoint = process.env.EMPIRIOLABS_REALTIME_URL ?? DEFAULT_ENDPOINT;
 
     const socket = new WebSocket(endpoint, {
@@ -199,11 +223,23 @@ export class RealtimeVoiceBridge {
 
     this.socket = socket;
 
-    console.log("[Starfire Voice] connecting");
+    console.log(`[Starfire Voice] conn=${conn} event=socket-connecting`);
 
     return new Promise<VoiceStartResult>((resolve) => {
       const timer = setTimeout(() => {
-        this.failPending("Realtime connection timed out.", false);
+        if (this.socket !== socket) {
+          return;
+        }
+
+        console.log(
+          `[Starfire Voice] conn=${conn} event=connect-timeout ` +
+            `timeoutMs=${CONNECT_TIMEOUT_MS}`,
+        );
+
+        this.failPending(
+          `Realtime connection timed out (conn=${conn}).`,
+          false,
+        );
         this.closeSocket(1000);
       }, CONNECT_TIMEOUT_MS);
 
@@ -212,30 +248,65 @@ export class RealtimeVoiceBridge {
         timer,
       };
 
+      /*
+       * Every handler verifies socket ownership first: events from a
+       * stale socket must NEVER resolve a newer start request, emit
+       * events stamped with a newer conn, or touch session state.
+       */
       socket.on("message", (data) => {
+        if (this.socket !== socket) {
+          this.logStaleSocketEvent(conn, "message");
+
+          return;
+        }
+
         this.handleMessage(data.toString());
       });
 
       socket.on("error", (error) => {
-        console.error("[Starfire Voice] socket error:", error.message);
+        if (this.socket !== socket) {
+          this.logStaleSocketEvent(conn, `error: ${error.message}`);
+
+          return;
+        }
+
+        console.error(
+          `[Starfire Voice] conn=${conn} event=socket-error error=${error.message}`,
+        );
 
         this.failPending(`Voice connection failed: ${error.message}`, false);
       });
 
       socket.on("close", (code) => {
-        console.log("[Starfire Voice] socket closed:", code);
+        if (this.socket !== socket) {
+          this.logStaleSocketEvent(conn, `close code=${code}`);
 
-        this.failPending("Voice connection closed before it was ready.", false);
-
-        if (this.socket === socket) {
-          this.socket = null;
+          return;
         }
+
+        console.log(
+          `[Starfire Voice] conn=${conn} event=socket-closed code=${code}`,
+        );
+
+        this.socket = null;
+
+        this.failPending(
+          `Voice connection closed before it was ready (conn=${conn}).`,
+          false,
+        );
 
         this.emit({
           kind: "closed",
         });
       });
     });
+  }
+
+  private logStaleSocketEvent(staleConn: number, event: string): void {
+    console.log(
+      `[Starfire Voice] conn=${staleConn} event=stale-socket-event-ignored ` +
+        `detail=${event} activeConn=${this.conn}`,
+    );
   }
 
   private failPending(error: string, fatal: boolean): void {
@@ -293,13 +364,12 @@ export class RealtimeVoiceBridge {
         this.sessionAnnounced = true;
 
         console.log(
-          `[Starfire Voice] session ready (voice=${String(
-            event.info.voice ?? "?",
-          )}, ` +
+          `[Starfire Voice] conn=${this.conn} event=session-ready ` +
+            `voice=${String(event.info.voice ?? "?")}, ` +
             `in=${String(event.info.inputAudioFormat ?? "?")}, ` +
             `out=${String(event.info.outputAudioFormat ?? "?")}, ` +
             `vad=${String(event.info.turnDetection ?? "off")}, ` +
-            `tools=${STARFIRE_FUNCTION_SPECS.length})`,
+            `tools=${STARFIRE_FUNCTION_SPECS.length}`,
         );
 
         this.resolvePending();
@@ -324,11 +394,10 @@ export class RealtimeVoiceBridge {
         this.sessionConfirmedLogged = true;
 
         console.log(
-          `[Starfire Voice] session confirmed (in=${String(
-            event.info.inputAudioFormat ?? "?",
-          )}, ` +
+          `[Starfire Voice] conn=${this.conn} event=session-confirmed ` +
+            `in=${String(event.info.inputAudioFormat ?? "?")}, ` +
             `out=${String(event.info.outputAudioFormat ?? "?")}, ` +
-            `vad=${String(event.info.turnDetection ?? "off")})`,
+            `vad=${String(event.info.turnDetection ?? "off")}`,
         );
       }
 
@@ -367,9 +436,8 @@ export class RealtimeVoiceBridge {
           this.firstAudioLogged = true;
 
           console.log(
-            `[Starfire Voice] ⏱ model first audio: ${
-              Date.now() - this.responseStartedAt
-            }ms after response.created`,
+            `[Starfire Voice] conn=${this.conn} event=first-audio ` +
+              `latencyMs=${Date.now() - this.responseStartedAt}`,
           );
         }
 
@@ -424,19 +492,19 @@ export class RealtimeVoiceBridge {
     if (event.kind === "response-done") {
       if (this.responseStartedAt > 0) {
         console.log(
-          `[Starfire Voice] ⏱ response: total ${
-            Date.now() - this.responseStartedAt
-          }ms, ` +
-            `${this.audioChunks} chunks, ${Math.round(
-              this.audioBytes / 48,
-            )}ms of audio`,
+          `[Starfire Voice] conn=${this.conn} event=response-complete ` +
+            `durationMs=${Date.now() - this.responseStartedAt} ` +
+            `audioChunks=${this.audioChunks} ` +
+            `audioMs=${Math.round(this.audioBytes / 48)}`,
         );
 
         this.responseStartedAt = 0;
       }
 
       if (event.usage) {
-        console.log("[Starfire Voice] usage:", JSON.stringify(event.usage));
+        console.log(
+          `[Starfire Voice] conn=${this.conn} event=usage tokens=${JSON.stringify(event.usage)}`,
+        );
       }
 
       this.emit({
@@ -456,11 +524,27 @@ export class RealtimeVoiceBridge {
        * end_session succeeded in the previous tool batch.
        *
        * Let the goodbye audio play briefly, then close the session.
+       * The timer is conn-scoped: if this socket is replaced or closed
+       * before it fires, it must do nothing.
        */
       if (this.pendingSessionEnd) {
         this.pendingSessionEnd = false;
 
-        setTimeout(() => {
+        const endConn = this.conn;
+
+        this.sessionEndTimer = setTimeout(() => {
+          this.sessionEndTimer = null;
+
+          if (this.conn !== endConn) {
+            console.log(
+              `[Starfire Voice] conn=${endConn} event=stale-session-end-ignored activeConn=${this.conn}`,
+            );
+
+            return;
+          }
+
+          console.log(`[Starfire Voice] conn=${endConn} event=goodbye-close`);
+
           this.emit({
             kind: "session-ended",
           });
@@ -493,7 +577,10 @@ export class RealtimeVoiceBridge {
     }
 
     if (event.kind === "error") {
-      console.error("[Starfire Voice] server error:", event.message);
+      console.error(
+        `[Starfire Voice] conn=${this.conn} event=server-error ` +
+          `fatal=${String(event.fatal)} message=${event.message}`,
+      );
 
       this.emit({
         kind: "error",
@@ -519,7 +606,8 @@ export class RealtimeVoiceBridge {
     });
 
     console.log(
-      `[Starfire Voice] 🔧 tool call: ${event.name} ` + `(id=${event.callId})`,
+      `[Starfire Voice] conn=${this.conn} event=tool-queued ` +
+        `tool=${event.name} callId=${event.callId}`,
     );
   }
 
@@ -559,12 +647,21 @@ export class RealtimeVoiceBridge {
 
     for (const call of calls) {
       if (this.batchStale(batchConn)) {
+        console.log(
+          `[Starfire Voice] conn=${batchConn} event=tool-batch-aborted ` +
+            `tool=${call.name}`,
+        );
+
         this.toolBatchStarted = false;
 
         return;
       }
 
+      const startedAt = Date.now();
+
       const outcome = await this.runToolCall(call);
+
+      const durationMs = Date.now() - startedAt;
 
       this.emit({
         kind: "tool-result",
@@ -574,8 +671,9 @@ export class RealtimeVoiceBridge {
       });
 
       console.log(
-        `[Starfire Voice] ✅ tool result: ${call.name} ` +
-          `(ok=${String(outcome.ok)})`,
+        `[Starfire Voice] conn=${batchConn} event=tool-complete ` +
+          `tool=${call.name} ok=${String(outcome.ok)} durationMs=${durationMs}` +
+          (outcome.ok ? "" : ` error=${outcome.error ?? "unknown"}`),
       );
 
       if (call.name === "end_session" && outcome.ok) {
@@ -676,16 +774,26 @@ export class RealtimeVoiceBridge {
     this.socket = null;
 
     /*
-     * Invalidate any pending tool batch.
+     * Invalidate any pending tool batch and goodbye close.
      */
     this.pendingToolCalls = [];
     this.toolBatchStarted = false;
     this.toolBatchCancelled = true;
     this.pendingSessionEnd = false;
 
+    if (this.sessionEndTimer) {
+      clearTimeout(this.sessionEndTimer);
+
+      this.sessionEndTimer = null;
+    }
+
     if (!socket) {
       return;
     }
+
+    console.log(
+      `[Starfire Voice] conn=${this.conn} event=socket-close-requested code=${code}`,
+    );
 
     try {
       socket.close(code);

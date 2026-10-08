@@ -911,3 +911,376 @@ function emitSilentChunk(deps: ReturnType<typeof makeDeps>["deps"]): void {
 
   call.onChunk({ samples: new Float32Array(320), rms: 0 });
 }
+
+/*
+ * P0 foundation regressions: idle-timer races, dispose cleanup, and
+ * microphone rebuild failures must never kill or strand a session.
+ */
+describe("P0 foundation regressions", () => {
+  it("P0-1: the tool-round idle timer never closes her follow-up response", async () => {
+    const { deps, emitEvent, onAudioCall, emitDrained } = makeDeps();
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    emitEvent({ conn: 1, kind: "tool-call", name: "open_app" });
+
+    emitEvent({ conn: 1, kind: "tool-result", ok: true, summary: "done" });
+
+    emitEvent({ conn: 1, kind: "response-created" });
+
+    /*
+     * A long streamed response: audio keeps arriving while she speaks,
+     * crossing the old 15s tool-round timer boundary several times.
+     */
+    for (let second = 0; second < 8; second += 1) {
+      await vi.advanceTimersByTimeAsync(2000);
+
+      onAudioCall()(new ArrayBuffer(48 * 400));
+
+      expect(controller.getState().state).toBe("assistant-speaking");
+    }
+
+    emitEvent({ conn: 1, kind: "response-done", usage: null });
+
+    emitDrained();
+
+    expect(controller.getState().state).toBe("listening");
+
+    await vi.advanceTimersByTimeAsync(VOICE_IDLE_AFTER_RESPONSE_MS + 200);
+
+    expect(controller.getState().state).toBe("closing");
+  });
+
+  it("P0-1: awaiting playback drain postpones the idle watchdog", async () => {
+    const { deps, emitEvent, onAudioCall } = makeDeps();
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    onAudioCall()(new ArrayBuffer(48 * 400));
+
+    emitEvent({ conn: 1, kind: "response-done", usage: null });
+
+    expect(controller.getState().state).toBe("assistant-speaking");
+
+    /*
+     * Cross the old 7s idle boundary while her audio is still playing
+     * out (awaiting drain) — she must not be disconnected. The 6s
+     * drain watchdog finishes the response first.
+     */
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(controller.getState().state).toBe("assistant-speaking");
+
+    await vi.advanceTimersByTimeAsync(4000);
+
+    expect(controller.getState().state).toBe("listening");
+
+    /*
+     * The fresh post-response idle timer then closes the session once
+     * she is actually idle.
+     */
+    await vi.advanceTimersByTimeAsync(6100);
+
+    expect(controller.getState().state).toBe("closing");
+
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(controller.getState().state).toBe("idle");
+  });
+
+  it("P0-1: audible playback postpones idle; quiet session closes afterwards", async () => {
+    const { deps, onAudioCall } = makeDeps();
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    onAudioCall()(new ArrayBuffer(48 * 400));
+
+    const playbackCall = (deps.createPlayback as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as { onLevel: (rms: number) => void };
+
+    /*
+     * No response.done ever arrives, but the worklet keeps reporting
+     * output levels — she is audibly speaking for 30s (a very long
+     * reply). No idle timer may close the session under her.
+     */
+    for (let second = 0; second < 15; second += 1) {
+      await vi.advanceTimersByTimeAsync(2000);
+
+      playbackCall.onLevel(0.2);
+    }
+
+    expect(controller.getState().state).toBe("assistant-speaking");
+
+    /*
+     * Playback goes quiet (level 0 reports stop) — the next watchdog
+     * fire finds a truly idle session and closes it.
+     */
+    playbackCall.onLevel(0);
+
+    await vi.advanceTimersByTimeAsync(6200);
+
+    expect(controller.getState().state).toBe("closing");
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(controller.getState().state).toBe("idle");
+  });
+
+  it("P0-1: user speech postpones idle; a silent session closes on stall", async () => {
+    const { deps, emitChunk } = makeDeps();
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    /*
+     * The user speaks for 10s — loud chunks with single quiet frames
+     * in between (like real speech) keep the local gate and the
+     * upload flowing, so the 12s activation watchdog must postpone,
+     * not kill.
+     */
+    for (let second = 0; second < 10; second += 1) {
+      await vi.advanceTimersByTimeAsync(1000);
+
+      emitChunk(0.4);
+
+      emitChunk(0.0001);
+    }
+
+    expect(controller.getState().state).toBe("user-speaking");
+
+    /*
+     * The user stops talking (and no server turn-end ever arrives) —
+     * once uploads go quiet past the stall window, the watchdog closes
+     * the session instead of hanging forever.
+     */
+    await vi.advanceTimersByTimeAsync(20000);
+
+    expect(["closing", "idle"]).toContain(controller.getState().state);
+  });
+
+  it("P0-3: dispose stops mic, playback, bridge, and all timers mid-session", async () => {
+    const { deps, mic, playback, bridge } = makeDeps();
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    expect(controller.getState().state).toBe("listening");
+
+    controller.dispose();
+
+    expect(mic.stop).toHaveBeenCalled();
+
+    expect(playback.stop).toHaveBeenCalled();
+
+    expect(bridge.stop).toHaveBeenCalled();
+
+    /*
+     * Timers that used to leak through dispose must not fire into the
+     * void afterwards: no wake restart, no further state changes.
+     */
+    await vi.advanceTimersByTimeAsync(20000);
+
+    expect(deps.onStartWakeEngine).not.toHaveBeenCalled();
+
+    expect(controller.getState().state).toBe("listening");
+
+    expect(() => controller.dispose()).not.toThrow();
+
+    expect(() => controller.stop("late")).not.toThrow();
+  });
+
+  it("P0-3: dispose while starting still stops the microphone pipeline", async () => {
+    const { deps, bridge } = makeDeps();
+
+    let resolveMicStart: ((rate: number) => void) | undefined;
+
+    deps.createMic = vi.fn(
+      () =>
+        ({
+          start: vi.fn(
+            () =>
+              new Promise<number>((resolve) => {
+                resolveMicStart = resolve;
+              }),
+          ),
+
+          stop: vi.fn(async () => {}),
+        }) as unknown as MicPipeline,
+    );
+
+    const controller = new VoiceController(deps);
+
+    const starting = controller.start();
+
+    await flush();
+
+    controller.dispose();
+
+    resolveMicStart?.(16000);
+
+    await flush();
+
+    await starting;
+
+    expect(bridge.stop).toHaveBeenCalled();
+
+    const mic = deps.createMic.mock.results[0].value as MicPipeline;
+
+    expect(mic.stop).toHaveBeenCalled();
+  });
+
+  it("P0-4: rebuild failures retry remaining variants, then fail loudly", async () => {
+    const { deps } = makeDeps();
+
+    const micHandlers: Array<{
+      onChunk: (chunk: { samples: Float32Array; rms: number }) => void;
+    }> = [];
+
+    const micStops: Array<ReturnType<typeof vi.fn>> = [];
+
+    deps.createMic = vi.fn(
+      (handlers: {
+        onChunk: (chunk: { samples: Float32Array; rms: number }) => void;
+      }) => {
+        micHandlers.push(handlers);
+
+        const callIndex = micHandlers.length - 1;
+
+        const stop = vi.fn(async () => {});
+
+        micStops.push(stop);
+
+        return {
+          start: vi.fn(async () => {
+            if (callIndex === 0) {
+              return 16000;
+            }
+
+            throw new Error("AudioContext creation failed");
+          }),
+
+          stop,
+        } as MicPipeline;
+      },
+    );
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    expect(controller.getState().state).toBe("listening");
+
+    for (let i = 0; i < 40; i += 1) {
+      micHandlers[0].onChunk({ samples: new Float32Array(320), rms: 0 });
+    }
+
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(50);
+
+    /*
+     * Attempt 2 and 3 both fail to open — the session must fail loudly
+     * instead of surviving deaf.
+     */
+    expect(deps.createMic).toHaveBeenCalledTimes(3);
+
+    expect(controller.getState().state).toBe("error");
+
+    expect(controller.getState().message).toContain("not delivering");
+
+    expect(micStops[0]).toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(400);
+
+    expect(controller.getState().state).toBe("idle");
+
+    expect(deps.onStartWakeEngine).toHaveBeenCalled();
+  });
+
+  it("P0-4: silence while she speaks never triggers a mic rebuild", async () => {
+    const { deps, onAudioCall } = makeDeps();
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    onAudioCall()(new ArrayBuffer(48 * 400));
+
+    expect(controller.getState().state).toBe("assistant-speaking");
+
+    /*
+     * Echo-cancelled capture is digitally silent during playback —
+     * this must not be treated as a broken microphone.
+     */
+    for (let i = 0; i < 100; i += 1) {
+      emitSilentChunk(deps);
+    }
+
+    await flush();
+
+    expect(deps.createMic).toHaveBeenCalledTimes(1);
+
+    expect(controller.getState().state).toBe("assistant-speaking");
+  });
+
+  it("P0-1b: a stale goodbye timer cannot close a newer session", async () => {
+    const { deps, bridge, emitEvent } = makeDeps();
+
+    const controller = new VoiceController(deps);
+
+    void controller.start();
+
+    await flush();
+
+    emitEvent({ conn: 1, kind: "session-ended" });
+
+    expect(controller.getState().state).toBe("listening");
+
+    controller.stop("test");
+
+    await vi.advanceTimersByTimeAsync(400);
+
+    expect(controller.getState().state).toBe("idle");
+
+    void controller.start();
+
+    await flush();
+
+    expect(controller.getState().state).toBe("listening");
+
+    /*
+     * Keep the new session busy in a tool round: its own stall
+     * watchdog (15s) is now armed, so crossing the original 12s
+     * goodbye boundary must not close anything.
+     */
+    emitEvent({ conn: 1, kind: "tool-call", name: "open_app" });
+
+    await vi.advanceTimersByTimeAsync(12000);
+
+    expect(bridge.start).toHaveBeenCalledTimes(2);
+
+    expect(controller.getState().state).toBe("listening");
+  });
+});

@@ -18,7 +18,12 @@ const WAKE_RETRY_DELAY_MS = 800;
 export default function App() {
   const engineRef = useRef<WakeEngine | null>(null);
 
-  const startingRef = useRef(false);
+  /*
+   * In-flight wake engine startup: stopWakeEngine must be able to wait
+   * for it — otherwise a still-starting engine could grab the
+   * microphone right after the voice session opened it.
+   */
+  const engineStartRef = useRef<Promise<void> | null>(null);
 
   const controllerRef = useRef<VoiceController | null>(null);
 
@@ -47,13 +52,17 @@ export default function App() {
     void controllerRef.current?.start(source);
   }, []);
 
-  const startWakeEngine = useCallback(
-    async (allowRetry = true): Promise<void> => {
-      if (engineRef.current || startingRef.current) {
-        return;
-      }
+  const startWakeEngine = useCallback(async (): Promise<void> => {
+    if (engineRef.current) {
+      return;
+    }
 
-      startingRef.current = true;
+    if (engineStartRef.current) {
+      return engineStartRef.current;
+    }
+
+    const attempt = async (retried: boolean): Promise<void> => {
+      let engine: WakeEngine | null = null;
 
       try {
         console.log("[Starfire] 🎤 requesting microphone...");
@@ -70,9 +79,7 @@ export default function App() {
 
         console.log(`[Starfire] 🎙️ microphone: ${microphone.label}`);
 
-        const engine = await createOnnxWakeWord();
-
-        engineRef.current = engine;
+        engine = await createOnnxWakeWord();
 
         await engine.load();
 
@@ -88,45 +95,65 @@ export default function App() {
           activateListening("wake-word");
         });
 
+        /*
+         * Publish the engine only after it is fully started — a failed
+         * load/start must not leave a half-built engine behind (which
+         * used to skip the retry below and block stopWakeEngine).
+         */
+        engineRef.current = engine;
+
         console.log("[Starfire] ✅ wake-word listener ready.");
       } catch (cause) {
+        await engine?.stop().catch(() => {});
+
         /*
          * The wake engine's AudioContext can transiently fail to load
          * its worklet right after a conversation AudioContext closed
          * ("Unable to load a worklet's module"). One automatic retry
          * fixes that race.
          */
-        if (allowRetry && !engineRef.current) {
+        if (!retried) {
           console.warn(
             "[Starfire] ⚠️ wake-word start failed — retrying once...",
             cause instanceof Error ? cause.message : cause,
           );
 
-          startingRef.current = false;
-
           await new Promise((resolve) => {
             setTimeout(resolve, WAKE_RETRY_DELAY_MS);
           });
 
-          return startWakeEngine(false);
+          return attempt(true);
         }
 
         console.error("[Starfire] ❌ wake-word startup failed:", cause);
 
         setError(cause instanceof Error ? cause.message : String(cause));
-      } finally {
-        startingRef.current = false;
       }
-    },
-    [activateListening],
-  );
+    };
+
+    const run = attempt(false).finally(() => {
+      engineStartRef.current = null;
+    });
+
+    engineStartRef.current = run;
+
+    return run;
+  }, [activateListening]);
 
   const stopWakeEngine = useCallback(async (): Promise<void> => {
+    /*
+     * If a startup is still in flight, wait for it to settle first so
+     * it cannot re-grab the microphone after we stop everything.
+     */
+    const starting = engineStartRef.current;
+
+    if (starting) {
+      await starting.catch(() => {});
+    }
+
     const engine = engineRef.current;
 
     engineRef.current = null;
-
-    startingRef.current = false;
 
     if (engine) {
       console.log("[Starfire] 🛑 wake-word listener paused for conversation.");
@@ -233,7 +260,7 @@ export default function App() {
 
       engineRef.current = null;
 
-      void engine?.stop();
+      void engine?.stop().catch(() => {});
     };
   }, [activateListening, startWakeEngine, stopWakeEngine]);
 

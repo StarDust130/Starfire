@@ -143,6 +143,8 @@ export async function createOnnxWakeWord(): Promise<WakeEngine> {
     removeErrorListener = null;
   }
 
+  let started = false;
+
   async function start(
     deviceId: string | undefined,
     onDetected: (word: string, score: number) => void,
@@ -192,15 +194,35 @@ export async function createOnnxWakeWord(): Promise<WakeEngine> {
       gain: 1,
     });
 
+    started = true;
+
     console.log("[Starfire Wake] 🎤 Listening for Starfire...");
   }
 
+  /*
+   * stop() must never reject: it runs fire-and-forget on unmount and
+   * awaited during session startup, where a rejection would surface as
+   * an unhandled error even when nothing is wrong.
+   */
   async function stop(): Promise<void> {
     removeListeners();
 
-    await engine.stop();
+    if (!started) {
+      return;
+    }
 
-    console.log("[Starfire Wake] 🛑 Stopped");
+    started = false;
+
+    try {
+      await engine.stop();
+
+      console.log("[Starfire Wake] 🛑 Stopped");
+    } catch (error) {
+      console.warn(
+        "[Starfire Wake] ⚠️ stop failed (engine may not have been running):",
+        error instanceof Error ? error.message : error,
+      );
+    }
   }
 
   return {
