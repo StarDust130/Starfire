@@ -10,7 +10,9 @@ import {
   screen,
   session,
 } from "electron";
-
+import { createElectronPorts } from "./agent/electron-ports.js";
+import { startDeviceBridge } from "./deviceBridge.js";
+import { startEveRuntime, stopEveRuntime } from "./eve-runtime.js";
 import { RealtimeVoiceBridge } from "./realtimeVoice";
 
 const DEV_SERVER_URL =
@@ -29,6 +31,8 @@ if (!gotLock) {
 let mainWindow: BrowserWindow | null = null;
 
 let voiceBridge: RealtimeVoiceBridge | null = null;
+
+let stopDeviceBridge: (() => Promise<void>) | null = null;
 
 type DragSession = {
   offsetX: number;
@@ -293,9 +297,26 @@ app.whenReady().then(() => {
 
   registerGlobalShortcut();
 
-  voiceBridge = new RealtimeVoiceBridge(() => mainWindow);
+  /*
+   * One ports instance is Starfire's local capability layer, shared
+   * by the Eve device bridge and the realtime voice bridge so both
+   * paths see the same state (e.g. apps Starfire launched herself).
+   */
+  const ports = createElectronPorts();
+
+  voiceBridge = new RealtimeVoiceBridge(() => mainWindow, ports);
 
   voiceBridge.register();
+
+  startDeviceBridge(ports)
+    .then((stop) => {
+      stopDeviceBridge = stop;
+    })
+    .catch((error) => {
+      console.error("[main] ❌ device bridge failed to start:", error);
+    });
+
+  void startEveRuntime();
 });
 
 app.on("second-instance", () => {
@@ -310,14 +331,34 @@ app.on("second-instance", () => {
   mainWindow.focus();
 });
 
-app.on("will-quit", () => {
-  void voiceBridge?.dispose();
+app.on("will-quit", (event) => {
+  /*
+   * Hold the quit until everything (voice, device bridge, the
+   * in-process Eve runtime) has torn down.
+   */
+  event.preventDefault();
 
-  voiceBridge = null;
+  const finish = (): void => {
+    globalShortcut.unregisterAll();
 
-  globalShortcut.unregisterAll();
+    console.log("[main] 🛑 shortcuts released.");
 
-  console.log("[main] 🛑 shortcuts released.");
+    app.exit(0);
+  };
+
+  const teardown = async (): Promise<void> => {
+    await voiceBridge?.dispose();
+
+    voiceBridge = null;
+
+    await stopDeviceBridge?.();
+
+    stopDeviceBridge = null;
+
+    await stopEveRuntime();
+  };
+
+  teardown().then(finish).catch(finish);
 });
 
 app.on("window-all-closed", () => {
