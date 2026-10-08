@@ -1,29 +1,30 @@
 import { defineTool } from "eve/tools";
-import { z } from "zod";
+
+import { getStarfireCapability } from "../../packages/contracts/src/capabilities.js";
 
 import { desktop } from "../lib/desktop.js";
+
+const capability = getStarfireCapability("open_url");
 
 const URL_PATTERN = /^https?:\/\/\S+$/i;
 
 export default defineTool({
-  description: "Open a website in the user's browser. Pass a full URL.",
+  description: capability.description,
 
-  inputSchema: z.object({
-    url: z.string().min(1),
-  }),
+  inputSchema: capability.parameters,
 
-  async execute({ url }) {
-    const trimmed = url.trim();
+  async execute(input: { url: string }) {
+    const url = input.url.trim();
 
-    if (!URL_PATTERN.test(trimmed)) {
+    if (!URL_PATTERN.test(url)) {
       throw new Error(`"${url}" is not a valid website URL. Use https://...`);
     }
 
-    const result = await desktop.urls.open(trimmed);
+    const result = await desktop.urls.open(url);
 
     return {
       summary: `Opening ${result.opened}.`,
-      url: trimmed,
+      url,
     };
   },
 });
