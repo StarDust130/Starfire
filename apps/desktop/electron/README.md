@@ -1,27 +1,21 @@
-
-## ⚙️ electron/ — The Trusted Backend
-
-Everything here runs in the Electron **main process** (Node.js side).
-It is the only "adult" in the room: it holds secrets and touches the OS. 🛡️
+# Starfire warm realtime voice implementation
 
 ## Files
 
-| File | Role |
-|---|---|
-| ⭐ **`main.ts`** | Starts the whole app: transparent window 🪟, always-on-top, drag by cursor-polling 🖐️, **Super+Z** global shortcut ⌨️, permission handling, launches the voice bridge. |
-| **`realtimeVoice.ts`** | 🔐 Owns the API key. Opens the realtime **WebSocket**, streams mic audio up and her voice audio down over IPC. Connect-retry + latency logs. |
-| **`realtimeProtocol.ts`** | 🌐 Translator for the server protocol: parses events (typed, crash-proof) and builds outgoing messages (session config, audio chunks). |
-| **`preload.ts`** | 🌉 The security bridge. Exposes ONLY tiny typed functions (`starfireDesktop`, `starfireVoice`) to the web page. The key can never cross this bridge. |
-| `package.json` | Pins this folder to **CommonJS** (required for Electron sandbox). |
+- `realtimeVoice.ts`: complete proposed replacement for `apps/desktop/electron/realtimeVoice.ts`.
+- `main-change.patch`: adds startup warm-up in `apps/desktop/electron/main.ts`.
+- `test-change.patch`: makes the WebSocket fake acknowledge `session.update` in `apps/desktop/electron/realtimeVoice.test.ts`.
 
-## Why this folder exists
+## Apply
 
-The renderer (web page) is untrusted — anyone could open devtools.
-So: secrets, sockets, and window control live here. The page only gets
-narrow, typed doors. 🚪
+1. Back up your current `apps/desktop/electron/realtimeVoice.ts`.
+2. Replace it with the supplied `realtimeVoice.ts`.
+3. From the repository root, apply the small integration/test changes:
 
-## ⚠️ Rules
+```bash
+git apply /path/to/main-change.patch
+git apply /path/to/test-change.patch
+pnpm verify
+```
 
-- Never log the API key. Never put it in a URL. 🙈
-- `electron-dist/` is build output — always regenerated, gitignored. 🧹
-- After editing any file here, restart `pnpm dev` (dev script recompiles). 🔁
+Then run Starfire and test: warm start, normal activation, stop, interruption, goodbye, provider disconnect, and app shutdown. The supplied code has not been run against your checkout in this environment, so treat it as a proposed implementation to validate—not as already production-tested.
