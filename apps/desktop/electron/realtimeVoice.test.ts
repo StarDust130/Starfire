@@ -1,45 +1,41 @@
 import type { AgentPorts } from "@starfire/contracts";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RealtimeVoiceBridge } from "./realtimeVoice.js";
 
-/*
- * Main-process voice bridge regressions:
- *   P0-2 — stale WebSocket events must never affect a newer connection
- *   goodbye-close timer ownership across connections
- *   dispose() resolves pending starts and closes the socket
- */
+type IpcHandler = (...args: unknown[]) => unknown;
+type SocketHandler = (...args: unknown[]) => void;
 
-const ipcHandlers = new Map<string, (...args: unknown[]) => unknown>();
+const ipcHandlers = new Map<string, IpcHandler>();
+const ipcListeners = new Map<string, IpcHandler>();
 
 vi.mock("electron", () => ({
   ipcMain: {
     handle: vi.fn((channel: string, handler: unknown) => {
-      ipcHandlers.set(channel, handler as (...args: unknown[]) => unknown);
+      ipcHandlers.set(channel, handler as IpcHandler);
     }),
 
-    on: vi.fn(),
+    on: vi.fn((channel: string, handler: unknown) => {
+      ipcListeners.set(channel, handler as IpcHandler);
+    }),
 
     removeHandler: vi.fn((channel: string) => {
       ipcHandlers.delete(channel);
     }),
 
-    removeAllListeners: vi.fn(),
+    removeAllListeners: vi.fn((channel: string) => {
+      ipcListeners.delete(channel);
+    }),
   },
 }));
-
-type SocketHandler = (...args: unknown[]) => void;
 
 const { FakeWebSocket } = vi.hoisted(() => {
   class FakeWebSocket {
     static OPEN = 1;
-
     static instances: FakeWebSocket[] = [];
 
     readyState = 0;
-
     closed = false;
-
     sent: string[] = [];
 
     private handlers = new Map<string, SocketHandler[]>();
@@ -50,9 +46,7 @@ const { FakeWebSocket } = vi.hoisted(() => {
 
     on(event: string, handler: SocketHandler): void {
       const list = this.handlers.get(event) ?? [];
-
       list.push(handler);
-
       this.handlers.set(event, list);
     }
 
@@ -68,23 +62,42 @@ const { FakeWebSocket } = vi.hoisted(() => {
 
     send(data: string): void {
       this.sent.push(data);
+
+      // The production bridge waits for the provider to acknowledge
+      // session.update before reporting that the connection is ready.
+      try {
+        const message = JSON.parse(data) as { type?: string };
+
+        if (message.type === "session.update") {
+          this.emit(
+            "message",
+            JSON.stringify({
+              type: "session.updated",
+              session: {
+                model: "m",
+                voice: "Tina",
+                input_audio_format: "pcm16",
+                output_audio_format: "pcm16",
+                turn_detection: { type: "server_vad" },
+              },
+            }),
+          );
+        }
+      } catch {
+        // Ignore non-JSON frames in the fake WebSocket.
+      }
     }
 
     close(): void {
-      if (this.closed) {
-        return;
-      }
+      if (this.closed) return;
 
       this.closed = true;
-
       this.readyState = 3;
-
       this.emit("close", 1000);
     }
 
     terminate(): void {
       this.closed = true;
-
       this.readyState = 3;
     }
   }
@@ -100,53 +113,47 @@ function makePorts(): AgentPorts {
   return {
     apps: {
       open: vi.fn(async () => ({ name: "Discord", pid: 1 })),
-
-      close: vi.fn(async () => ({ closed: true, via: "pid" as const })),
-
+      close: vi.fn(async () => ({
+        closed: true,
+        via: "pid" as const,
+      })),
       focus: vi.fn(async () => ({ focused: true })),
-
       listRunning: vi.fn(async () => []),
     },
-
     files: {
       openFolder: vi.fn(async () => ({ opened: "folder" })),
-
       openFile: vi.fn(async () => ({ opened: "file" })),
     },
-
     urls: {
       open: vi.fn(async () => ({ opened: "example.com" })),
     },
-
     clipboard: {
       read: vi.fn(async () => "text"),
-
       write: vi.fn(async () => {}),
     },
-
     system: {
       info: vi.fn(async () => ({ summary: "ok" })),
     },
-
     web: {
       search: vi.fn(async () => ({ answer: "a", results: [] })),
     },
-
     weather: {
-      current: vi.fn(async () => ({ summary: "s", temperatureC: 1 })),
+      current: vi.fn(async () => ({
+        summary: "s",
+        temperatureC: 1,
+      })),
     },
-
     windows: {
       control: vi.fn(async () => ({ done: true })),
     },
   };
 }
 
-function makeBridge(): InstanceType<typeof RealtimeVoiceBridge> {
+function makeBridge(): RealtimeVoiceBridge {
   return new RealtimeVoiceBridge(() => null, makePorts());
 }
 
-function startHandler(): () => Promise<{
+function getStartHandler(): () => Promise<{
   ok: boolean;
   conn?: number;
   error?: string;
@@ -166,89 +173,199 @@ function startHandler(): () => Promise<{
   }>;
 }
 
+function getStopHandler(): () => Promise<void> {
+  const handler = ipcHandlers.get("starfire-voice:stop");
+
+  if (!handler) {
+    throw new Error("stop handler not registered");
+  }
+
+  return handler as () => Promise<void>;
+}
+
 function sessionCreatedMessage(): string {
   return JSON.stringify({
     type: "session.created",
+    session: {
+      model: "m",
+      voice: "Tina",
+    },
+  });
+}
 
-    session: { model: "m", voice: "Tina" },
+function emitIpc(channel: string, ...args: unknown[]): void {
+  const handler = ipcListeners.get(channel);
+
+  if (!handler) {
+    throw new Error(`IPC listener not registered: ${channel}`);
+  }
+
+  handler({}, ...args);
+}
+
+function hasAudioAppend(socket: InstanceType<typeof FakeWebSocket>): boolean {
+  return socket.sent.some((payload) => {
+    try {
+      return (
+        (JSON.parse(payload) as { type?: string }).type ===
+        "input_audio_buffer.append"
+      );
+    } catch {
+      return false;
+    }
   });
 }
 
 beforeEach(() => {
   FakeWebSocket.instances = [];
-
   ipcHandlers.clear();
+  ipcListeners.clear();
 
   process.env.EMPIRIOLABS_API_KEY = "test-key";
+  delete process.env.EMPIRIOLABS_REALTIME_URL;
 
   vi.useFakeTimers();
 });
 
-describe("RealtimeVoiceBridge stale-socket safety", () => {
-  it("P0-2: late close/error from socket #1 never affects socket #2", async () => {
-    const bridge = makeBridge();
+afterEach(() => {
+  vi.clearAllTimers();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
+describe("RealtimeVoiceBridge warm connection and stale-socket safety", () => {
+  it("warms the provider connection and reuses it on activation", async () => {
+    const bridge = makeBridge();
     bridge.register();
 
-    const first = startHandler()();
+    const warming = bridge.warmUp();
+    const socket = FakeWebSocket.instances[0];
 
+    expect(socket).toBeDefined();
+
+    socket.open();
+    socket.emit("message", sessionCreatedMessage());
+
+    await expect(warming).resolves.toBeUndefined();
+
+    expect(
+      socket.sent.some((payload) => payload.includes("session.update")),
+    ).toBe(true);
+
+    await expect(getStartHandler()()).resolves.toEqual({
+      ok: true,
+      conn: 1,
+    });
+
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(socket.closed).toBe(false);
+
+    await bridge.dispose();
+  });
+
+  it("does not transmit audio while inactive, but does while active", async () => {
+    const bridge = makeBridge();
+    bridge.register();
+
+    const warming = bridge.warmUp();
+    const socket = FakeWebSocket.instances[0];
+
+    socket.open();
+    socket.emit("message", sessionCreatedMessage());
+
+    await warming;
+
+    emitIpc("starfire-voice:audio", "YWJj");
+
+    expect(hasAudioAppend(socket)).toBe(false);
+
+    await getStartHandler()();
+
+    emitIpc("starfire-voice:audio", "YWJj");
+
+    expect(hasAudioAppend(socket)).toBe(true);
+
+    await getStopHandler()();
+
+    const appendCountAfterStop = socket.sent.filter((payload) => {
+      try {
+        return (
+          (JSON.parse(payload) as { type?: string }).type ===
+          "input_audio_buffer.append"
+        );
+      } catch {
+        return false;
+      }
+    }).length;
+
+    emitIpc("starfire-voice:audio", "ZGVm");
+
+    const appendCountAfterInactiveSend = socket.sent.filter((payload) => {
+      try {
+        return (
+          (JSON.parse(payload) as { type?: string }).type ===
+          "input_audio_buffer.append"
+        );
+      } catch {
+        return false;
+      }
+    }).length;
+
+    expect(appendCountAfterInactiveSend).toBe(appendCountAfterStop);
+    expect(socket.closed).toBe(false);
+
+    await bridge.dispose();
+  });
+
+  it("ignores late close/error events from an older socket", async () => {
+    const bridge = makeBridge();
+    bridge.register();
+
+    const first = getStartHandler()();
     const socketA = FakeWebSocket.instances[0];
+
+    expect(socketA).toBeDefined();
 
     socketA.emit("error", new Error("boom"));
 
-    const firstResult = await first;
-
-    expect(firstResult.ok).toBe(false);
+    await expect(first).resolves.toMatchObject({ ok: false });
 
     socketA.emit("close", 1006);
 
-    const second = startHandler()();
-
+    const second = getStartHandler()();
     const socketB = FakeWebSocket.instances[1];
 
+    expect(socketB).toBeDefined();
     expect(socketB).not.toBe(socketA);
 
-    /*
-     * Socket #1 keeps dying AFTER socket #2 was created: duplicate
-     * late close/error events must not fail socket #2's pending start
-     * nor emit a closed event for the new connection.
-     */
     socketA.emit("close", 1006);
-
     socketA.emit("error", new Error("late error"));
 
     socketB.open();
-
     socketB.emit("message", sessionCreatedMessage());
 
-    const secondResult = await second;
-
-    expect(secondResult).toEqual({ ok: true, conn: 2 });
-
+    await expect(second).resolves.toEqual({ ok: true, conn: 2 });
     expect(socketB.closed).toBe(false);
+
+    await bridge.dispose();
   });
 
-  it("P0-2: late messages from a stale socket are ignored", async () => {
+  it("ignores tool messages from an older socket", async () => {
     const bridge = makeBridge();
-
     bridge.register();
 
-    const first = startHandler()();
-
+    const first = getStartHandler()();
     const socketA = FakeWebSocket.instances[0];
 
     socketA.emit("error", new Error("boom"));
-
     await first;
 
     socketA.emit("close", 1006);
 
-    const second = startHandler()();
-
+    const second = getStartHandler()();
     const socketB = FakeWebSocket.instances[1];
 
     socketB.open();
-
     socketB.emit("message", sessionCreatedMessage());
 
     await second;
@@ -257,110 +374,86 @@ describe("RealtimeVoiceBridge stale-socket safety", () => {
 
     const staleToolCall = JSON.stringify({
       type: "response.function_call_arguments.done",
-
       call_id: "stale-1",
-
       name: "open_app",
-
       arguments: JSON.stringify({ app: "Discord" }),
     });
 
     socketA.emit("message", staleToolCall);
 
-    expect(socketB.sent.length).toBe(sentBefore);
+    expect(socketB.sent).toHaveLength(sentBefore);
 
     socketB.emit("message", staleToolCall);
-
     socketB.emit("message", JSON.stringify({ type: "response.done" }));
 
     await vi.advanceTimersByTimeAsync(0);
 
     expect(socketB.sent.length).toBeGreaterThan(sentBefore);
-
     expect(
       socketB.sent.some((line) => line.includes("function_call_output")),
     ).toBe(true);
 
-    socketB.emit("close", 1000);
+    await bridge.dispose();
   });
 
-  it("P0-2: the connect timeout closes its own socket, not a newer one", async () => {
+  it("the connect timeout closes its own socket, not a newer one", async () => {
     const bridge = makeBridge();
-
     bridge.register();
 
-    const first = startHandler()();
-
+    const first = getStartHandler()();
     const socketA = FakeWebSocket.instances[0];
 
-    vi.advanceTimersByTime(10000);
+    expect(socketA).toBeDefined();
 
-    const firstResult = await first;
+    await vi.advanceTimersByTimeAsync(10_000);
 
-    expect(firstResult.ok).toBe(false);
-
+    await expect(first).resolves.toMatchObject({ ok: false });
     expect(socketA.closed).toBe(true);
 
-    const second = startHandler()();
-
+    const second = getStartHandler()();
     const socketB = FakeWebSocket.instances[1];
 
-    socketA.emit("close", 1000);
-
     socketB.open();
-
     socketB.emit("message", sessionCreatedMessage());
 
-    const secondResult = await second;
-
-    expect(secondResult).toEqual({ ok: true, conn: 2 });
-
+    await expect(second).resolves.toEqual({ ok: true, conn: 2 });
     expect(socketB.closed).toBe(false);
+
+    await bridge.dispose();
   });
 
-  it("socket error during connect resolves the start and frees an immediate retry", async () => {
+  it("socket errors during connect allow a fresh retry", async () => {
     const bridge = makeBridge();
-
     bridge.register();
 
-    const first = startHandler()();
-
+    const first = getStartHandler()();
     const socketA = FakeWebSocket.instances[0];
 
     socketA.emit("error", new Error("ECONNREFUSED"));
 
-    const firstResult = await first;
-
-    expect(firstResult.ok).toBe(false);
-
+    await expect(first).resolves.toMatchObject({ ok: false });
     expect(socketA.closed).toBe(true);
 
-    /*
-     * The errored socket must not linger: a retry started immediately
-     * (same tick) has to be able to open a fresh connection.
-     */
-    const second = startHandler()();
-
+    const second = getStartHandler()();
     const socketB = FakeWebSocket.instances[1];
 
     socketB.open();
-
     socketB.emit("message", sessionCreatedMessage());
 
     await expect(second).resolves.toEqual({ ok: true, conn: 2 });
+    expect(socketB.closed).toBe(false);
+
+    await bridge.dispose();
   });
 
-  it("socket error mid-session closes the socket immediately and a new start works", async () => {
+  it("socket errors mid-session allow a new connection", async () => {
     const bridge = makeBridge();
-
     bridge.register();
 
-    const first = startHandler()();
-
+    const first = getStartHandler()();
     const socketA = FakeWebSocket.instances[0];
 
     socketA.open();
-
     socketA.emit("message", sessionCreatedMessage());
 
     await expect(first).resolves.toEqual({ ok: true, conn: 1 });
@@ -369,163 +462,119 @@ describe("RealtimeVoiceBridge stale-socket safety", () => {
 
     expect(socketA.closed).toBe(true);
 
-    const second = startHandler()();
-
+    const second = getStartHandler()();
     const socketB = FakeWebSocket.instances[1];
 
     socketB.open();
-
     socketB.emit("message", sessionCreatedMessage());
 
     await expect(second).resolves.toEqual({ ok: true, conn: 2 });
-
     expect(socketB.closed).toBe(false);
+
+    await bridge.dispose();
   });
 
-  it("the goodbye-close timer never closes a newer connection", async () => {
+  it("a stale goodbye timer does not close the reused warm connection", async () => {
     const bridge = makeBridge();
-
     bridge.register();
 
-    const stopHandler = () => {
-      const handler = ipcHandlers.get("starfire-voice:stop");
+    const start = getStartHandler()();
+    const socket = FakeWebSocket.instances[0];
 
-      if (!handler) {
-        throw new Error("stop handler not registered");
-      }
-
-      return handler as () => Promise<void>;
-    };
-
-    const start = startHandler()();
-
-    const socketA = FakeWebSocket.instances[0];
-
-    socketA.open();
-
-    socketA.emit("message", sessionCreatedMessage());
+    socket.open();
+    socket.emit("message", sessionCreatedMessage());
 
     await start;
 
-    const endSessionCall = JSON.stringify({
-      type: "response.function_call_arguments.done",
-
-      call_id: "call-1",
-
-      name: "end_session",
-
-      arguments: "{}",
-    });
-
-    socketA.emit("message", endSessionCall);
-
-    socketA.emit("message", JSON.stringify({ type: "response.done" }));
-
-    await vi.advanceTimersByTimeAsync(50);
-
-    socketA.emit("message", JSON.stringify({ type: "response.done" }));
-
-    await vi.advanceTimersByTimeAsync(50);
-
-    /*
-     * The goodbye close is armed for 1500ms. The user stops first.
-     */
-    await vi.advanceTimersByTimeAsync(200);
-
-    await stopHandler()();
-
-    expect(socketA.closed).toBe(true);
-
-    const next = startHandler()();
-
-    const socketB = FakeWebSocket.instances[1];
-
-    socketB.open();
-
-    socketB.emit("message", sessionCreatedMessage());
-
-    await next;
-
-    /*
-     * Cross the original goodbye deadline: the stale timer must not
-     * close socket B.
-     */
-    await vi.advanceTimersByTimeAsync(3000);
-
-    expect(socketB.closed).toBe(false);
-  });
-
-  it("end_session still closes its own session when nothing interferes", async () => {
-    const bridge = makeBridge();
-
-    bridge.register();
-
-    const start = startHandler()();
-
-    const socketA = FakeWebSocket.instances[0];
-
-    socketA.open();
-
-    socketA.emit("message", sessionCreatedMessage());
-
-    await start;
-
-    socketA.emit(
+    socket.emit(
       "message",
       JSON.stringify({
         type: "response.function_call_arguments.done",
-
         call_id: "call-1",
-
         name: "end_session",
-
         arguments: "{}",
       }),
     );
 
-    socketA.emit("message", JSON.stringify({ type: "response.done" }));
-
+    socket.emit("message", JSON.stringify({ type: "response.done" }));
     await vi.advanceTimersByTimeAsync(50);
 
-    socketA.emit("message", JSON.stringify({ type: "response.done" }));
+    socket.emit("message", JSON.stringify({ type: "response.done" }));
+    await vi.advanceTimersByTimeAsync(200);
 
-    await vi.advanceTimersByTimeAsync(1600);
+    await getStopHandler()();
 
-    expect(socketA.closed).toBe(true);
+    expect(socket.closed).toBe(false);
+
+    await expect(getStartHandler()()).resolves.toEqual({
+      ok: true,
+      conn: 1,
+    });
+
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(socket.closed).toBe(false);
+
+    await bridge.dispose();
   });
 
-  it("tool calls report completion with duration and success", async () => {
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-
+  it("end_session deactivates voice but retains the warm socket", async () => {
     const bridge = makeBridge();
-
     bridge.register();
 
-    const start = startHandler()();
+    const start = getStartHandler()();
+    const socket = FakeWebSocket.instances[0];
 
-    const socketA = FakeWebSocket.instances[0];
-
-    socketA.open();
-
-    socketA.emit("message", sessionCreatedMessage());
+    socket.open();
+    socket.emit("message", sessionCreatedMessage());
 
     await start;
 
-    socketA.emit(
+    socket.emit(
       "message",
       JSON.stringify({
         type: "response.function_call_arguments.done",
-
         call_id: "call-1",
+        name: "end_session",
+        arguments: "{}",
+      }),
+    );
 
+    socket.emit("message", JSON.stringify({ type: "response.done" }));
+    await vi.advanceTimersByTimeAsync(50);
+
+    socket.emit("message", JSON.stringify({ type: "response.done" }));
+    await vi.advanceTimersByTimeAsync(1600);
+
+    expect(socket.closed).toBe(false);
+
+    await bridge.dispose();
+  });
+
+  it("tool calls report completion duration and success", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const bridge = makeBridge();
+    bridge.register();
+
+    const start = getStartHandler()();
+    const socket = FakeWebSocket.instances[0];
+
+    socket.open();
+    socket.emit("message", sessionCreatedMessage());
+
+    await start;
+
+    socket.emit(
+      "message",
+      JSON.stringify({
+        type: "response.function_call_arguments.done",
+        call_id: "call-1",
         name: "open_app",
-
         arguments: JSON.stringify({ app: "Discord" }),
       }),
     );
 
-    socketA.emit("message", JSON.stringify({ type: "response.done" }));
-
+    socket.emit("message", JSON.stringify({ type: "response.done" }));
     await vi.advanceTimersByTimeAsync(50);
 
     const toolLog = logSpy.mock.calls
@@ -533,36 +582,27 @@ describe("RealtimeVoiceBridge stale-socket safety", () => {
       .find((line) => line.includes("event=tool-complete"));
 
     expect(toolLog).toContain("tool=open_app");
-
     expect(toolLog).toContain("ok=true");
-
     expect(toolLog).toContain("durationMs=");
-
     expect(toolLog).not.toContain("test-key");
 
-    logSpy.mockRestore();
-
-    socketA.emit("close", 1000);
+    await bridge.dispose();
   });
 
-  it("dispose resolves a pending start, closes the socket, and is repeatable", async () => {
+  it("dispose resolves pending starts and is safe to call twice", async () => {
     const bridge = makeBridge();
-
     bridge.register();
 
-    const pending = startHandler()();
-
-    const socketA = FakeWebSocket.instances[0];
+    const pending = getStartHandler()();
+    const socket = FakeWebSocket.instances[0];
 
     await bridge.dispose();
 
     const result = await pending;
 
     expect(result.ok).toBe(false);
-
     expect(result.error).toContain("shutting down");
-
-    expect(socketA.closed).toBe(true);
+    expect(socket.closed).toBe(true);
 
     await expect(bridge.dispose()).resolves.toBeUndefined();
   });
