@@ -179,6 +179,7 @@ function createWindow(): void {
     height,
 
     x,
+
     y,
 
     frame: false,
@@ -307,6 +308,9 @@ app.whenReady().then(() => {
   voiceBridge = new RealtimeVoiceBridge(() => mainWindow, ports);
 
   voiceBridge.register();
+
+  // Warm the provider connection while idle; no microphone audio is sent.
+  void voiceBridge.warmUp();
 
   /*
    * The device bridge MUST be listening before the Eve runtime starts:
