@@ -277,7 +277,6 @@ export class MemoryOrchestrator {
     if (turns.length === 0) {
       // Job references nothing durable — just finish it.
       this.options.jobs.complete(job.id, this.now());
-
       return true;
     }
 
@@ -297,7 +296,6 @@ export class MemoryOrchestrator {
       });
     } catch (error) {
       this.options.jobs.fail(job.id, error, this.now());
-
       return true;
     }
 
@@ -317,30 +315,36 @@ export class MemoryOrchestrator {
       return true;
     }
 
-    // Rate limits should defer the job without consuming a retry attempt.
+    // Rate limits defer the job without consuming a retry attempt.
     if (result.kind === "rate_limited") {
-      /*
-       * Rate limits are the provider asking for patience, not the job
-       * doing something wrong — defer WITHOUT burning an attempt so a
-       * long shared-tier cooldown can never permanently fail good work.
-       */
       const delayMs = result.retryAfterMs ?? RATE_LIMIT_FALLBACK_MS;
 
       this.options.jobs.defer(job.id, delayMs, this.now());
 
       console.warn(
-        `[Memory] ⏳ job #${job.id} deferred ${Math.round(delayMs / 1000)}s (rate_limited)`,
+        `[Memory] ⏳ job #${job.id} deferred ` +
+          `${Math.round(delayMs / 1000)}s (rate_limited)`,
       );
 
       return true;
     }
 
-    // Other failures follow the existing retry/failure handling.
-    this.options.jobs.fail(
-      job.id,
-      new Error(`${result.kind}: ${result.message}`),
-      this.now(),
-    );
+    const error = new Error(`${result.kind}: ${result.message}`);
+
+    // Permanent errors cannot succeed through retries.
+    if (!result.retryable) {
+      this.options.jobs.failImmediately(job.id, error, this.now());
+
+      console.error(
+        `[Memory] ⛔ job #${job.id} failed permanently (${result.kind}); ` +
+          `fix configuration to re-extract later: ${result.message}`,
+      );
+
+      return true;
+    }
+
+    // Retryable errors follow the existing retry policy.
+    this.options.jobs.fail(job.id, error, this.now());
 
     if (result.retryAfterMs !== null) {
       this.options.jobs.delayJob(job.id, result.retryAfterMs, this.now());
