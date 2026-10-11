@@ -155,3 +155,13 @@ export class ContextBuilder {
     }
   }
 }
+
+export const NO_MEMORY_RESULTS_MESSAGE = "No relevant memories found.";
+
+/**
+ * The exact string the model receives from a memory_search call:
+ * the context block, or an honest "nothing found" — never "".
+ */
+export function formatMemorySearchResult(block: string): string {
+  return block.trim().length > 0 ? block : NO_MEMORY_RESULTS_MESSAGE;
+}
