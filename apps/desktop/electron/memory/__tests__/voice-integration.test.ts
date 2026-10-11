@@ -15,7 +15,6 @@ import {
   formatMemorySearchResult,
   type MemoryDatabase,
   MemorySearch,
-  MemoryStore,
   MessageStore,
   NO_MEMORY_RESULTS_MESSAGE,
   openMemoryDatabase,
@@ -77,30 +76,29 @@ describe("memory_search end to end", () => {
 
     const messages = new MessageStore(db);
 
-    messages.insertTurn({
+    const stored = messages.insertTurn({
       sessionId: "s1",
       role: "user",
       content: "we planned the kyoto trip for spring",
     });
 
-    const builder = new ContextBuilder(
-      new MemoryStore(db),
-      new MemorySearch(db),
-    );
+    /*
+     * Current ContextBuilder contract: constructed with the search
+     * service only. Core-Memory exclusion is a per-call option now.
+     */
+    const builder = new ContextBuilder(new MemorySearch(db));
 
-    // Simulate the live session already holding this turn.
-    const block = builder.build("kyoto trip", {
-      excludeMessageIds: new Set([]),
-    });
+    const block = builder.build("kyoto trip");
 
     const result = formatMemorySearchResult(block);
 
     expect(result).toContain("kyoto");
     expect(result).not.toBe(NO_MEMORY_RESULTS_MESSAGE);
 
-    // Live-session exclusion really excludes.
+    // Live-session exclusion really excludes (by id here, by session
+    // id in production).
     const excluded = builder.build("kyoto trip", {
-      excludeMessageIds: new Set([1]),
+      excludeMessageIds: new Set([stored?.id ?? 0]),
     });
 
     expect(excluded).toBe("");
