@@ -33,6 +33,7 @@ export {
   type MemoryDatabaseOptions,
   openMemoryDatabase,
 } from "./database.js";
+export { detectExplicitFact, type ExplicitFact } from "./explicit.js";
 export {
   buildExtractionMessages,
   DEFAULT_EXTRACTION_TIMEOUT_MS,
@@ -69,7 +70,6 @@ export {
   RETRY_MAX_MS,
   STALE_RUNNING_MS,
 } from "./jobs.js";
-
 export {
   DEFAULT_IMPORTANCE,
   isMemoryCategory,
