@@ -138,6 +138,33 @@ describe("MemoryOrchestrator", () => {
     expect(messages.countUnprocessed()).toBe(0);
   });
 
+  it("fails permanently on non-retryable errors without burning retries", async () => {
+    const { messages, jobs, provider, orchestrator } = await build();
+
+    await seedConversation(messages);
+
+    provider.results.push({
+      ok: false,
+      kind: "auth",
+      retryable: false,
+      retryAfterMs: null,
+      message: "Provider rejected the API key (auth error). Not retrying.",
+    });
+
+    await orchestrator.runNow();
+    await orchestrator.runNow();
+
+    // Exactly one provider call despite two runs — no retry spam.
+    expect(provider.calls).toHaveLength(1);
+    expect(jobs.counts()).toEqual({
+      pending: 0,
+      running: 0,
+      done: 0,
+      failed: 1,
+    });
+    expect(messages.countUnprocessed()).toBe(0);
+  });
+
   it("gives the provider neighbor context including fragments", async () => {
     const { messages, provider, orchestrator } = await build();
 
