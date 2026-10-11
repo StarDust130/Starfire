@@ -20,6 +20,24 @@ describe("detectExplicitFact", () => {
     );
   });
 
+  it("NEVER saves a negated name as a fact (regression)", () => {
+    expect(detectExplicitFact("my name is not Thor")).toBeNull();
+    expect(detectExplicitFact("my name is not sure")).toBeNull();
+    expect(detectExplicitFact("my name is nothing special")).toBeNull();
+  });
+
+  it("supports conservative multi-word names (regression)", () => {
+    // Continuation words must be Capitalized proper nouns.
+    expect(detectExplicitFact("Call me Mary Jane")?.content).toBe(
+      "The user's name is Mary Jane.",
+    );
+
+    // Lowercase continuation stays single-word — conservative.
+    expect(detectExplicitFact("my name is john smith")?.content).toBe(
+      "The user's name is John.",
+    );
+  });
+
   it("detects a favorite color including two-word colors", () => {
     const fact = detectExplicitFact("My favorite color is Light Blue");
 
