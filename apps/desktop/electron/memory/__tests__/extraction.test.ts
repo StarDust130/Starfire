@@ -6,6 +6,7 @@ import {
   type ExtractionResult,
   GlmExtractionProvider,
   parseExtractionPayload,
+  parseRetryAfterMs,
   resolveExtractionConfig,
 } from "../extraction.js";
 
@@ -174,6 +175,89 @@ describe("parseExtractionPayload", () => {
 
     expect(parseExtractionPayload('{"other":1}', allowed).ok).toBe(false);
   });
+
+  it("unwraps a nested memories object (real model behavior)", () => {
+    const result = parseExtractionPayload(
+      JSON.stringify({
+        answer: {
+          memories: [
+            {
+              category: "profile",
+              key: "user.name",
+              content: "The user's name is Thor.",
+              sourceMessageIds: [14],
+            },
+          ],
+        },
+      }),
+      allowed,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.drafts).toHaveLength(1);
+    expect(result.ok && result.drafts[0]?.key).toBe("user.name");
+    expect(result.ok && result.drafts[0]?.sourceMessageIds).toEqual([14]);
+  });
+
+  it("drops drafts that echo redaction placeholders", () => {
+    const result = parseExtractionPayload(
+      JSON.stringify({
+        memories: [
+          {
+            category: "fact",
+            key: "pw",
+            content: "password is [REDACTED:assignment]",
+          },
+          {
+            category: "fact",
+            key: "editor",
+            content: "Uses VS Code.",
+          },
+        ],
+      }),
+      allowed,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.drafts.map((draft) => draft.key)).toEqual([
+      "editor",
+    ]);
+  });
+
+  it("drops absence-style non-facts (backstop)", () => {
+    const result = parseExtractionPayload(
+      JSON.stringify({
+        memories: [
+          {
+            category: "profile",
+            key: "user.name",
+            content: "The user's name is not yet known.",
+          },
+          {
+            category: "profile",
+            key: "user.name",
+            content: "Thor is the user's name.",
+          },
+        ],
+      }),
+      allowed,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.drafts.map((draft) => draft.content)).toEqual([
+      "Thor is the user's name.",
+    ]);
+  });
+});
+
+describe("parseRetryAfterMs", () => {
+  it("treats small values as seconds and huge values as milliseconds", () => {
+    expect(parseRetryAfterMs("7")).toBe(7_000);
+    expect(parseRetryAfterMs("60000")).toBe(60_000);
+    expect(parseRetryAfterMs(null)).toBeNull();
+    expect(parseRetryAfterMs("nonsense")).toBeNull();
+    expect(parseRetryAfterMs("99999999")).toBe(600_000);
+  });
 });
 
 describe("GlmExtractionProvider", () => {
@@ -312,6 +396,36 @@ describe("GlmExtractionProvider", () => {
     expect(result.ok ? null : result.retryAfterMs).toBe(7_000);
   });
 
+  it("enters a cooldown after a 429 and skips the network until it lifts", async () => {
+    let calls = 0;
+
+    const fetchFn = (async (): Promise<Response> => {
+      calls += 1;
+
+      return new Response("overloaded", {
+        status: 429,
+        headers: { "retry-after": "60000" },
+      });
+    }) as unknown as typeof fetch;
+
+    const provider = new GlmExtractionProvider(testConfig(), fetchFn);
+
+    const first = await extractWith(provider, [
+      { id: 1, role: "user", content: "hi" },
+    ]);
+
+    expect(first.ok ? null : first.kind).toBe("rate_limited");
+    expect(first.ok ? null : first.retryAfterMs).toBe(60_000);
+    expect(calls).toBe(1);
+
+    const second = await extractWith(provider, [
+      { id: 2, role: "user", content: "hi" },
+    ]);
+
+    expect(second.ok ? null : second.kind).toBe("rate_limited");
+    expect(calls).toBe(1);
+  });
+
   it("classifies 5xx as retryable and 4xx as permanent", async () => {
     const server = new GlmExtractionProvider(
       testConfig(),
@@ -387,7 +501,6 @@ describe("GlmExtractionProvider", () => {
 
   it("serializes concurrent extracts into one in-flight request", async () => {
     let inFlight = 0;
-
     let maxInFlight = 0;
 
     const fetchFn = (async (): Promise<Response> => {
