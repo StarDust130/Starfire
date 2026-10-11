@@ -6,6 +6,8 @@ import {
 import { type BrowserWindow, ipcMain } from "electron";
 import WebSocket from "ws";
 
+import type { VoiceTranscriptCapture } from "./memory/capture";
+
 import {
   buildAudioAppend,
   buildFunctionCallOutput,
@@ -88,6 +90,7 @@ export class RealtimeVoiceBridge {
   constructor(
     private readonly getWindow: () => BrowserWindow | null,
     private readonly ports: AgentPorts,
+    private readonly capture?: VoiceTranscriptCapture,
   ) {}
 
   register(): void {
@@ -142,6 +145,8 @@ export class RealtimeVoiceBridge {
     this.disposed = true;
     this.active = false;
     this.activationId += 1;
+
+    this.capture?.onSessionEnd();
 
     ipcMain.removeHandler("starfire-voice:start");
     ipcMain.removeHandler("starfire-voice:stop");
@@ -239,6 +244,8 @@ export class RealtimeVoiceBridge {
     this.pendingToolCalls = [];
     this.toolBatchStarted = false;
     this.pendingSessionEnd = false;
+
+    this.capture?.onSessionStart();
 
     if (this.sessionEndTimer) {
       clearTimeout(this.sessionEndTimer);
@@ -601,6 +608,8 @@ export class RealtimeVoiceBridge {
     if (event.kind === "transcript-delta") {
       if (this.active) {
         this.emit({ kind: "audio-transcript-delta", delta: event.delta });
+
+        this.capture?.onAssistantDelta(event.delta);
       }
 
       return;
@@ -609,6 +618,8 @@ export class RealtimeVoiceBridge {
     if (event.kind === "input-transcript") {
       if (this.active) {
         this.emit({ kind: "input-transcript", text: event.text });
+
+        this.capture?.onUserTranscript(event.text);
       }
 
       return;
@@ -631,6 +642,8 @@ export class RealtimeVoiceBridge {
     }
 
     if (event.kind === "response-done") {
+      this.capture?.onAssistantDone(false);
+
       this.responseInFlight = false;
       this.settleCancellation();
 
@@ -690,6 +703,8 @@ export class RealtimeVoiceBridge {
     }
 
     if (event.kind === "response-cancelled") {
+      this.capture?.onAssistantDone(true);
+
       this.responseInFlight = false;
       this.responseStartedAt = 0;
       this.settleCancellation();
@@ -908,6 +923,8 @@ export class RealtimeVoiceBridge {
     this.toolBatchCancelled = true;
     this.pendingSessionEnd = false;
 
+    this.capture?.onSessionEnd();
+
     if (this.sessionEndTimer) {
       clearTimeout(this.sessionEndTimer);
       this.sessionEndTimer = null;
@@ -1034,27 +1051,5 @@ export class RealtimeVoiceBridge {
     }, 500);
 
     terminateTimer.unref?.();
-
-    if (this.sessionEndTimer) {
-      clearTimeout(this.sessionEndTimer);
-      this.sessionEndTimer = null;
-    }
-    if (!socket) return;
-
-    console.log(
-      `[Starfire Voice] conn=${this.conn} event=socket-close-requested code=${code}`,
-    );
-    try {
-      socket.close(code);
-    } catch {
-      socket.terminate();
-    }
-    setTimeout(() => {
-      try {
-        socket.terminate();
-      } catch {
-        // The socket is already gone.
-      }
-    }, 500).unref();
   }
 }
