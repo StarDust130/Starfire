@@ -10,19 +10,15 @@ import { redactSecrets } from "./redaction.js";
  *
  * Design:
  * - Token AND-search: every meaningful query token must appear in a
- *   row, so results stay relevant. Ranking: memories by importance
- *   then recency; messages by recency.
- * - Visibility rules: only ACTIVE memories (archived/superseded are
- *   invisible) and only COMPLETE message turns (interrupted are
- *   invisible).
- * - Privacy: message content is redacted in results — a search must
- *   never surface a secret from an old transcript.
- * - SQL-level exclusions (excludeKeys / excludeMessageIds) let the
- *   Context Builder remove Core-Memory duplicates and live-session
- *   turns INSIDE the query, so crowded-out results cannot happen.
- * - Pure SQLite: no embeddings, no model calls, sub-millisecond at
- *   companion scale. FTS5/vector search can replace the internals
- *   later without changing this public API.
+ *   row. Ranking: memories by importance then recency; messages by
+ *   recency.
+ * - Visibility: only ACTIVE memories; only COMPLETE message turns.
+ * - Privacy: BOTH memory and message results are redacted on read —
+ *   search must never surface a secret, including legacy rows.
+ * - SQL-level exclusions (ids / sessions) let callers remove exactly
+ *   what a specific model already has, inside the query.
+ * - Pure SQLite: no embeddings, no model calls. FTS5/vector search can
+ *   replace the internals later without changing this public API.
  */
 
 export const SEARCH_MAX_MEMORIES = 5;
@@ -134,6 +130,7 @@ export type MemorySearchHit = {
   id: number;
   category: MemoryCategory;
   key: string;
+  /** Redacted on read — safe to hand to a model. */
   content: string;
   importance: number;
   updatedAt: number;
@@ -158,10 +155,16 @@ export type MemorySearchResult = {
 export type MemorySearchOptions = {
   limitMemories?: number;
   limitMessages?: number;
-  /** Memory keys to exclude (e.g. everything Core Memory already carries). */
-  excludeKeys?: ReadonlySet<string>;
-  /** Message row ids to exclude (e.g. the live conversation's turns). */
+  /** Exact memory row ids to exclude (e.g. what Core Memory injected). */
+  excludeMemoryIds?: ReadonlySet<number>;
+  /** Message row ids to exclude. */
   excludeMessageIds?: ReadonlySet<number>;
+  /**
+   * Whole sessions to exclude (e.g. the live voice conversation).
+   * Immune to SQLite variable limits no matter how long a session
+   * grows — unlike per-id exclusion.
+   */
+  excludeSessionIds?: ReadonlySet<string>;
 };
 
 export function normalizeSearchQuery(raw: string): string[] {
@@ -227,6 +230,10 @@ function snippetAround(content: string, tokens: readonly string[]): string {
   return `${prefix}${content.slice(start, end)}${suffix}`;
 }
 
+function notInClause(column: string, size: number): string {
+  return ` AND ${column} NOT IN (${[...Array(size)].map(() => "?").join(", ")})`;
+}
+
 export class MemorySearch {
   constructor(private readonly db: MemoryDatabase) {}
 
@@ -241,16 +248,8 @@ export class MemorySearch {
     return {
       query,
       tokens,
-      memories: this.searchMemoriesByTokens(
-        tokens,
-        clampLimit(options.limitMemories, SEARCH_MAX_MEMORIES),
-        options.excludeKeys,
-      ),
-      messages: this.searchMessagesByTokens(
-        tokens,
-        clampLimit(options.limitMessages, SEARCH_MAX_MESSAGES),
-        options.excludeMessageIds,
-      ),
+      memories: this.searchMemoriesByTokens(tokens, options),
+      messages: this.searchMessagesByTokens(tokens, options),
     };
   }
 
@@ -261,10 +260,9 @@ export class MemorySearch {
       return [];
     }
 
-    return this.searchMemoriesByTokens(
-      tokens,
-      clampLimit(limit, SEARCH_MAX_MEMORIES),
-    );
+    return this.searchMemoriesByTokens(tokens, {
+      limitMemories: limit,
+    });
   }
 
   searchMessages(query: string, limit?: number): MessageSearchHit[] {
@@ -274,22 +272,22 @@ export class MemorySearch {
       return [];
     }
 
-    return this.searchMessagesByTokens(
-      tokens,
-      clampLimit(limit, SEARCH_MAX_MESSAGES),
-    );
+    return this.searchMessagesByTokens(tokens, {
+      limitMessages: limit,
+    });
   }
 
   private searchMemoriesByTokens(
     tokens: readonly string[],
-    limit: number,
-    excludeKeys?: ReadonlySet<string>,
+    options: MemorySearchOptions,
   ): MemorySearchHit[] {
+    const limit = clampLimit(options.limitMemories, SEARCH_MAX_MEMORIES);
+
     const clauses = tokens.map(
       () => "(content LIKE ? ESCAPE '\\' OR key LIKE ? ESCAPE '\\')",
     );
 
-    const params: string[] = [];
+    const params: Array<string | number> = [];
 
     for (const token of tokens) {
       const pattern = `%${escapeLikePattern(token)}%`;
@@ -301,12 +299,12 @@ export class MemorySearch {
          FROM memories
          WHERE state = 'active' AND ${clauses.join(" AND ")}`;
 
-    if (excludeKeys && excludeKeys.size > 0) {
-      const placeholders = [...excludeKeys].map(() => "?").join(", ");
+    const excludeMemoryIds = options.excludeMemoryIds;
 
-      sql += ` AND key NOT IN (${placeholders})`;
+    if (excludeMemoryIds && excludeMemoryIds.size > 0) {
+      sql += notInClause("id", excludeMemoryIds.size);
 
-      params.push(...excludeKeys);
+      params.push(...excludeMemoryIds);
     }
 
     sql += " ORDER BY importance DESC, updated_at DESC LIMIT ?";
@@ -317,7 +315,7 @@ export class MemorySearch {
       id: Number(row.id),
       category: row.category as MemoryCategory,
       key: String(row.key),
-      content: String(row.content),
+      content: redactSecrets(String(row.content)).text,
       importance: Number(row.importance),
       updatedAt: Number(row.updated_at),
     }));
@@ -325,9 +323,10 @@ export class MemorySearch {
 
   private searchMessagesByTokens(
     tokens: readonly string[],
-    limit: number,
-    excludeMessageIds?: ReadonlySet<number>,
+    options: MemorySearchOptions,
   ): MessageSearchHit[] {
+    const limit = clampLimit(options.limitMessages, SEARCH_MAX_MESSAGES);
+
     const clauses = tokens.map(() => "content LIKE ? ESCAPE '\\'");
 
     const params: Array<string | number> = tokens.map(
@@ -338,12 +337,20 @@ export class MemorySearch {
          FROM messages
          WHERE interrupted = 0 AND ${clauses.join(" AND ")}`;
 
-    if (excludeMessageIds && excludeMessageIds.size > 0) {
-      const placeholders = [...excludeMessageIds].map(() => "?").join(", ");
+    const excludeMessageIds = options.excludeMessageIds;
 
-      sql += ` AND id NOT IN (${placeholders})`;
+    if (excludeMessageIds && excludeMessageIds.size > 0) {
+      sql += notInClause("id", excludeMessageIds.size);
 
       params.push(...excludeMessageIds);
+    }
+
+    const excludeSessionIds = options.excludeSessionIds;
+
+    if (excludeSessionIds && excludeSessionIds.size > 0) {
+      sql += notInClause("session_id", excludeSessionIds.size);
+
+      params.push(...excludeSessionIds);
     }
 
     sql += " ORDER BY id DESC LIMIT ?";
