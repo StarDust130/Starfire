@@ -13,6 +13,7 @@ import {
 import { createElectronPorts } from "./agent/electron-ports.js";
 import { startDeviceBridge } from "./deviceBridge.js";
 import { startEveRuntime, stopEveRuntime } from "./eve-runtime.js";
+import type { MemoryDatabase } from "./memory/database.js";
 import { RealtimeVoiceBridge } from "./realtimeVoice";
 
 const DEV_SERVER_URL =
@@ -33,6 +34,8 @@ let mainWindow: BrowserWindow | null = null;
 let voiceBridge: RealtimeVoiceBridge | null = null;
 
 let stopDeviceBridge: (() => Promise<void>) | null = null;
+
+let memoryDatabase: MemoryDatabase | null = null;
 
 type DragSession = {
   offsetX: number;
@@ -277,7 +280,7 @@ ipcMain.on("starfire:drag-end", () => {
   stopDrag();
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   console.log(`[main] 🖥 platform: ${process.platform}`);
 
   console.log(
@@ -297,6 +300,34 @@ app.whenReady().then(() => {
   createWindow();
 
   registerGlobalShortcut();
+
+  /*
+   * Memory V1.1 — one trusted SQLite store owned by this process.
+   * Dynamic import on purpose: a missing or broken database backend
+   * only disables memory; Starfire itself still starts.
+   */
+  try {
+    const { openMemoryDatabase } = await import("./memory/index.js");
+
+    memoryDatabase = await openMemoryDatabase({
+      userDataDir: app.getPath("userData"),
+    });
+
+    if (memoryDatabase) {
+      console.log(
+        `[Memory] ✅ ready v${memoryDatabase.schemaVersion} → ${memoryDatabase.path}`,
+      );
+    } else {
+      console.log("[Memory] ⏸ disabled by configuration");
+    }
+  } catch (error) {
+    memoryDatabase = null;
+
+    console.error(
+      "[Memory] ❌ unavailable:",
+      error instanceof Error ? error.message : error,
+    );
+  }
 
   /*
    * One ports instance is Starfire's local capability layer, shared
@@ -352,7 +383,7 @@ app.on("second-instance", () => {
 app.on("will-quit", (event) => {
   /*
    * Hold the quit until everything (voice, device bridge, the
-   * in-process Eve runtime) has torn down.
+   * in-process Eve runtime, and memory) has torn down.
    */
   event.preventDefault();
 
@@ -378,6 +409,14 @@ app.on("will-quit", (event) => {
     console.log("[Starfire Device] event=bridge-stopped");
 
     await stopEveRuntime();
+
+    if (memoryDatabase) {
+      memoryDatabase.close();
+
+      memoryDatabase = null;
+
+      console.log("[Memory] event=database-closed");
+    }
 
     console.log(
       `[Starfire Device] event=shutdown-complete durationMs=${Date.now() - teardownStartedAt}`,
