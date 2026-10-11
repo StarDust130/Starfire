@@ -6,15 +6,19 @@ import { MAX_MESSAGE_CHARS, type MessageStore } from "./messages.js";
  * The realtime voice bridge notifies this recorder at the true
  * lifecycle points of a conversation. The recorder owns session
  * identity and turn ordering, and writes complete turns through the
- * MessageStore. It must NEVER throw into the voice path: every store
- * call is guarded, and memory problems degrade to "not captured".
+ * MessageStore. It must NEVER throw into the voice path.
+ *
+ * Replay protection: the provider's stable item_id (when it supplies
+ * one) is deduped exactly; the store's time-window guard remains as
+ * the fallback for providers that do not. Event ids are never
+ * invented here.
  */
 
 export interface VoiceTranscriptCapture {
   /** A voice activation became active. Once per activation. */
   onSessionStart(): void;
   /** The user finished one utterance (completed transcription). */
-  onUserTranscript(text: string): void;
+  onUserTranscript(text: string, itemId?: string): void;
   /** One chunk of the assistant's spoken transcript. */
   onAssistantDelta(delta: string): void;
   /** The response finished. interrupted=true = cancelled/barge-in. */
@@ -24,6 +28,8 @@ export interface VoiceTranscriptCapture {
 }
 
 export type VoiceCaptureHooks = {
+  /** Called when a voice session becomes active, with its id. */
+  onSessionStarted?(sessionId: string): void;
   /** Called after one turn is durably stored. Never throws into voice. */
   onTurnCaptured?(turn: {
     id: number;
@@ -36,7 +42,10 @@ export type VoiceCaptureHooks = {
 
 export class VoiceTranscriptRecorder implements VoiceTranscriptCapture {
   private sessionId: string | null = null;
+
   private assistantBuffer = "";
+
+  private readonly seenItemIds = new Set<string>();
 
   constructor(
     private readonly store: MessageStore,
@@ -57,17 +66,37 @@ export class VoiceTranscriptRecorder implements VoiceTranscriptCapture {
 
     this.sessionId = randomUUID();
 
+    this.seenItemIds.clear();
+
     console.log(`[Memory] 🎙 session started ${this.sessionId}`);
+
+    try {
+      this.hooks?.onSessionStarted?.(this.sessionId);
+    } catch {
+      // Hooks must never break the voice path.
+    }
   }
 
-  onUserTranscript(text: string): void {
+  onUserTranscript(text: string, itemId?: string): void {
     if (!this.sessionId || typeof text !== "string") {
       return;
+    }
+
+    if (typeof itemId === "string" && itemId.length > 0) {
+      if (this.seenItemIds.has(itemId)) {
+        console.log("[Memory] 🔁 duplicate provider event ignored (item_id)");
+
+        return;
+      }
     }
 
     const content = text.trim();
 
     if (content.length === 0) {
+      if (typeof itemId === "string" && itemId.length > 0) {
+        this.seenItemIds.add(itemId);
+      }
+
       return;
     }
 
@@ -79,6 +108,10 @@ export class VoiceTranscriptRecorder implements VoiceTranscriptCapture {
     this.flushAssistant(true, "user-barge-in");
 
     this.insert("user", content, false, "transcript");
+
+    if (typeof itemId === "string" && itemId.length > 0) {
+      this.seenItemIds.add(itemId);
+    }
   }
 
   onAssistantDelta(delta: string): void {
