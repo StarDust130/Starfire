@@ -346,10 +346,57 @@ app.whenReady().then(async () => {
 
       getCoreMemory = (): string => coreMemoryProvider.get();
 
-      transcriptRecorder = new memory.VoiceTranscriptRecorder(messageStore, {
-        onTurnCaptured: () => memoryOrchestrator?.notifyTurn(),
-        onSessionEnded: () => memoryOrchestrator?.notifySessionEnd(),
-      });
+      const explicitStore = new memory.MemoryStore(memoryDatabase);
+
+      transcriptRecorder = new memory.VoiceTranscriptRecorder(
+        new memory.MessageStore(memoryDatabase),
+        {
+          onTurnCaptured: (turn) => {
+            memoryOrchestrator?.notifyTurn();
+
+            /*
+             * Explicit-statement fast path: stored IMMEDIATELY and
+             * locally so a fact survives even if the app closes
+             * seconds later. GLM still refines the wording later —
+             * the stable key means confirm/supersede handles it.
+             */
+            if (turn.role !== "user") {
+              return;
+            }
+
+            const fact = memory.detectExplicitFact(turn.content);
+
+            if (!fact) {
+              return;
+            }
+
+            const safety = memory.redactSecrets(turn.content);
+
+            if (safety.redactions.length > 0) {
+              console.warn(
+                "[Memory] 🔒 explicit fact contained a secret-shaped value — not stored",
+              );
+
+              return;
+            }
+
+            const result = explicitStore.recordFact({
+              category: fact.category,
+              key: fact.key,
+              content: fact.content,
+              importance: fact.importance,
+              sourceMessageIds: [turn.id],
+            });
+
+            if (result.ok) {
+              console.log(
+                `[Memory] ⚡ ${result.action}: ${fact.category}/${fact.key} — ${fact.content}`,
+              );
+            }
+          },
+          onSessionEnded: () => memoryOrchestrator?.notifySessionEnd(),
+        },
+      );
 
       console.log(
         `[Memory] ✅ ready v${memoryDatabase.schemaVersion} → ${memoryDatabase.path}`,
