@@ -12,7 +12,7 @@ import type { DatabaseSync } from "node:sqlite";
  * - NEVER edit an applied migration. Add a new one with version + 1.
  */
 
-export const LATEST_SCHEMA_VERSION = 1;
+export const LATEST_SCHEMA_VERSION = 2;
 
 export type Migration = {
   version: number;
@@ -85,6 +85,26 @@ export const MIGRATIONS: readonly Migration[] = [
 
       CREATE INDEX IF NOT EXISTS idx_memory_jobs_pending
         ON memory_jobs (status, run_after);
+    `,
+  },
+  {
+    version: 2,
+    name: "one active memory per key",
+    sql: `
+      -- Safety before creating the partial unique index: demote any
+      -- duplicate active rows, keeping only the newest per
+      -- (category, key).
+      UPDATE memories
+      SET state = 'superseded'
+      WHERE state = 'active'
+        AND id NOT IN (
+          SELECT MAX(id) FROM memories WHERE state = 'active' GROUP BY category, key
+        );
+
+      -- Core invariant: at most ONE active memory per (category, key).
+      -- Superseded/archived rows may share the key freely.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_active_key
+        ON memories (category, key) WHERE state = 'active';
     `,
   },
 ];
