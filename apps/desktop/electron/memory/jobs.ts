@@ -256,6 +256,34 @@ export class MemoryJobs {
     return Number(result.changes);
   }
 
+  /** For 429 Retry-After: never let run_after be earlier than now+delay. */
+  delayJob(id: number, delayMs: number, now: number = Date.now()): void {
+    if (delayMs <= 0) {
+      return;
+    }
+
+    this.db.handle
+      .prepare(
+        "UPDATE memory_jobs SET run_after = MAX(run_after, ?) WHERE id = ? AND status = 'pending'",
+      )
+      .run(now + delayMs, id);
+  }
+
+  /**
+   * Rate-limit deferral: push run_after out WITHOUT burning an
+   * attempt. The provider asked for patience; the job did nothing
+   * wrong, so its 5 real attempts stay intact.
+   */
+  defer(id: number, delayMs: number, now: number = Date.now()): boolean {
+    const result = this.db.handle
+      .prepare(
+        "UPDATE memory_jobs SET status = 'pending', run_after = MAX(run_after, ?), updated_at = ? WHERE id = ? AND status = 'running'",
+      )
+      .run(now + delayMs, now, id);
+
+    return Number(result.changes) > 0;
+  }
+
   counts(): Record<MemoryJobStatus, number> {
     const counts: Record<MemoryJobStatus, number> = {
       pending: 0,
