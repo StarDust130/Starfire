@@ -1,9 +1,8 @@
 /*
  * Memory V1.1 — public entry point.
  *
- * Everything outside electron/memory imports from this door. Later
- * slices (GLM extraction, orchestration) will hang their exports
- * here too.
+ * Everything outside electron/memory imports from this door. The
+ * orchestrator slice will hang its exports here too.
  */
 
 export {
@@ -22,6 +21,27 @@ export {
   openMemoryDatabase,
 } from "./database.js";
 export {
+  buildExtractionMessages,
+  DEFAULT_EXTRACTION_TIMEOUT_MS,
+  DEFAULT_MAX_REQUESTS_PER_MINUTE,
+  DEFAULT_MAX_TOKENS_PER_MINUTE,
+  DEFAULT_MEMORY_BASE_URL,
+  DEFAULT_MEMORY_MODEL,
+  DEFAULT_MIN_INTERVAL_MS,
+  EXTRACTION_CONTEXT_TURNS,
+  EXTRACTION_MAX_DRAFTS,
+  EXTRACTION_MAX_OUTPUT_TOKENS,
+  type ExtractedMemoryDraft,
+  type ExtractionConfig,
+  type ExtractionFailure,
+  type ExtractionFailureKind,
+  type ExtractionResult,
+  type ExtractionTurn,
+  GlmExtractionProvider,
+  parseExtractionPayload,
+  resolveExtractionConfig,
+} from "./extraction.js";
+export {
   EXTRACTION_BATCH_MAX_CHARS,
   EXTRACTION_BATCH_MAX_MESSAGES,
   fitBatch,
@@ -36,6 +56,7 @@ export {
   RETRY_MAX_MS,
   STALE_RUNNING_MS,
 } from "./jobs.js";
+
 export {
   DEFAULT_IMPORTANCE,
   isMemoryCategory,
@@ -66,3 +87,15 @@ export {
   type Migration,
   runMigrations,
 } from "./migrations.js";
+
+export {
+  ExtractionRateLimiter,
+  estimateTokens,
+  WINDOW_MS,
+} from "./rate-limit.js";
+
+export {
+  type RedactionResult,
+  redactSecrets,
+  redactTurns,
+} from "./redaction.js";
