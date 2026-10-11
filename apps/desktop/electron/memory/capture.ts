@@ -25,7 +25,11 @@ export interface VoiceTranscriptCapture {
 
 export type VoiceCaptureHooks = {
   /** Called after one turn is durably stored. Never throws into voice. */
-  onTurnCaptured?(turn: { id: number; role: "user" | "assistant" }): void;
+  onTurnCaptured?(turn: {
+    id: number;
+    role: "user" | "assistant";
+    content: string;
+  }): void;
   /** Called when an activation fully ends. */
   onSessionEnded?(): void;
 };
@@ -155,7 +159,7 @@ export class VoiceTranscriptRecorder implements VoiceTranscriptCapture {
         );
 
         try {
-          this.hooks?.onTurnCaptured?.({ id: stored.id, role });
+          this.hooks?.onTurnCaptured?.({ id: stored.id, role, content });
         } catch {
           // Hooks must never break the voice path.
         }
