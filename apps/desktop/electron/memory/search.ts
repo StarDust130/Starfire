@@ -17,6 +17,9 @@ import { redactSecrets } from "./redaction.js";
  *   invisible).
  * - Privacy: message content is redacted in results — a search must
  *   never surface a secret from an old transcript.
+ * - SQL-level exclusions (excludeKeys / excludeMessageIds) let the
+ *   Context Builder remove Core-Memory duplicates and live-session
+ *   turns INSIDE the query, so crowded-out results cannot happen.
  * - Pure SQLite: no embeddings, no model calls, sub-millisecond at
  *   companion scale. FTS5/vector search can replace the internals
  *   later without changing this public API.
@@ -155,14 +158,12 @@ export type MemorySearchResult = {
 export type MemorySearchOptions = {
   limitMemories?: number;
   limitMessages?: number;
+  /** Memory keys to exclude (e.g. everything Core Memory already carries). */
+  excludeKeys?: ReadonlySet<string>;
+  /** Message row ids to exclude (e.g. the live conversation's turns). */
+  excludeMessageIds?: ReadonlySet<number>;
 };
 
-/**
- * Splits a raw query into meaningful search tokens: lowercase,
- * unicode-aware, punctuation stripped, stopwords removed,
- * deduplicated, hard-capped. Empty output = "nothing searchable",
- * which callers must treat as an empty result (never a full scan).
- */
 export function normalizeSearchQuery(raw: string): string[] {
   if (typeof raw !== "string") {
     return [];
@@ -243,10 +244,12 @@ export class MemorySearch {
       memories: this.searchMemoriesByTokens(
         tokens,
         clampLimit(options.limitMemories, SEARCH_MAX_MEMORIES),
+        options.excludeKeys,
       ),
       messages: this.searchMessagesByTokens(
         tokens,
         clampLimit(options.limitMessages, SEARCH_MAX_MESSAGES),
+        options.excludeMessageIds,
       ),
     };
   }
@@ -280,6 +283,7 @@ export class MemorySearch {
   private searchMemoriesByTokens(
     tokens: readonly string[],
     limit: number,
+    excludeKeys?: ReadonlySet<string>,
   ): MemorySearchHit[] {
     const clauses = tokens.map(
       () => "(content LIKE ? ESCAPE '\\' OR key LIKE ? ESCAPE '\\')",
@@ -293,15 +297,21 @@ export class MemorySearch {
       params.push(pattern, pattern);
     }
 
-    const rows = this.db.handle
-      .prepare(
-        `SELECT id, category, key, content, importance, updated_at
+    let sql = `SELECT id, category, key, content, importance, updated_at
          FROM memories
-         WHERE state = 'active' AND ${clauses.join(" AND ")}
-         ORDER BY importance DESC, updated_at DESC
-         LIMIT ?`,
-      )
-      .all(...params, limit);
+         WHERE state = 'active' AND ${clauses.join(" AND ")}`;
+
+    if (excludeKeys && excludeKeys.size > 0) {
+      const placeholders = [...excludeKeys].map(() => "?").join(", ");
+
+      sql += ` AND key NOT IN (${placeholders})`;
+
+      params.push(...excludeKeys);
+    }
+
+    sql += " ORDER BY importance DESC, updated_at DESC LIMIT ?";
+
+    const rows = this.db.handle.prepare(sql).all(...params, limit);
 
     return (rows as Array<Record<string, unknown>>).map((row) => ({
       id: Number(row.id),
@@ -316,20 +326,29 @@ export class MemorySearch {
   private searchMessagesByTokens(
     tokens: readonly string[],
     limit: number,
+    excludeMessageIds?: ReadonlySet<number>,
   ): MessageSearchHit[] {
     const clauses = tokens.map(() => "content LIKE ? ESCAPE '\\'");
 
-    const params = tokens.map((token) => `%${escapeLikePattern(token)}%`);
+    const params: Array<string | number> = tokens.map(
+      (token) => `%${escapeLikePattern(token)}%`,
+    );
 
-    const rows = this.db.handle
-      .prepare(
-        `SELECT id, session_id, role, content, created_at
+    let sql = `SELECT id, session_id, role, content, created_at
          FROM messages
-         WHERE interrupted = 0 AND ${clauses.join(" AND ")}
-         ORDER BY id DESC
-         LIMIT ?`,
-      )
-      .all(...params, limit);
+         WHERE interrupted = 0 AND ${clauses.join(" AND ")}`;
+
+    if (excludeMessageIds && excludeMessageIds.size > 0) {
+      const placeholders = [...excludeMessageIds].map(() => "?").join(", ");
+
+      sql += ` AND id NOT IN (${placeholders})`;
+
+      params.push(...excludeMessageIds);
+    }
+
+    sql += " ORDER BY id DESC LIMIT ?";
+
+    const rows = this.db.handle.prepare(sql).all(...params, limit);
 
     return (rows as Array<Record<string, unknown>>).map((row) => {
       const redacted = redactSecrets(String(row.content)).text;
