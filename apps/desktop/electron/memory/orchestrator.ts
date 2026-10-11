@@ -49,7 +49,7 @@ export type MemoryOrchestratorOptions = {
   messages: MessageStore;
   jobs: MemoryJobs;
   memories: MemoryStore;
-  provider: Pick<GlmExtractionProvider, "extract">;
+  provider: Pick<GlmExtractionProvider, "extract" | "isConfigured">;
   debounceMs?: number;
   shutdownBudgetMs?: number;
   now?: () => number;
@@ -99,12 +99,24 @@ export class MemoryOrchestrator {
       ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
-  /** Startup: reset jobs orphaned by a crash, then drain leftovers. */
+  /**
+   * Startup recovery: reset jobs orphaned by a crash, give permanently
+   * failed jobs a second chance (configuration may have been fixed),
+   * then drain leftovers.
+   */
   recover(): number {
     const recovered = this.options.jobs.recoverStaleRunning();
 
     if (recovered > 0) {
       console.log(`[Memory] 🔄 recovered ${recovered} interrupted job(s)`);
+    }
+
+    if (this.options.provider.isConfigured()) {
+      const requeued = this.options.jobs.requeueFailed();
+
+      if (requeued > 0) {
+        console.log(`[Memory] ♻️ requeued ${requeued} failed job(s) for retry`);
+      }
     }
 
     this.scheduleTick(DRAIN_CONTINUATION_DELAY_MS);
@@ -117,9 +129,8 @@ export class MemoryOrchestrator {
     /*
      * NO mid-conversation extraction: it fires constantly while the
      * user is still talking — it churns the shared rate limit, and
-     * fragments get extracted before their context completes (that is
-     * where garbage rows came from). Extraction triggers are now:
-     * session end, shutdown flush, startup recovery, and a full
+     * fragments get extracted before their context completes. Triggers
+     * are: session end, shutdown flush, startup recovery, and a full
      * pending batch.
      */
     const pending = this.options.messages.countUnprocessed();
@@ -147,7 +158,12 @@ export class MemoryOrchestrator {
     await this.tick();
   }
 
-  /** Best-effort bounded flush during app shutdown. */
+  /**
+   * Best-effort bounded flush during app shutdown. The in-flight tick
+   * AND the drain loop together can never exceed the budget: when it
+   * expires we proceed with teardown and let unfinished jobs stay
+   * recoverable (stale-running recovery / retryable failure).
+   */
   async shutdown(): Promise<void> {
     if (this.disposed) {
       return;
@@ -161,12 +177,20 @@ export class MemoryOrchestrator {
       this.tickTimer = null;
     }
 
-    await this.currentRun.catch(() => {});
+    const deadline = this.now() + this.shutdownBudgetMs;
 
-    const startedAt = this.now();
+    await Promise.race([
+      this.currentRun.catch(() => {}),
+      this.sleep(Math.max(0, deadline - this.now())),
+    ]);
 
-    while (this.now() - startedAt < this.shutdownBudgetMs) {
-      const progressed = await this.runOne();
+    while (this.now() < deadline) {
+      const remaining = deadline - this.now();
+
+      const progressed = await Promise.race([
+        this.runOne().catch(() => false),
+        this.sleep(remaining).then(() => false),
+      ]);
 
       if (!progressed) {
         break;
@@ -260,6 +284,17 @@ export class MemoryOrchestrator {
     let job: MemoryJob | null = this.options.jobs.nextRunnable(this.now());
 
     if (!job) {
+      if (!this.options.provider.isConfigured()) {
+        /*
+         * No API key / disabled: do NOT claim new batches. Claiming
+         * would mark messages processed and then permanently fail the
+         * job — losing them until a manual fix. Leaving them
+         * unprocessed means they are extracted automatically once
+         * configuration exists.
+         */
+        return false;
+      }
+
       job = this.claimBatch();
 
       if (!job) {
@@ -277,6 +312,7 @@ export class MemoryOrchestrator {
     if (turns.length === 0) {
       // Job references nothing durable — just finish it.
       this.options.jobs.complete(job.id, this.now());
+
       return true;
     }
 
@@ -296,12 +332,45 @@ export class MemoryOrchestrator {
       });
     } catch (error) {
       this.options.jobs.fail(job.id, error, this.now());
+
       return true;
     }
 
     if (result.ok) {
+      let storedCount = 0;
+
+      let failedCount = 0;
+
       for (const draft of result.drafts) {
-        this.applyDraft(draft);
+        if (this.applyDraft(draft)) {
+          storedCount += 1;
+        } else {
+          failedCount += 1;
+        }
+      }
+
+      if (failedCount > 0) {
+        /*
+         * Extraction succeeded but a database write failed (lock,
+         * disk, closed handle). Completing here would silently lose
+         * those memories, so the job stays retryable instead.
+         * recordFact is idempotent — already-stored drafts re-apply
+         * as "confirmed" on the retry.
+         */
+        this.options.jobs.fail(
+          job.id,
+          new Error(
+            `memory write failed for ${failedCount}/${result.drafts.length} draft(s)`,
+          ),
+          this.now(),
+        );
+
+        console.warn(
+          `[Memory] ⚠️ job #${job.id} kept retryable: ` +
+            `${failedCount} draft write(s) failed (${storedCount} stored)`,
+        );
+
+        return true;
       }
 
       this.options.jobs.complete(job.id, this.now());
@@ -315,15 +384,19 @@ export class MemoryOrchestrator {
       return true;
     }
 
-    // Rate limits defer the job without consuming a retry attempt.
+    // Failure paths — nothing was applied; the job retries or dies.
     if (result.kind === "rate_limited") {
+      /*
+       * Rate limits are the provider asking for patience, not the job
+       * doing something wrong — defer WITHOUT burning an attempt so a
+       * long shared-tier cooldown can never permanently fail good work.
+       */
       const delayMs = result.retryAfterMs ?? RATE_LIMIT_FALLBACK_MS;
 
       this.options.jobs.defer(job.id, delayMs, this.now());
 
       console.warn(
-        `[Memory] ⏳ job #${job.id} deferred ` +
-          `${Math.round(delayMs / 1000)}s (rate_limited)`,
+        `[Memory] ⏳ job #${job.id} deferred ${Math.round(delayMs / 1000)}s (rate_limited)`,
       );
 
       return true;
@@ -331,19 +404,22 @@ export class MemoryOrchestrator {
 
     const error = new Error(`${result.kind}: ${result.message}`);
 
-    // Permanent errors cannot succeed through retries.
     if (!result.retryable) {
+      /*
+       * Permanent (auth / client): retrying cannot succeed. Fail on
+       * attempt one so a broken key burns exactly one attempt, not
+       * five. recover() requeues these once configuration is fixed.
+       */
       this.options.jobs.failImmediately(job.id, error, this.now());
 
       console.error(
         `[Memory] ⛔ job #${job.id} failed permanently (${result.kind}); ` +
-          `fix configuration to re-extract later: ${result.message}`,
+          `will be requeued on next start once fixed: ${result.message}`,
       );
 
       return true;
     }
 
-    // Retryable errors follow the existing retry policy.
     this.options.jobs.fail(job.id, error, this.now());
 
     if (result.retryAfterMs !== null) {
@@ -390,7 +466,8 @@ export class MemoryOrchestrator {
     return jobId === null ? null : this.options.jobs.get(jobId);
   }
 
-  private applyDraft(draft: ExtractedMemoryDraft): void {
+  /** Returns true when the draft was durably stored. */
+  private applyDraft(draft: ExtractedMemoryDraft): boolean {
     try {
       const result = this.options.memories.recordFact({
         category: draft.category,
@@ -404,14 +481,20 @@ export class MemoryOrchestrator {
         console.log(
           `[Memory] 🧠 ${result.action}: ${draft.category}/${draft.key} — ${draft.content}`,
         );
-      } else {
-        console.warn(`[Memory] ⚠️ draft rejected: ${result.reason}`);
+
+        return true;
       }
+
+      console.warn(`[Memory] ⚠️ draft rejected: ${result.reason}`);
+
+      return false;
     } catch (error) {
       console.warn(
         "[Memory] ⚠️ draft apply failed:",
         error instanceof Error ? error.message : error,
       );
+
+      return false;
     }
   }
 }
