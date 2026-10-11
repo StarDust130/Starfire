@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 
 import path from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { buildSessionUpdate } from "../../realtimeProtocol";
 import {
   CORE_MEMORY_MAX_CHARS,
