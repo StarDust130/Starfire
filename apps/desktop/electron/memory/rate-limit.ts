@@ -2,9 +2,12 @@
  * Client-side limiter for the extraction provider.
  *
  * Account ceilings: 50 requests/min and 2,000,000 tokens/min shared
- * across keys. Defaults sit well below both (40 req/min, 1.6M
- * tokens/min) plus a minimum gap between requests. Time and sleep are
- * injectable so tests never really wait.
+ * across keys. Defaults sit well below both (20 req/min, 1.6M
+ * tokens/min) plus a minimum gap between requests.
+ *
+ * Cooldown: when the provider answers 429, it is asking EVERYONE to
+ * wait — penalty() blocks all acquisitions until then, so retries and
+ * brand-new jobs cannot hammer an overloaded service.
  */
 
 export const WINDOW_MS = 60_000;
@@ -28,6 +31,8 @@ export class ExtractionRateLimiter {
 
   private lastRequestAt = 0;
 
+  private cooldownUntil = 0;
+
   private readonly now: () => number;
 
   private readonly sleep: (ms: number) => Promise<void>;
@@ -40,13 +45,27 @@ export class ExtractionRateLimiter {
       ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
+  /** Provider asked everyone to wait: block acquisitions until then. */
+  penalty(ms: number, now: number = this.now()): void {
+    if (ms <= 0) {
+      return;
+    }
+
+    this.cooldownUntil = Math.max(this.cooldownUntil, now + ms);
+  }
+
+  /** Ms until the cooldown lifts (0 = clear to call). */
+  remainingCooldownMs(now: number = this.now()): number {
+    return Math.max(0, this.cooldownUntil - now);
+  }
+
   async acquire(estimatedTokens: number): Promise<void> {
     for (;;) {
       const now = this.now();
 
       this.prune(now);
 
-      let waitMs = 0;
+      let waitMs = this.remainingCooldownMs(now);
 
       if (this.requestTimes.length >= this.options.maxRequestsPerMinute) {
         waitMs = Math.max(waitMs, this.requestTimes[0] + WINDOW_MS - now);
