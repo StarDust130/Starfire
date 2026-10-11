@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 
 import path from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   type ExtractedMemoryDraft,
   type ExtractionResult,
   type ExtractionTurn,
+  MAX_JOB_ATTEMPTS,
   MemoryJobs,
   MemoryOrchestrator,
   MemoryStore,
@@ -356,6 +357,41 @@ describe("MemoryOrchestrator", () => {
     expect(messages.countUnprocessed()).toBe(0);
   });
 
+  it("recovers a freshly running job IMMEDIATELY on startup (regression)", async () => {
+    const { db, messages, memories, jobs, provider, orchestrator } =
+      await build();
+
+    await seedConversation(messages);
+
+    const ids = messages.listUnprocessed(10).map((turn) => turn.id);
+
+    db.withTransaction(() => {
+      jobs.enqueue(ids);
+      messages.markProcessed(ids);
+    });
+
+    const jobId = jobs.nextRunnable()?.id ?? 0;
+
+    expect(jobs.markRunning(jobId)).toBe(true);
+
+    // No staleness wait: a crash seconds ago must be recovered now,
+    // because startup is the ONLY time recovery runs.
+    orchestrator.recover();
+
+    provider.results.push({
+      ok: true,
+      empty: false,
+      drafts: [draft({})],
+      usage: null,
+      redactions: [],
+    });
+
+    await orchestrator.runNow();
+
+    expect(memories.countActive()).toBe(1);
+    expect(jobs.counts().done).toBe(1);
+  });
+
   it("does not claim batches while the provider is unconfigured", async () => {
     const { messages, jobs, provider, orchestrator } = await build();
 
@@ -420,6 +456,62 @@ describe("MemoryOrchestrator", () => {
       done: 1,
       failed: 0,
     });
+  });
+
+  it("does not requeue failed jobs that exhausted their attempts", async () => {
+    const { db, jobs } = await build();
+
+    const exhausted = jobs.enqueue([1]) as number;
+
+    jobs.markRunning(exhausted);
+
+    db.handle
+      .prepare(
+        "UPDATE memory_jobs SET status = 'failed', attempts = ? WHERE id = ?",
+      )
+      .run(MAX_JOB_ATTEMPTS, exhausted);
+
+    expect(jobs.requeueFailed()).toBe(0);
+
+    // A young permanent failure (fresh bad key) IS given a second chance.
+    const young = jobs.enqueue([2]) as number;
+
+    jobs.markRunning(young);
+    jobs.failImmediately(young, "bad api key");
+
+    expect(jobs.requeueFailed()).toBe(1);
+  });
+
+  it("NEVER logs private memory contents (privacy regression)", async () => {
+    const { messages, jobs, provider, orchestrator } = await build();
+
+    await seedConversation(messages);
+
+    provider.results.push({
+      ok: true,
+      empty: false,
+      drafts: [draft({ content: "Private fact: lives at Privet Drive 4." })],
+      usage: null,
+      redactions: [],
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      await orchestrator.runNow();
+
+      const logged = [...logSpy.mock.calls, ...warnSpy.mock.calls]
+        .map((call) => call.join(" "))
+        .join("\n");
+
+      expect(logged).not.toContain("Privet Drive");
+      expect(jobs.counts().done).toBe(1);
+    } finally {
+      logSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
   });
 
   it("excludes interrupted turns from batches", async () => {
