@@ -402,12 +402,6 @@ function failure(
   return { ok: false, kind, retryable, retryAfterMs, message };
 }
 
-function snippet(text: string): string {
-  const clean = text.replace(/\s+/g, " ").trim();
-
-  return clean.length > 200 ? `${clean.slice(0, 200)}…` : clean;
-}
-
 /**
  * Retry-After units are inconsistent in the wild: HTTP says seconds,
  * but this provider sends milliseconds ("60000" = 60s). Heuristic:
@@ -648,7 +642,7 @@ export class GlmExtractionProvider {
             "server",
             true,
             null,
-            `Provider server error ${response.status}: ${snippet(text)}`,
+            `Provider server error ${response.status}.`,
           );
         }
 
@@ -657,7 +651,7 @@ export class GlmExtractionProvider {
             "client",
             false,
             null,
-            `Provider client error ${response.status}: ${snippet(text)}`,
+            `Provider client error ${response.status}.`,
           );
         }
 
