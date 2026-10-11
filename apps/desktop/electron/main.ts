@@ -13,7 +13,9 @@ import {
 import { createElectronPorts } from "./agent/electron-ports.js";
 import { startDeviceBridge } from "./deviceBridge.js";
 import { startEveRuntime, stopEveRuntime } from "./eve-runtime.js";
+import { VoiceTranscriptRecorder } from "./memory/capture.js";
 import type { MemoryDatabase } from "./memory/database.js";
+import { MessageStore } from "./memory/messages.js";
 import { RealtimeVoiceBridge } from "./realtimeVoice";
 
 const DEV_SERVER_URL =
@@ -36,6 +38,8 @@ let voiceBridge: RealtimeVoiceBridge | null = null;
 let stopDeviceBridge: (() => Promise<void>) | null = null;
 
 let memoryDatabase: MemoryDatabase | null = null;
+
+let transcriptRecorder: VoiceTranscriptRecorder | null = null;
 
 type DragSession = {
   offsetX: number;
@@ -314,6 +318,10 @@ app.whenReady().then(async () => {
     });
 
     if (memoryDatabase) {
+      transcriptRecorder = new VoiceTranscriptRecorder(
+        new MessageStore(memoryDatabase),
+      );
+
       console.log(
         `[Memory] ✅ ready v${memoryDatabase.schemaVersion} → ${memoryDatabase.path}`,
       );
@@ -322,6 +330,8 @@ app.whenReady().then(async () => {
     }
   } catch (error) {
     memoryDatabase = null;
+
+    transcriptRecorder = null;
 
     console.error(
       "[Memory] ❌ unavailable:",
@@ -336,7 +346,11 @@ app.whenReady().then(async () => {
    */
   const ports = createElectronPorts();
 
-  voiceBridge = new RealtimeVoiceBridge(() => mainWindow, ports);
+  voiceBridge = new RealtimeVoiceBridge(
+    () => mainWindow,
+    ports,
+    transcriptRecorder ?? undefined,
+  );
 
   voiceBridge.register();
 
@@ -401,6 +415,8 @@ app.on("will-quit", (event) => {
     await voiceBridge?.dispose();
 
     voiceBridge = null;
+
+    transcriptRecorder = null;
 
     await stopDeviceBridge?.();
 
