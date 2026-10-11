@@ -129,6 +129,36 @@ export class MessageStore {
     return Number(row?.count ?? 0);
   }
 
+  /** Fetches specific turns by id, in id order (queue job payloads). */
+  getTurnsByIds(ids: number[]): StoredTurn[] {
+    if (ids.length === 0) {
+      return [];
+    }
+
+    const placeholders = ids.map(() => "?").join(", ");
+
+    const rows = this.db.handle
+      .prepare(
+        `SELECT id, session_id, turn_index, role, content, interrupted, created_at FROM messages WHERE id IN (${placeholders}) ORDER BY id`,
+      )
+      .all(...ids);
+
+    return rows.map((row) => this.mapRow(row as Record<string, unknown>));
+  }
+
+  /** The `limit` turns immediately before `beforeId` (oldest first). */
+  listRecentBefore(beforeId: number, limit: number): StoredTurn[] {
+    const rows = this.db.handle
+      .prepare(
+        "SELECT id, session_id, turn_index, role, content, interrupted, created_at FROM messages WHERE id < ? ORDER BY id DESC LIMIT ?",
+      )
+      .all(beforeId, Math.max(1, limit));
+
+    return rows
+      .map((row) => this.mapRow(row as Record<string, unknown>))
+      .reverse();
+  }
+
   private mapRow(row: Record<string, unknown>): StoredTurn {
     return {
       id: Number(row.id),
