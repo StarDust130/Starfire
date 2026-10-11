@@ -10,6 +10,12 @@ import type { MemoryCategory } from "./memories.js";
  *
  * Design rules:
  * - Narrow patterns only: wrong guesses are worse than no fast path.
+ * - Negations never match ("my name is not X" stores nothing).
+ * - Multi-word names only when continuation words are Capitalized
+ *   (proper-noun signal) — conservative by design.
+ * - NO global /i flag: it would silently make the Capitalized
+ *   continuation rule case-insensitive too ("john smith" would save
+ *   "John Smith"). Trigger words handle their own case tolerance.
  * - Questions never match ("do you remember my name?" stores nothing).
  * - Secret-shaped statements are refused by the caller (redaction).
  * - GLM still runs later on the same turns; the stable key means its
@@ -23,8 +29,33 @@ export type ExplicitFact = {
   importance: number;
 };
 
+/*
+ * Trigger words tolerate any case via character classes; the capture
+ * group stays case-strict: continuation words MUST start [A-Z].
+ */
 const NAME_PATTERN =
-  /\b(?:my name is|call me|i am called|i'?m called|mera naam(?: hai)?)\s+([A-Za-z][A-Za-z'-]{0,30})\b/i;
+  /\b(?:[Mm]y [Nn]ame [Ii]s|[Cc]all [Mm]e|[Ii] [Aa][Mm] [Cc]alled|[Ii]'?[Mm] [Cc]alled|[Mm]era [Nn]aam(?: [Hh]ai)?)\s+([A-Za-z][A-Za-z'-]{0,30}(?:\s+[A-Z][A-Za-z'-]{0,30}){0,2})\b/;
+
+/*
+ * Words that turn "my name is ___" into a negation or uncertainty —
+ * a correction like "my name is not Thor" must NEVER store "Not".
+ */
+const NAME_NEGATIONS = new Set([
+  "not",
+  "no",
+  "never",
+  "nah",
+  "nahi",
+  "unknown",
+  "nothing",
+  "none",
+  "unsure",
+  "maybe",
+  "later",
+  "skip",
+  "dont",
+  "idk",
+]);
 
 const COLOR_PATTERN =
   /\bmy favorite (?:color|colour) is\s+([A-Za-z]+(?: [A-Za-z]+){0,2})\b/i;
@@ -48,10 +79,16 @@ export function detectExplicitFact(text: string): ExplicitFact | null {
   const name = NAME_PATTERN.exec(trimmed);
 
   if (name?.[1]) {
+    const words = name[1].trim().split(/\s+/);
+
+    if (NAME_NEGATIONS.has(words[0]?.toLowerCase() ?? "")) {
+      return null;
+    }
+
     return {
       category: "profile",
       key: "user.name",
-      content: `The user's name is ${displayCase(name[1])}.`,
+      content: `The user's name is ${words.map(displayCase).join(" ")}.`,
       importance: 5,
     };
   }
