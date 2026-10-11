@@ -40,6 +40,10 @@ let memoryDatabase: MemoryDatabase | null = null;
 
 let getCoreMemory: (() => string) | null = null;
 
+let searchMemory: ((query: string) => string) | null = null;
+
+const liveSessionMessageIds = new Set<number>();
+
 let transcriptRecorder: InstanceType<
   typeof import("./memory/capture.js")["VoiceTranscriptRecorder"]
 > | null = null;
@@ -348,10 +352,24 @@ app.whenReady().then(async () => {
 
       const explicitStore = new memory.MemoryStore(memoryDatabase);
 
+      // Context Engine — retrieve relevant saved memories and past chats.
+      const contextBuilder = new memory.ContextBuilder(
+        explicitStore,
+        new memory.MemorySearch(memoryDatabase),
+      );
+
+      searchMemory = (query: string): string =>
+        contextBuilder.build(query, {
+          excludeMessageIds: new Set(liveSessionMessageIds),
+        });
+
       transcriptRecorder = new memory.VoiceTranscriptRecorder(
         new memory.MessageStore(memoryDatabase),
         {
           onTurnCaptured: (turn) => {
+            // Track current-session messages so search avoids duplicates.
+            liveSessionMessageIds.add(turn.id);
+
             memoryOrchestrator?.notifyTurn();
 
             /*
@@ -394,7 +412,15 @@ app.whenReady().then(async () => {
               );
             }
           },
-          onSessionEnded: () => memoryOrchestrator?.notifySessionEnd(),
+          onSessionEnded: () => {
+            /*
+             * After a session ends its turns become searchable past
+             * chats — stop excluding them.
+             */
+            liveSessionMessageIds.clear();
+
+            memoryOrchestrator?.notifySessionEnd();
+          },
         },
       );
 
@@ -428,6 +454,7 @@ app.whenReady().then(async () => {
     ports,
     transcriptRecorder ?? undefined,
     getCoreMemory ?? undefined,
+    searchMemory ?? undefined,
   );
 
   voiceBridge.register();
@@ -440,7 +467,9 @@ app.whenReady().then(async () => {
    * Eve tools call it over HTTP, and an early tool call would otherwise
    * hit a closed port.
    */
-  startDeviceBridge(ports)
+  startDeviceBridge(ports, undefined, {
+    searchMemory: searchMemory ?? undefined,
+  })
     .then((stop) => {
       stopDeviceBridge = stop;
 
