@@ -285,6 +285,23 @@ export class MemoryJobs {
   }
 
   /**
+   * Deliberate recovery path for permanently-failed jobs (e.g. they
+   * died while the API key was missing or broken). Resets them to
+   * pending so the next configured run extracts them. The messages
+   * themselves were never touched — ids still resolve via
+   * getTurnsByIds. Idempotent: only 'failed' rows move.
+   */
+  requeueFailed(now: number = Date.now()): number {
+    const result = this.db.handle
+      .prepare(
+        "UPDATE memory_jobs SET status = 'pending', run_after = ?, updated_at = ? WHERE status = 'failed'",
+      )
+      .run(now, now);
+
+    return Number(result.changes);
+  }
+
+  /**
    * Permanent failure (auth, bad request, disabled): mark failed on
    * the FIRST attempt. Retrying cannot succeed, so no backoff cycles
    * are burned on configuration problems. The conversation turns stay
