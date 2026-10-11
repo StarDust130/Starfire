@@ -13,6 +13,49 @@ function freshDb(): DatabaseSync {
   return new DatabaseSync(":memory:");
 }
 
+function tableNames(db: DatabaseSync): string[] {
+  return db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+    )
+    .all()
+    .map((row) => String(row.name));
+}
+
+function indexNames(db: DatabaseSync): string[] {
+  return db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY name",
+    )
+    .all()
+    .map((row) => String(row.name));
+}
+
+function schemaVersion(db: DatabaseSync): number {
+  const row = db
+    .prepare("SELECT MAX(version) AS version FROM schema_version")
+    .get();
+
+  return Number(row?.version ?? 0);
+}
+
+function insertMemory(
+  db: DatabaseSync,
+  category: string,
+  key: string,
+  content: string,
+): number {
+  const now = Date.now();
+
+  const result = db
+    .prepare(
+      "INSERT INTO memories (category, key, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+    )
+    .run(category, key, content, now, now);
+
+  return Number(result.lastInsertRowid);
+}
+
 describe("runMigrations", () => {
   it("applies all migrations to a fresh database", () => {
     const db = freshDb();
@@ -20,13 +63,9 @@ describe("runMigrations", () => {
     const version = runMigrations(db);
 
     expect(version).toBe(LATEST_SCHEMA_VERSION);
+    expect(version).toBe(2);
 
-    const tables = db
-      .prepare(
-        "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
-      )
-      .all()
-      .map((row) => String(row.name));
+    const tables = tableNames(db);
 
     expect(tables).toEqual(
       expect.arrayContaining([
@@ -55,33 +94,105 @@ describe("runMigrations", () => {
     db.close();
   });
 
+  it("creates the one-active-per-key partial index", () => {
+    const db = freshDb();
+
+    runMigrations(db);
+
+    expect(indexNames(db)).toContain("idx_memories_active_key");
+
+    db.close();
+  });
+
+  it("enforces one active memory per (category, key)", () => {
+    const db = freshDb();
+
+    runMigrations(db);
+
+    const first = insertMemory(db, "profile", "user-name", "Thor");
+
+    expect(first).toBeGreaterThan(0);
+
+    expect(() =>
+      insertMemory(db, "profile", "user-name", "Someone else"),
+    ).toThrow(/UNIQUE/i);
+
+    // A different category is a different slot.
+    insertMemory(db, "fact", "user-name", "different slot");
+
+    // A non-active row frees the slot again.
+    db.prepare(
+      "UPDATE memories SET state = 'superseded' WHERE category = 'profile'",
+    ).run();
+
+    expect(() =>
+      insertMemory(db, "profile", "user-name", "allowed again"),
+    ).not.toThrow();
+
+    db.close();
+  });
+
+  it("demotes duplicate active rows when upgrading v1 -> v2", () => {
+    const db = freshDb();
+
+    runMigrations(
+      db,
+      MIGRATIONS.filter((migration) => migration.version === 1),
+    );
+
+    expect(schemaVersion(db)).toBe(1);
+
+    const oldId = insertMemory(db, "profile", "user-name", "old value");
+    const newId = insertMemory(db, "profile", "user-name", "new value");
+
+    expect(runMigrations(db)).toBe(2);
+
+    const oldRow = db
+      .prepare("SELECT state FROM memories WHERE id = ?")
+      .get(oldId);
+    const newRow = db
+      .prepare("SELECT state FROM memories WHERE id = ?")
+      .get(newId);
+
+    expect(String(oldRow?.state)).toBe("superseded");
+    expect(String(newRow?.state)).toBe("active");
+
+    const active = db
+      .prepare("SELECT COUNT(*) AS count FROM memories WHERE state = 'active'")
+      .get();
+
+    expect(Number(active?.count)).toBe(1);
+
+    const versions = db
+      .prepare("SELECT COUNT(*) AS count FROM schema_version")
+      .get();
+
+    expect(Number(versions?.count)).toBe(2);
+
+    db.close();
+  });
+
   it("rolls back a failed migration and stays usable for a retry", () => {
     const db = freshDb();
 
-    expect(runMigrations(db)).toBe(1);
+    expect(runMigrations(db)).toBe(LATEST_SCHEMA_VERSION);
 
     const broken: readonly Migration[] = [
       ...MIGRATIONS,
-      { version: 2, name: "broken", sql: "CREATE TABLE oops (" },
+      {
+        version: LATEST_SCHEMA_VERSION + 1,
+        name: "broken",
+        sql: "CREATE TABLE oops (",
+      },
     ];
 
-    expect(() => runMigrations(db, broken)).toThrow(/v2/);
+    expect(() => runMigrations(db, broken)).toThrow(/v3/);
 
-    const version = db
-      .prepare("SELECT MAX(version) AS version FROM schema_version")
-      .get();
+    expect(schemaVersion(db)).toBe(LATEST_SCHEMA_VERSION);
 
-    expect(Number(version?.version)).toBe(1);
+    expect(tableNames(db)).not.toContain("oops");
 
-    const hasOops = db
-      .prepare(
-        "SELECT COUNT(*) AS count FROM sqlite_master WHERE name = 'oops'",
-      )
-      .get();
-
-    expect(Number(hasOops?.count)).toBe(0);
-
-    expect(runMigrations(db, MIGRATIONS)).toBe(1);
+    expect(runMigrations(db, MIGRATIONS)).toBe(LATEST_SCHEMA_VERSION);
 
     db.close();
   });
