@@ -91,6 +91,7 @@ export class RealtimeVoiceBridge {
     private readonly getWindow: () => BrowserWindow | null,
     private readonly ports: AgentPorts,
     private readonly capture?: VoiceTranscriptCapture,
+    private readonly getCoreMemory?: () => string,
   ) {}
 
   register(): void {
@@ -519,8 +520,12 @@ export class RealtimeVoiceBridge {
           `[Starfire Voice] conn=${this.conn} event=session-created ` +
             `model=${String(event.info.model ?? REALTIME_MODEL)}`,
         );
-
-        this.send(buildSessionUpdate(STARFIRE_FUNCTION_SPECS));
+        this.send(
+          buildSessionUpdate(
+            STARFIRE_FUNCTION_SPECS,
+            this.getCoreMemory?.() ?? "",
+          ),
+        );
 
         return;
       }
