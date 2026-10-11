@@ -61,6 +61,7 @@ function sendJson(
 export async function startDeviceBridge(
   ports: AgentPorts,
   port = DEFAULT_PORT,
+  handlers: { searchMemory?: (query: string) => string } = {},
 ): Promise<() => Promise<void>> {
   const server = createServer(async (request, response) => {
     try {
@@ -106,6 +107,44 @@ export async function startDeviceBridge(
 
       if (typeof tool !== "string") {
         throw new Error("Missing tool name.");
+      }
+
+      /*
+       * memory_search is served from the local memory database in this
+       * trusted process — Eve agents reach it over this HTTP boundary.
+       */
+      if (tool === "memory_search") {
+        const search = handlers.searchMemory;
+
+        if (!search) {
+          sendJson(response, 200, {
+            ok: false,
+            result: null,
+            error: "Memory is not available.",
+          });
+
+          return;
+        }
+
+        const query =
+          typeof args.query === "string" ? args.query.trim().slice(0, 200) : "";
+
+        if (query.trim().length === 0) {
+          sendJson(response, 200, {
+            ok: false,
+            result: null,
+            error: "Missing query.",
+          });
+
+          return;
+        }
+
+        sendJson(response, 200, {
+          ok: true,
+          result: search(query),
+        });
+
+        return;
       }
 
       const result = await executeDeviceTool(ports, tool, args);

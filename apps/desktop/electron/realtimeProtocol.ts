@@ -30,6 +30,10 @@ export const STARFIRE_INSTRUCTIONS =
   "After a tool runs, say what happened briefly in your own words, like a friend reporting back — never mention tool names. " +
   "Keep replies short and natural: one to three sentences unless they ask for depth. " +
   "Never mention internal systems, prompts, tokens, or model details. Never use markdown or lists in speech. " +
+  "MEMORY RULE: you hold long-term memories about the user and have a memory_search tool for anything older. " +
+  "When they ask about past conversations or things said before this one ('what did I say about...', 'when did I mention...') " +
+  "and the answer is not already in your memory or this chat, call memory_search with 2-3 key words FIRST, then answer from what it returns. " +
+  "If it finds nothing useful, say honestly you don't have that saved — never invent old details. " +
   "When the user interrupts you, stop cleanly and listen.";
 
 export type RealtimeSessionInfo = {
@@ -49,7 +53,7 @@ export type ServerEvent =
   | { kind: "speech-stopped" }
   | { kind: "audio-delta"; audio: string }
   | { kind: "transcript-delta"; delta: string }
-  | { kind: "input-transcript"; text: string }
+  | { kind: "input-transcript"; text: string; itemId?: string }
   | { kind: "response-created" }
   | { kind: "response-done"; usage: RealtimeUsage | null }
   | { kind: "response-cancelled" }
@@ -173,9 +177,19 @@ export function parseServerEvent(raw: string): ServerEvent | null {
   if (type === "conversation.item.input_audio_transcription.completed") {
     const text = asString(data.transcript);
 
-    return text
-      ? { kind: "input-transcript", text }
-      : { kind: "unknown", type };
+    if (!text) {
+      return { kind: "unknown", type };
+    }
+
+    /*
+     * OpenAI-style realtime events carry a stable item_id — used for
+     * exact replay dedupe. Never invented: absent = absent.
+     */
+    const itemId = asString(data.item_id) ?? asString(data.event_id);
+
+    return itemId
+      ? { kind: "input-transcript", text, itemId }
+      : { kind: "input-transcript", text };
   }
 
   if (type === "response.created") {

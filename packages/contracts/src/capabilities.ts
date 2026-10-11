@@ -140,6 +140,22 @@ export const STARFIRE_CAPABILITIES: readonly StarfireCapability[] = [
     parameters: { type: "object", properties: {}, required: [] },
   },
   {
+    name: "memory_search",
+    description:
+      "Search the user's saved long-term memories and past conversations. Use when the user asks about something from BEFORE this conversation that you don't already know.",
+    kind: "session",
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Short search phrase with the 2-3 most important words.",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
     name: "end_session",
     description:
       "End the current Starfire conversation. Use only when the user clearly says goodbye or wants to stop.",

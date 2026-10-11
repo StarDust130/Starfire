@@ -118,7 +118,11 @@ describe("buildExtractionMessages", () => {
 });
 
 describe("parseExtractionPayload", () => {
-  const allowed = new Set([14, 15]);
+  // #14 was spoken by the user; #15 by the assistant.
+  const provenance = new Map<number, "user" | "assistant">([
+    [14, "user"],
+    [15, "assistant"],
+  ]);
 
   it("parses valid drafts, normalizes keys, filters provenance ids", () => {
     const result = parseExtractionPayload(
@@ -133,7 +137,7 @@ describe("parseExtractionPayload", () => {
           },
         ],
       }),
-      allowed,
+      provenance,
     );
 
     expect(result.ok).toBe(true);
@@ -144,8 +148,8 @@ describe("parseExtractionPayload", () => {
 
   it("accepts fenced JSON and coerces string numbers", () => {
     const result = parseExtractionPayload(
-      '```json\n{"memories":[{"category":"fact","key":"Editor","content":"Uses VS Code.","importance":"3","sourceMessageIds":[]}]}\n```',
-      allowed,
+      '```json\n{"memories":[{"category":"fact","key":"Editor","content":"Uses VS Code.","importance":"3","sourceMessageIds":[14]}]}\n```',
+      provenance,
     );
 
     expect(result.ok).toBe(true);
@@ -157,10 +161,15 @@ describe("parseExtractionPayload", () => {
       JSON.stringify({
         memories: [
           { category: "nonsense", key: "x", content: "bad category" },
-          { category: "fact", key: "editor", content: "Uses VS Code." },
+          {
+            category: "fact",
+            key: "editor",
+            content: "Uses VS Code.",
+            sourceMessageIds: [14],
+          },
         ],
       }),
-      allowed,
+      provenance,
     );
 
     expect(result.ok).toBe(true);
@@ -169,11 +178,11 @@ describe("parseExtractionPayload", () => {
   });
 
   it("rejects prose and non-memory payloads as malformed", () => {
-    expect(parseExtractionPayload("I found some memories!", allowed).ok).toBe(
-      false,
-    );
+    expect(
+      parseExtractionPayload("I found some memories!", provenance).ok,
+    ).toBe(false);
 
-    expect(parseExtractionPayload('{"other":1}', allowed).ok).toBe(false);
+    expect(parseExtractionPayload('{"other":1}', provenance).ok).toBe(false);
   });
 
   it("unwraps a nested memories object (real model behavior)", () => {
@@ -190,13 +199,11 @@ describe("parseExtractionPayload", () => {
           ],
         },
       }),
-      allowed,
+      provenance,
     );
 
     expect(result.ok).toBe(true);
     expect(result.ok && result.drafts).toHaveLength(1);
-    expect(result.ok && result.drafts[0]?.key).toBe("user.name");
-    expect(result.ok && result.drafts[0]?.sourceMessageIds).toEqual([14]);
   });
 
   it("drops drafts that echo redaction placeholders", () => {
@@ -212,10 +219,11 @@ describe("parseExtractionPayload", () => {
             category: "fact",
             key: "editor",
             content: "Uses VS Code.",
+            sourceMessageIds: [14],
           },
         ],
       }),
-      allowed,
+      provenance,
     );
 
     expect(result.ok).toBe(true);
@@ -237,10 +245,11 @@ describe("parseExtractionPayload", () => {
             category: "profile",
             key: "user.name",
             content: "Thor is the user's name.",
+            sourceMessageIds: [14],
           },
         ],
       }),
-      allowed,
+      provenance,
     );
 
     expect(result.ok).toBe(true);
@@ -248,15 +257,56 @@ describe("parseExtractionPayload", () => {
       "Thor is the user's name.",
     ]);
   });
+
+  it("REJECTS drafts whose only provenance is assistant messages", () => {
+    const result = parseExtractionPayload(
+      JSON.stringify({
+        memories: [
+          {
+            category: "fact",
+            key: "assistant.only",
+            content: "Unproven claim.",
+            sourceMessageIds: [15],
+          },
+          {
+            category: "fact",
+            key: "user.backed",
+            content: "Proven claim.",
+            sourceMessageIds: [15, 14],
+          },
+        ],
+      }),
+      provenance,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.drafts).toHaveLength(1);
+    expect(result.ok && result.drafts[0]?.key).toBe("user.backed");
+    expect(result.ok && result.drafts[0]?.sourceMessageIds).toEqual([14]);
+  });
+
+  it("REJECTS drafts with no valid source ids at all", () => {
+    const result = parseExtractionPayload(
+      JSON.stringify({
+        memories: [
+          { category: "fact", key: "orphan", content: "Nobody said this." },
+        ],
+      }),
+      provenance,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.drafts).toEqual([]);
+  });
 });
 
 describe("parseRetryAfterMs", () => {
   it("treats small values as seconds and huge values as milliseconds", () => {
     expect(parseRetryAfterMs("7")).toBe(7_000);
-    expect(parseRetryAfterMs("60000")).toBe(60_000);
+    expect(parseRetryAfterMs("60000")).toBe(60_000); // not 16.7 hours!
     expect(parseRetryAfterMs(null)).toBeNull();
     expect(parseRetryAfterMs("nonsense")).toBeNull();
-    expect(parseRetryAfterMs("99999999")).toBe(600_000);
+    expect(parseRetryAfterMs("99999999")).toBe(600_000); // 10-min clamp
   });
 });
 
@@ -396,36 +446,6 @@ describe("GlmExtractionProvider", () => {
     expect(result.ok ? null : result.retryAfterMs).toBe(7_000);
   });
 
-  it("enters a cooldown after a 429 and skips the network until it lifts", async () => {
-    let calls = 0;
-
-    const fetchFn = (async (): Promise<Response> => {
-      calls += 1;
-
-      return new Response("overloaded", {
-        status: 429,
-        headers: { "retry-after": "60000" },
-      });
-    }) as unknown as typeof fetch;
-
-    const provider = new GlmExtractionProvider(testConfig(), fetchFn);
-
-    const first = await extractWith(provider, [
-      { id: 1, role: "user", content: "hi" },
-    ]);
-
-    expect(first.ok ? null : first.kind).toBe("rate_limited");
-    expect(first.ok ? null : first.retryAfterMs).toBe(60_000);
-    expect(calls).toBe(1);
-
-    const second = await extractWith(provider, [
-      { id: 2, role: "user", content: "hi" },
-    ]);
-
-    expect(second.ok ? null : second.kind).toBe("rate_limited");
-    expect(calls).toBe(1);
-  });
-
   it("classifies 5xx as retryable and 4xx as permanent", async () => {
     const server = new GlmExtractionProvider(
       testConfig(),
@@ -486,6 +506,59 @@ describe("GlmExtractionProvider", () => {
     expect(networkResult.ok ? null : networkResult.retryable).toBe(true);
   });
 
+  it("timeout covers reading the response BODY, not just the headers", async () => {
+    /*
+     * Simulates a server that returns headers instantly, then stalls
+     * the body forever. The abort must fire during text() and map to
+     * a retryable timeout — this exact hang was a confirmed bug.
+     */
+    const fetchFn = (async (
+      _url: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const signal = init?.signal;
+
+      const stall = (): Promise<string> =>
+        new Promise((_resolve, reject) => {
+          const onAbort = (): void => {
+            reject(
+              Object.assign(new Error("The operation was aborted."), {
+                name: "AbortError",
+              }),
+            );
+          };
+
+          if (signal?.aborted) {
+            onAbort();
+
+            return;
+          }
+
+          signal?.addEventListener("abort", onAbort);
+        });
+
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        text: stall,
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    const provider = new GlmExtractionProvider(
+      testConfig({ timeoutMs: 50 }),
+      fetchFn,
+    );
+
+    const result = await extractWith(provider, [
+      { id: 1, role: "user", content: "hi" },
+    ]);
+
+    expect(result.ok).toBe(false);
+    expect(result.ok ? null : result.kind).toBe("timeout");
+    expect(result.ok ? null : result.retryable).toBe(true);
+  });
+
   it("classifies malformed model output as retryable", async () => {
     const { fetchFn } = makeFetch(() => okBody("I cannot do that, sorry."));
 
@@ -501,6 +574,7 @@ describe("GlmExtractionProvider", () => {
 
   it("serializes concurrent extracts into one in-flight request", async () => {
     let inFlight = 0;
+
     let maxInFlight = 0;
 
     const fetchFn = (async (): Promise<Response> => {
@@ -524,6 +598,36 @@ describe("GlmExtractionProvider", () => {
     ]);
 
     expect(maxInFlight).toBe(1);
+  });
+
+  it("enters a cooldown after a 429 and skips the network until it lifts", async () => {
+    let calls = 0;
+
+    const fetchFn = (async (): Promise<Response> => {
+      calls += 1;
+
+      return new Response("overloaded", {
+        status: 429,
+        headers: { "retry-after": "60000" },
+      });
+    }) as unknown as typeof fetch;
+
+    const provider = new GlmExtractionProvider(testConfig(), fetchFn);
+
+    const first = await extractWith(provider, [
+      { id: 1, role: "user", content: "hi" },
+    ]);
+
+    expect(first.ok ? null : first.kind).toBe("rate_limited");
+    expect(first.ok ? null : first.retryAfterMs).toBe(60_000);
+    expect(calls).toBe(1);
+
+    const second = await extractWith(provider, [
+      { id: 2, role: "user", content: "hi" },
+    ]);
+
+    expect(second.ok ? null : second.kind).toBe("rate_limited");
+    expect(calls).toBe(1); // network NOT touched during cooldown
   });
 
   it("never logs the API key", async () => {

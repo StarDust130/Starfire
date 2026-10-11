@@ -7,7 +7,7 @@
     "dev": "node scripts/dev-electron.mjs",
     "preview": "vite preview",
     "electron": "electron .",
-    "test": "vitest run --passWithNoTests",
+    "test": "pnpm --filter @starfire/contracts build && vitest run --passWithNoTests",
     "format": "pnpm -w format",
     "lint": "pnpm -w lint",
     "check": "pnpm -w check",

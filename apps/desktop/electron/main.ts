@@ -10,11 +10,19 @@ import {
   screen,
   session,
 } from "electron";
+
 import { createElectronPorts } from "./agent/electron-ports.js";
+
 import { startDeviceBridge } from "./deviceBridge.js";
+
 import { startEveRuntime, stopEveRuntime } from "./eve-runtime.js";
+
+import type { VoiceTranscriptRecorder } from "./memory/capture.js";
+
 import type { MemoryDatabase } from "./memory/database.js";
+
 import type { MemoryOrchestrator } from "./memory/orchestrator.js";
+
 import { RealtimeVoiceBridge } from "./realtimeVoice";
 
 const DEV_SERVER_URL =
@@ -38,13 +46,17 @@ let stopDeviceBridge: (() => Promise<void>) | null = null;
 
 let memoryDatabase: MemoryDatabase | null = null;
 
+let memoryOrchestrator: MemoryOrchestrator | null = null;
+
+let transcriptRecorder: VoiceTranscriptRecorder | null = null;
+
 let getCoreMemory: (() => string) | null = null;
 
-let transcriptRecorder: InstanceType<
-  typeof import("./memory/capture.js")["VoiceTranscriptRecorder"]
-> | null = null;
+let searchMemory: ((query: string) => string) | null = null;
 
-let memoryOrchestrator: MemoryOrchestrator | null = null;
+let eveSearchMemory: ((query: string) => string) | null = null;
+
+let liveVoiceSessionId: string | null = null;
 
 type DragSession = {
   offsetX: number;
@@ -311,9 +323,9 @@ app.whenReady().then(async () => {
   registerGlobalShortcut();
 
   /*
-   * Memory V1.1 — one trusted SQLite store owned by this process.
-   * Keep SQLite initialization behind a dynamic import so memory
-   * initialization failures do not prevent Starfire from starting.
+   * Memory V1.1 + Context V1.2 — one trusted SQLite store owned by
+   * this process. Dynamic import on purpose: a missing or broken
+   * database backend only disables memory; Starfire itself starts.
    */
   try {
     const memory = await import("./memory/index.js");
@@ -327,11 +339,9 @@ app.whenReady().then(async () => {
         memory.resolveExtractionConfig(),
       );
 
-      const messageStore = new memory.MessageStore(memoryDatabase);
-
       memoryOrchestrator = new memory.MemoryOrchestrator({
         db: memoryDatabase,
-        messages: messageStore,
+        messages: new memory.MessageStore(memoryDatabase),
         jobs: new memory.MemoryJobs(memoryDatabase),
         memories: new memory.MemoryStore(memoryDatabase),
         provider,
@@ -339,18 +349,44 @@ app.whenReady().then(async () => {
 
       memoryOrchestrator.recover();
 
-      // Core Memory — expose current trusted memories to the voice bridge.
       const coreMemoryProvider = new memory.CoreMemoryProvider(
         new memory.MemoryStore(memoryDatabase),
       );
 
       getCoreMemory = (): string => coreMemoryProvider.get();
 
+      const contextBuilder = new memory.ContextBuilder(
+        new memory.MemorySearch(memoryDatabase),
+      );
+
+      /*
+       * Voice retrieval: excludes EXACTLY the rows Core Memory injected
+       * (budget-aware) and the live voice session. Eve retrieval: no
+       * exclusions — Eve never received Core Memory and is not part of
+       * the live conversation, so hiding anything from her would only
+       * lose relevant information.
+       */
+      searchMemory = (query: string): string =>
+        contextBuilder.build(query, {
+          excludeCoreMemoryIds: new Set(
+            coreMemoryProvider.select().injected.map((entry) => entry.id),
+          ),
+          excludeSessionIds:
+            liveVoiceSessionId === null
+              ? undefined
+              : new Set([liveVoiceSessionId]),
+        });
+
+      eveSearchMemory = (query: string): string => contextBuilder.build(query);
+
       const explicitStore = new memory.MemoryStore(memoryDatabase);
 
       transcriptRecorder = new memory.VoiceTranscriptRecorder(
         new memory.MessageStore(memoryDatabase),
         {
+          onSessionStarted: (sessionId: string) => {
+            liveVoiceSessionId = sessionId;
+          },
           onTurnCaptured: (turn) => {
             memoryOrchestrator?.notifyTurn();
 
@@ -390,11 +426,19 @@ app.whenReady().then(async () => {
 
             if (result.ok) {
               console.log(
-                `[Memory] ⚡ ${result.action}: ${fact.category}/${fact.key} — ${fact.content}`,
+                `[Memory] ⚡ ${result.action}: ${fact.category}/${fact.key} (chars=${fact.content.length})`,
               );
             }
           },
-          onSessionEnded: () => memoryOrchestrator?.notifySessionEnd(),
+          onSessionEnded: () => {
+            /*
+             * After a session ends its turns become searchable past
+             * chats for EVERYONE (including Eve).
+             */
+            liveVoiceSessionId = null;
+
+            memoryOrchestrator?.notifySessionEnd();
+          },
         },
       );
 
@@ -406,9 +450,6 @@ app.whenReady().then(async () => {
     }
   } catch (error) {
     memoryDatabase = null;
-    transcriptRecorder = null;
-    memoryOrchestrator = null;
-    getCoreMemory = null;
 
     console.error(
       "[Memory] ❌ unavailable:",
@@ -419,7 +460,7 @@ app.whenReady().then(async () => {
   /*
    * One ports instance is Starfire's local capability layer, shared
    * by the Eve device bridge and the realtime voice bridge so both
-   * paths see the same state.
+   * paths see the same state (e.g. apps Starfire launched herself).
    */
   const ports = createElectronPorts();
 
@@ -428,6 +469,7 @@ app.whenReady().then(async () => {
     ports,
     transcriptRecorder ?? undefined,
     getCoreMemory ?? undefined,
+    searchMemory ?? undefined,
   );
 
   voiceBridge.register();
@@ -440,7 +482,9 @@ app.whenReady().then(async () => {
    * Eve tools call it over HTTP, and an early tool call would otherwise
    * hit a closed port.
    */
-  startDeviceBridge(ports)
+  startDeviceBridge(ports, undefined, {
+    searchMemory: eveSearchMemory ?? undefined,
+  })
     .then((stop) => {
       stopDeviceBridge = stop;
 
@@ -474,8 +518,8 @@ app.on("second-instance", () => {
 
 app.on("will-quit", (event) => {
   /*
-   * Hold the quit until voice, the device bridge, the Eve runtime,
-   * the memory orchestrator, and the database have been shut down.
+   * Hold the quit until everything (voice, device bridge, the
+   * in-process Eve runtime, memory) has torn down.
    */
   event.preventDefault();
 
@@ -493,9 +537,6 @@ app.on("will-quit", (event) => {
     await voiceBridge?.dispose();
 
     voiceBridge = null;
-
-    transcriptRecorder = null;
-    getCoreMemory = null;
 
     await stopDeviceBridge?.();
 

@@ -291,12 +291,20 @@ export class MemoryJobs {
    * themselves were never touched — ids still resolve via
    * getTurnsByIds. Idempotent: only 'failed' rows move.
    */
+  /**
+   * Deliberate recovery path for permanently-failed jobs (e.g. they
+   * died while the API key was missing). Resets them to pending so the
+   * next configured run extracts them. BOUNDED: only jobs that have
+   * not exhausted MAX_JOB_ATTEMPTS lifetime attempts are requeued, so
+   * a poisoned batch can never loop failed->requeued across restarts
+   * forever.
+   */
   requeueFailed(now: number = Date.now()): number {
     const result = this.db.handle
       .prepare(
-        "UPDATE memory_jobs SET status = 'pending', run_after = ?, updated_at = ? WHERE status = 'failed'",
+        "UPDATE memory_jobs SET status = 'pending', run_after = ?, updated_at = ? WHERE status = 'failed' AND attempts < ?",
       )
-      .run(now, now);
+      .run(now, now, MAX_JOB_ATTEMPTS);
 
     return Number(result.changes);
   }

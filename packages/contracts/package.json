@@ -12,6 +12,7 @@
   },
   "scripts": {
     "build": "tsc -b --force",
+    "test": "tsc -b --force",
     "typecheck": "tsc -b --force --pretty false"
   },
   "dependencies": {

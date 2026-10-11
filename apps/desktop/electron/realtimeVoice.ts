@@ -5,8 +5,8 @@ import {
 } from "@starfire/contracts";
 import { type BrowserWindow, ipcMain } from "electron";
 import WebSocket from "ws";
-
 import type { VoiceTranscriptCapture } from "./memory/capture";
+import { formatMemorySearchResult } from "./memory/context";
 
 import {
   buildAudioAppend,
@@ -93,6 +93,7 @@ export class RealtimeVoiceBridge {
     private readonly ports: AgentPorts,
     private readonly capture?: VoiceTranscriptCapture,
     private readonly getCoreMemory?: () => string,
+    private readonly searchMemory?: (query: string) => string,
   ) {}
 
   register(): void {
@@ -643,7 +644,7 @@ export class RealtimeVoiceBridge {
       if (this.active) {
         this.emit({ kind: "input-transcript", text: event.text });
 
-        this.capture?.onUserTranscript(event.text);
+        this.capture?.onUserTranscript(event.text, event.itemId);
       }
 
       return;
@@ -891,6 +892,25 @@ export class RealtimeVoiceBridge {
     name: string,
     args: Record<string, unknown>,
   ): Promise<unknown> {
+    /*
+     * memory_search is served from Starfire's local memory database in
+     * this trusted process — never through device ports. Sub-millisecond:
+     * the result is ready well before the model's follow-up response.
+     */
+    if (name === "memory_search") {
+      if (!this.searchMemory) {
+        return "Memory is not available right now.";
+      }
+
+      const query = typeof args.query === "string" ? args.query : "";
+
+      if (query.trim().length === 0) {
+        return formatMemorySearchResult("");
+      }
+
+      return formatMemorySearchResult(this.searchMemory(query));
+    }
+
     return executeDeviceTool(this.ports, name, args);
   }
 

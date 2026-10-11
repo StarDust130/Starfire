@@ -4,8 +4,15 @@ import type { MemoryDatabase } from "./database.js";
  * Durable conversation transcript. One row per complete turn.
  *
  * turn_index is allocated per session (0,1,2,...) inside a transaction,
- * and the (session_id, turn_index, role) unique index turns a replayed
- * insert into a harmless no-op instead of a duplicate.
+ * and the (session_id, turn_index, role) unique index makes a replayed
+ * INSERT a harmless no-op instead of a duplicate.
+ *
+ * Replayed EVENTS (the provider delivering the same completed
+ * transcription twice) allocate a NEW turn_index, so the unique index
+ * cannot catch them — insertTurn therefore also rejects an identical
+ * (session, role, content) row recorded within DUPLICATE_WINDOW_MS.
+ * Legitimate repeats are safe: "Okay. Bye. Bye." is ONE transcript
+ * event, and real repeats spaced wider than the window store normally.
  *
  * interrupted=1 rows are kept for provenance but are never eligible
  * for memory extraction (see listUnprocessed).
@@ -14,6 +21,8 @@ import type { MemoryDatabase } from "./database.js";
 export type StoredRole = "user" | "assistant";
 
 export const MAX_MESSAGE_CHARS = 8_000;
+
+export const DUPLICATE_WINDOW_MS = 1_000;
 
 export type InsertTurnInput = {
   sessionId: string;
@@ -35,7 +44,13 @@ export type StoredTurn = {
 export class MessageStore {
   constructor(private readonly db: MemoryDatabase) {}
 
-  insertTurn(input: InsertTurnInput): { id: number; turnIndex: number } | null {
+  /**
+   * `now` is injectable for tests; production callers use the default.
+   */
+  insertTurn(
+    input: InsertTurnInput,
+    now: number = Date.now(),
+  ): { id: number; turnIndex: number } | null {
     const content = input.content.trim();
 
     if (content.length === 0) {
@@ -45,6 +60,22 @@ export class MessageStore {
     const safeContent = content.slice(0, MAX_MESSAGE_CHARS);
 
     return this.db.withTransaction(() => {
+      const recent = this.db.handle
+        .prepare(
+          "SELECT role, content, created_at FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+        )
+        .get(input.sessionId);
+
+      const isReplay =
+        recent !== undefined &&
+        String(recent.role) === input.role &&
+        String(recent.content) === safeContent &&
+        now - Number(recent.created_at) < DUPLICATE_WINDOW_MS;
+
+      if (isReplay) {
+        return null;
+      }
+
       const row = this.db.handle
         .prepare(
           "SELECT COALESCE(MAX(turn_index) + 1, 0) AS next FROM messages WHERE session_id = ?",
@@ -64,7 +95,7 @@ export class MessageStore {
             input.role,
             safeContent,
             input.interrupted ? 1 : 0,
-            Date.now(),
+            now,
           );
 
         return { id: Number(result.lastInsertRowid), turnIndex };
@@ -93,7 +124,7 @@ export class MessageStore {
 
   /**
    * Complete, non-interrupted turns not yet handed to extraction.
-   * Piece 4 (job queue) will consume this in batches.
+   * The job queue consumes this in batches.
    */
   listUnprocessed(limit: number): StoredTurn[] {
     const rows = this.db.handle

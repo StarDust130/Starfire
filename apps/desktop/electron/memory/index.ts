@@ -1,5 +1,5 @@
 /*
- * Memory V1.1 — public entry point.
+ * Memory V1.1 + Context Search V1.2 — public entry point.
  *
  * Everything outside electron/memory imports from this door. main.ts
  * uses dynamic import(...) on this module so a broken database
@@ -19,14 +19,25 @@ export {
   type MemoryConfig,
   resolveMemoryConfig,
 } from "./config.js";
-
+export {
+  CONTEXT_MAX_CHARS,
+  CONTEXT_MAX_MEMORIES,
+  CONTEXT_MAX_MESSAGES,
+  ContextBuilder,
+  type ContextBuildOptions,
+  formatMemorySearchResult,
+  formatRelevantContext,
+  NO_MEMORY_RESULTS_MESSAGE,
+  type SelectedContext,
+} from "./context.js";
 export {
   CORE_MEMORY_MAX_CHARS,
   CORE_MEMORY_MAX_MEMORIES,
   CoreMemoryProvider,
+  type CoreMemorySelection,
   formatCoreMemory,
+  selectCoreMemory,
 } from "./core-memory.js";
-
 export {
   DEFAULT_BUSY_TIMEOUT_MS,
   type MemoryDatabase,
@@ -120,3 +131,17 @@ export {
   redactSecrets,
   redactTurns,
 } from "./redaction.js";
+export {
+  MemorySearch,
+  type MemorySearchHit,
+  type MemorySearchOptions,
+  type MemorySearchResult,
+  type MessageSearchHit,
+  normalizeSearchQuery,
+  SEARCH_MAX_LIMIT,
+  SEARCH_MAX_MEMORIES,
+  SEARCH_MAX_MESSAGES,
+  SEARCH_MAX_TOKEN_CHARS,
+  SEARCH_MAX_TOKENS,
+  SEARCH_SNIPPET_CHARS,
+} from "./search.js";

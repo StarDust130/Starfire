@@ -18,7 +18,7 @@ import { redactTurns } from "./redaction.js";
  * model about memories. Pure: turns in -> drafts out. No database
  * access, no queue access; the orchestrator owns those.
  *
- * Provider details (from the official model docs + live verification):
+ * Provider details (official model docs + live verification):
  * POST {baseUrl}/chat/completions, bearer key, model glm-4-7-flash,
  * JSON mode via response_format, thinking disabled for latency,
  * no tools and no web search for extraction.
@@ -183,7 +183,7 @@ RULES:
 4. key: short stable english identifier, lowercase, letters/digits/dots/dashes only (e.g. "user.name", "editor", "goal.career", "project.starfire"). Reuse the same key when a later message updates the same fact.
 5. content: ONE concise sentence, third person, grounded ONLY in what was explicitly said. Keep the user's language for names and terms. Max ~200 chars.
 6. importance: 5 = core identity or major goal, 4 = strong preference or project, 3 = normal fact, 2 = minor, 1 = trivia.
-7. sourceMessageIds: the #ids from NEW MESSAGES this fact came from.
+7. sourceMessageIds: the #ids of the NEW MESSAGES this fact came from, preferring USER messages. Every memory MUST cite at least one valid USER-message id — memories without one are discarded.
 8. If two messages conflict, use the newest statement.
 9. If nothing is worth remembering return {"memories":[]} — empty is CORRECT for most small talk.
 10. At most 12 memories. Quality over quantity.
@@ -239,18 +239,15 @@ const draftSchema = z.object({
 });
 
 /*
- * Backstop against absence-style non-facts slipping through ("the
- * user's name is not yet known"). The prompt bans these; this catches
- * the rare model that ignores the ban. Narrow on purpose so real
- * negative facts ("user doesn't like X") survive.
+ * Backstop against absence-style non-facts ("the user's name is not
+ * yet known"). Narrow on purpose so real negative facts survive.
  */
 const ABSENCE_CONTENT_PATTERN =
   /\b(?:not yet (?:known|specified|decided|mentioned|provided|shared)|is unknown|are unknown|remains unknown|not specified|no information)\b/i;
 
 /**
- * json_object mode guarantees valid JSON, not our exact shape.
- * Real models sometimes wrap ("{"answer":{"memories":[...]}}") or
- * return a bare array — unwrap shallowly before validating.
+ * json_object mode guarantees valid JSON, not our exact shape. Real
+ * models sometimes wrap or return bare arrays — unwrap shallowly.
  */
 function unwrapMemoriesArray(parsed: unknown): unknown[] | null {
   if (Array.isArray(parsed)) {
@@ -307,14 +304,18 @@ export type ParsedPayload =
   | { ok: false; reason: string };
 
 /**
- * Strict-but-fair validation: find a memories array (possibly
- * wrapped), then drop individual bad items instead of poisoning the
- * batch. Provenance ids outside the batch are dropped. Redaction
- * placeholders and absence-style non-facts are NEVER stored.
+ * Strict validation with TRUSTWORTHY PROVENANCE:
+ * - a memories array must exist (possibly wrapped);
+ * - individual bad items are dropped, never poisoning the batch;
+ * - source ids must reference USER messages from the batch —
+ *   assistant confirmations and foreign ids prove nothing;
+ * - a draft with NO valid user-message source id is REJECTED:
+ *   unproven "memories" are how wrong facts enter the card box;
+ * - redaction placeholders and absence-style non-facts never store.
  */
 export function parseExtractionPayload(
   raw: string,
-  allowedIds: ReadonlySet<number>,
+  provenance: ReadonlyMap<number, "user" | "assistant">,
 ): ParsedPayload {
   const jsonText = extractJsonBlock(raw);
 
@@ -353,8 +354,6 @@ export function parseExtractionPayload(
       continue;
     }
 
-    // A redaction placeholder is NOT a fact — storing it would create
-    // garbage like "password is [REDACTED:assignment]".
     if (/\[REDACTED:/i.test(content)) {
       continue;
     }
@@ -365,9 +364,15 @@ export function parseExtractionPayload(
 
     const sourceIds = [
       ...new Set(
-        checked.data.sourceMessageIds.filter((id) => allowedIds.has(id)),
+        checked.data.sourceMessageIds.filter(
+          (id) => provenance.get(id) === "user",
+        ),
       ),
     ].slice(0, MAX_SOURCE_IDS);
+
+    if (sourceIds.length === 0) {
+      continue;
+    }
 
     drafts.push({
       category: checked.data.category,
@@ -397,17 +402,10 @@ function failure(
   return { ok: false, kind, retryable, retryAfterMs, message };
 }
 
-function snippet(text: string): string {
-  const clean = text.replace(/\s+/g, " ").trim();
-
-  return clean.length > 200 ? `${clean.slice(0, 200)}…` : clean;
-}
-
 /**
  * Retry-After units are inconsistent in the wild: HTTP says seconds,
- * but this provider sends milliseconds ("60000" = 60s, not 16.7h).
- * Heuristic: values > 3600 are treated as milliseconds; everything
- * is clamped to RETRY_AFTER_MAX_MS.
+ * but this provider sends milliseconds ("60000" = 60s). Heuristic:
+ * values > 3600 are milliseconds; everything is clamped.
  */
 export function parseRetryAfterMs(header: string | null): number | null {
   if (!header) {
@@ -535,7 +533,7 @@ export class GlmExtractionProvider {
 
     // During a provider cooldown, fail fast WITHOUT touching the
     // network — retries and new jobs must not hammer an overloaded
-    // service. The orchestrator defers the job for the remainder.
+    // service.
     const cooldownMs = this.limiter.remainingCooldownMs();
 
     if (cooldownMs > 0) {
@@ -547,7 +545,10 @@ export class GlmExtractionProvider {
       );
     }
 
-    const allowedIds = new Set(input.batch.map((turn) => turn.id));
+    // Provenance map: which batch ids exist, and which role spoke them.
+    const provenance = new Map<number, "user" | "assistant">(
+      input.batch.map((turn) => [turn.id, turn.role]),
+    );
 
     const redactedBatch = redactTurns(input.batch);
 
@@ -580,19 +581,22 @@ export class GlmExtractionProvider {
       await this.limiter.acquire(estimatedTokens);
 
       console.log(
-        `[Memory GLM] extract batch=[${[...allowedIds].join(",")}] ` +
+        `[Memory GLM] extract batch=[${[...provenance.keys()].join(",")}] ` +
           `ctx=${redactedContext.turns.length} chars=${system.length + user.length}` +
           (redactions.length > 0 ? ` redactions=${redactions.join("|")}` : ""),
       );
 
       const controller = new AbortController();
 
+      /*
+       * The timeout spans the ENTIRE exchange: connect, response
+       * headers, AND reading the body. A server that sends headers
+       * and then stalls the body must not hang us forever.
+       */
       const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
 
-      let response: Response;
-
       try {
-        response = await this.fetchFn(
+        const response = await this.fetchFn(
           `${this.config.baseUrl}/chat/completions`,
           {
             method: "POST",
@@ -604,107 +608,107 @@ export class GlmExtractionProvider {
             signal: controller.signal,
           },
         );
+
+        const text = await response.text();
+
+        if (response.status === 401 || response.status === 403) {
+          return failure(
+            "auth",
+            false,
+            null,
+            "Provider rejected the API key (auth error). Not retrying.",
+          );
+        }
+
+        if (response.status === 429) {
+          const retryAfterMs =
+            parseRetryAfterMs(response.headers.get("retry-after")) ??
+            RATE_LIMIT_FALLBACK_MS;
+
+          // The provider asked EVERYONE to wait — apply a global
+          // cooldown so new jobs and retries back off together.
+          this.limiter.penalty(retryAfterMs);
+
+          return failure(
+            "rate_limited",
+            true,
+            retryAfterMs,
+            `Provider rate limit hit (waiting ${Math.round(retryAfterMs / 1000)}s).`,
+          );
+        }
+
+        if (response.status >= 500) {
+          return failure(
+            "server",
+            true,
+            null,
+            `Provider server error ${response.status}.`,
+          );
+        }
+
+        if (response.status < 200 || response.status >= 300) {
+          return failure(
+            "client",
+            false,
+            null,
+            `Provider client error ${response.status}.`,
+          );
+        }
+
+        let payload: unknown;
+
+        try {
+          payload = JSON.parse(text);
+        } catch {
+          return failure(
+            "malformed",
+            true,
+            null,
+            "Provider returned a non-JSON body.",
+          );
+        }
+
+        const content = readChoiceContent(payload);
+
+        if (typeof content !== "string") {
+          return failure(
+            "malformed",
+            true,
+            null,
+            "Provider response had no message content.",
+          );
+        }
+
+        const parsedPayload = parseExtractionPayload(content, provenance);
+
+        if (!parsedPayload.ok) {
+          return failure(
+            "malformed",
+            true,
+            null,
+            `Model output rejected: ${parsedPayload.reason}`,
+          );
+        }
+
+        const usage = readUsage(payload);
+
+        console.log(
+          `[Memory GLM] extract ok drafts=${parsedPayload.drafts.length}` +
+            (usage
+              ? ` tokens in=${usage.inputTokens} out=${usage.outputTokens}`
+              : ""),
+        );
+
+        return {
+          ok: true,
+          empty: parsedPayload.drafts.length === 0,
+          drafts: parsedPayload.drafts,
+          usage,
+          redactions,
+        };
       } finally {
         clearTimeout(timer);
       }
-
-      const text = await response.text();
-
-      if (response.status === 401 || response.status === 403) {
-        return failure(
-          "auth",
-          false,
-          null,
-          "Provider rejected the API key (auth error). Not retrying.",
-        );
-      }
-
-      if (response.status === 429) {
-        const retryAfterMs =
-          parseRetryAfterMs(response.headers.get("retry-after")) ??
-          RATE_LIMIT_FALLBACK_MS;
-
-        // The provider asked EVERYONE to wait — apply a global cooldown
-        // so new jobs and retries back off together.
-        this.limiter.penalty(retryAfterMs);
-
-        return failure(
-          "rate_limited",
-          true,
-          retryAfterMs,
-          `Provider rate limit hit (waiting ${Math.round(retryAfterMs / 1000)}s).`,
-        );
-      }
-
-      if (response.status >= 500) {
-        return failure(
-          "server",
-          true,
-          null,
-          `Provider server error ${response.status}: ${snippet(text)}`,
-        );
-      }
-
-      if (response.status < 200 || response.status >= 300) {
-        return failure(
-          "client",
-          false,
-          null,
-          `Provider client error ${response.status}: ${snippet(text)}`,
-        );
-      }
-
-      let payload: unknown;
-
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        return failure(
-          "malformed",
-          true,
-          null,
-          "Provider returned a non-JSON body.",
-        );
-      }
-
-      const content = readChoiceContent(payload);
-
-      if (typeof content !== "string") {
-        return failure(
-          "malformed",
-          true,
-          null,
-          "Provider response had no message content.",
-        );
-      }
-
-      const parsedPayload = parseExtractionPayload(content, allowedIds);
-
-      if (!parsedPayload.ok) {
-        return failure(
-          "malformed",
-          true,
-          null,
-          `Model output rejected: ${parsedPayload.reason}`,
-        );
-      }
-
-      const usage = readUsage(payload);
-
-      console.log(
-        `[Memory GLM] extract ok drafts=${parsedPayload.drafts.length}` +
-          (usage
-            ? ` tokens in=${usage.inputTokens} out=${usage.outputTokens}`
-            : ""),
-      );
-
-      return {
-        ok: true,
-        empty: parsedPayload.drafts.length === 0,
-        drafts: parsedPayload.drafts,
-        usage,
-        redactions,
-      };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         return failure(
