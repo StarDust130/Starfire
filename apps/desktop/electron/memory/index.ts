@@ -34,7 +34,9 @@ export {
   CORE_MEMORY_MAX_CHARS,
   CORE_MEMORY_MAX_MEMORIES,
   CoreMemoryProvider,
+  type CoreMemorySelection,
   formatCoreMemory,
+  selectCoreMemory,
 } from "./core-memory.js";
 export {
   DEFAULT_BUSY_TIMEOUT_MS,
