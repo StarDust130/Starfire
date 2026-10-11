@@ -104,8 +104,15 @@ export class MemoryOrchestrator {
    * failed jobs a second chance (configuration may have been fixed),
    * then drain leftovers.
    */
+  /**
+   * Startup recovery. Starfire holds a single-instance lock, so ANY
+   * job left 'running' in the database belongs to a dead process —
+   * all of them are recovered IMMEDIATELY (staleness window 0).
+   * Waiting out a window would strand recent crashes forever, because
+   * nothing ever re-runs recovery after startup.
+   */
   recover(): number {
-    const recovered = this.options.jobs.recoverStaleRunning();
+    const recovered = this.options.jobs.recoverStaleRunning(0);
 
     if (recovered > 0) {
       console.log(`[Memory] 🔄 recovered ${recovered} interrupted job(s)`);
@@ -479,7 +486,7 @@ export class MemoryOrchestrator {
 
       if (result.ok) {
         console.log(
-          `[Memory] 🧠 ${result.action}: ${draft.category}/${draft.key} — ${draft.content}`,
+          `[Memory] 🧠 ${result.action}: ${draft.category}/${draft.key} (chars=${draft.content.length})`,
         );
 
         return true;
