@@ -53,7 +53,7 @@ export type ServerEvent =
   | { kind: "speech-stopped" }
   | { kind: "audio-delta"; audio: string }
   | { kind: "transcript-delta"; delta: string }
-  | { kind: "input-transcript"; text: string }
+  | { kind: "input-transcript"; text: string; itemId?: string }
   | { kind: "response-created" }
   | { kind: "response-done"; usage: RealtimeUsage | null }
   | { kind: "response-cancelled" }
@@ -177,9 +177,19 @@ export function parseServerEvent(raw: string): ServerEvent | null {
   if (type === "conversation.item.input_audio_transcription.completed") {
     const text = asString(data.transcript);
 
-    return text
-      ? { kind: "input-transcript", text }
-      : { kind: "unknown", type };
+    if (!text) {
+      return { kind: "unknown", type };
+    }
+
+    /*
+     * OpenAI-style realtime events carry a stable item_id — used for
+     * exact replay dedupe. Never invented: absent = absent.
+     */
+    const itemId = asString(data.item_id) ?? asString(data.event_id);
+
+    return itemId
+      ? { kind: "input-transcript", text, itemId }
+      : { kind: "input-transcript", text };
   }
 
   if (type === "response.created") {
