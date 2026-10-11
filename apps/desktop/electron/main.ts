@@ -13,9 +13,8 @@ import {
 import { createElectronPorts } from "./agent/electron-ports.js";
 import { startDeviceBridge } from "./deviceBridge.js";
 import { startEveRuntime, stopEveRuntime } from "./eve-runtime.js";
-import { VoiceTranscriptRecorder } from "./memory/capture.js";
 import type { MemoryDatabase } from "./memory/database.js";
-import { MessageStore } from "./memory/messages.js";
+import type { MemoryOrchestrator } from "./memory/orchestrator.js";
 import { RealtimeVoiceBridge } from "./realtimeVoice";
 
 const DEV_SERVER_URL =
@@ -39,7 +38,13 @@ let stopDeviceBridge: (() => Promise<void>) | null = null;
 
 let memoryDatabase: MemoryDatabase | null = null;
 
-let transcriptRecorder: VoiceTranscriptRecorder | null = null;
+let getCoreMemory: (() => string) | null = null;
+
+let transcriptRecorder: InstanceType<
+  typeof import("./memory/capture.js")["VoiceTranscriptRecorder"]
+> | null = null;
+
+let memoryOrchestrator: MemoryOrchestrator | null = null;
 
 type DragSession = {
   offsetX: number;
@@ -307,20 +312,44 @@ app.whenReady().then(async () => {
 
   /*
    * Memory V1.1 — one trusted SQLite store owned by this process.
-   * Dynamic import on purpose: a missing or broken database backend
-   * only disables memory; Starfire itself still starts.
+   * Keep SQLite initialization behind a dynamic import so memory
+   * initialization failures do not prevent Starfire from starting.
    */
   try {
-    const { openMemoryDatabase } = await import("./memory/index.js");
+    const memory = await import("./memory/index.js");
 
-    memoryDatabase = await openMemoryDatabase({
+    memoryDatabase = await memory.openMemoryDatabase({
       userDataDir: app.getPath("userData"),
     });
 
     if (memoryDatabase) {
-      transcriptRecorder = new VoiceTranscriptRecorder(
-        new MessageStore(memoryDatabase),
+      const provider = new memory.GlmExtractionProvider(
+        memory.resolveExtractionConfig(),
       );
+
+      const messageStore = new memory.MessageStore(memoryDatabase);
+
+      memoryOrchestrator = new memory.MemoryOrchestrator({
+        db: memoryDatabase,
+        messages: messageStore,
+        jobs: new memory.MemoryJobs(memoryDatabase),
+        memories: new memory.MemoryStore(memoryDatabase),
+        provider,
+      });
+
+      memoryOrchestrator.recover();
+
+      // Core Memory — expose current trusted memories to the voice bridge.
+      const coreMemoryProvider = new memory.CoreMemoryProvider(
+        new memory.MemoryStore(memoryDatabase),
+      );
+
+      getCoreMemory = (): string => coreMemoryProvider.get();
+
+      transcriptRecorder = new memory.VoiceTranscriptRecorder(messageStore, {
+        onTurnCaptured: () => memoryOrchestrator?.notifyTurn(),
+        onSessionEnded: () => memoryOrchestrator?.notifySessionEnd(),
+      });
 
       console.log(
         `[Memory] ✅ ready v${memoryDatabase.schemaVersion} → ${memoryDatabase.path}`,
@@ -330,8 +359,9 @@ app.whenReady().then(async () => {
     }
   } catch (error) {
     memoryDatabase = null;
-
     transcriptRecorder = null;
+    memoryOrchestrator = null;
+    getCoreMemory = null;
 
     console.error(
       "[Memory] ❌ unavailable:",
@@ -342,7 +372,7 @@ app.whenReady().then(async () => {
   /*
    * One ports instance is Starfire's local capability layer, shared
    * by the Eve device bridge and the realtime voice bridge so both
-   * paths see the same state (e.g. apps Starfire launched herself).
+   * paths see the same state.
    */
   const ports = createElectronPorts();
 
@@ -350,6 +380,7 @@ app.whenReady().then(async () => {
     () => mainWindow,
     ports,
     transcriptRecorder ?? undefined,
+    getCoreMemory ?? undefined,
   );
 
   voiceBridge.register();
@@ -396,8 +427,8 @@ app.on("second-instance", () => {
 
 app.on("will-quit", (event) => {
   /*
-   * Hold the quit until everything (voice, device bridge, the
-   * in-process Eve runtime, and memory) has torn down.
+   * Hold the quit until voice, the device bridge, the Eve runtime,
+   * the memory orchestrator, and the database have been shut down.
    */
   event.preventDefault();
 
@@ -417,6 +448,7 @@ app.on("will-quit", (event) => {
     voiceBridge = null;
 
     transcriptRecorder = null;
+    getCoreMemory = null;
 
     await stopDeviceBridge?.();
 
@@ -425,6 +457,12 @@ app.on("will-quit", (event) => {
     console.log("[Starfire Device] event=bridge-stopped");
 
     await stopEveRuntime();
+
+    if (memoryOrchestrator) {
+      await memoryOrchestrator.shutdown();
+
+      memoryOrchestrator = null;
+    }
 
     if (memoryDatabase) {
       memoryDatabase.close();
