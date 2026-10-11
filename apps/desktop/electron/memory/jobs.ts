@@ -284,6 +284,26 @@ export class MemoryJobs {
     return Number(result.changes) > 0;
   }
 
+  /**
+   * Permanent failure (auth, bad request, disabled): mark failed on
+   * the FIRST attempt. Retrying cannot succeed, so no backoff cycles
+   * are burned on configuration problems. The conversation turns stay
+   * in the messages table for a future re-extraction once fixed.
+   */
+  failImmediately(
+    id: number,
+    error: unknown,
+    now: number = Date.now(),
+  ): boolean {
+    const result = this.db.handle
+      .prepare(
+        "UPDATE memory_jobs SET status = 'failed', attempts = attempts + 1, last_error = ?, updated_at = ? WHERE id = ? AND status = 'running'",
+      )
+      .run(truncateError(error), now, id);
+
+    return Number(result.changes) > 0;
+  }
+
   counts(): Record<MemoryJobStatus, number> {
     const counts: Record<MemoryJobStatus, number> = {
       pending: 0,
