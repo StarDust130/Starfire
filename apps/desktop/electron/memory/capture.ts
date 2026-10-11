@@ -23,11 +23,21 @@ export interface VoiceTranscriptCapture {
   onSessionEnd(): void;
 }
 
+export type VoiceCaptureHooks = {
+  /** Called after one turn is durably stored. Never throws into voice. */
+  onTurnCaptured?(turn: { id: number; role: "user" | "assistant" }): void;
+  /** Called when an activation fully ends. */
+  onSessionEnded?(): void;
+};
+
 export class VoiceTranscriptRecorder implements VoiceTranscriptCapture {
   private sessionId: string | null = null;
   private assistantBuffer = "";
 
-  constructor(private readonly store: MessageStore) {}
+  constructor(
+    private readonly store: MessageStore,
+    private readonly hooks?: VoiceCaptureHooks,
+  ) {}
 
   get activeSessionId(): string | null {
     return this.sessionId;
@@ -93,9 +103,17 @@ export class VoiceTranscriptRecorder implements VoiceTranscriptCapture {
 
     this.flushAssistant(true, "session-end");
 
-    console.log(`[Memory] 🌙 session ended ${this.sessionId}`);
+    const ended = this.sessionId;
 
     this.sessionId = null;
+
+    console.log(`[Memory] 🌙 session ended ${ended}`);
+
+    try {
+      this.hooks?.onSessionEnded?.();
+    } catch {
+      // Hooks must never break the voice path.
+    }
   }
 
   private flushAssistant(interrupted: boolean, reason: string): void {
@@ -135,6 +153,12 @@ export class VoiceTranscriptRecorder implements VoiceTranscriptCapture {
           `[Memory] 📝 ${role} turn captured (chars=${content.length}` +
             `${interrupted ? ", interrupted" : ""}, ${reason})`,
         );
+
+        try {
+          this.hooks?.onTurnCaptured?.({ id: stored.id, role });
+        } catch {
+          // Hooks must never break the voice path.
+        }
       }
     } catch (error) {
       console.warn(
