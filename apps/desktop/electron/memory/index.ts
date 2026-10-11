@@ -25,7 +25,9 @@ export {
   CONTEXT_MAX_MESSAGES,
   ContextBuilder,
   type ContextBuildOptions,
+  formatMemorySearchResult,
   formatRelevantContext,
+  NO_MEMORY_RESULTS_MESSAGE,
   type SelectedContext,
 } from "./context.js";
 export {
