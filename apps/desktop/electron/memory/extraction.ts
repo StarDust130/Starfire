@@ -1,10 +1,11 @@
 import { z } from "zod";
 
+import type { MemoryCategory } from "./memories.js";
+
 import {
   MAX_MEMORY_CHARS,
   MAX_SOURCE_IDS,
   MEMORY_CATEGORIES,
-  type MemoryCategory,
   normalizeKey,
 } from "./memories.js";
 
@@ -15,9 +16,9 @@ import { redactTurns } from "./redaction.js";
 /*
  * GLM extraction provider — the ONLY place Starfire talks to a cloud
  * model about memories. Pure: turns in -> drafts out. No database
- * access, no queue access; the orchestrator (next slice) owns those.
+ * access, no queue access; the orchestrator owns those.
  *
- * Provider details (from the official model docs, not guessed):
+ * Provider details (from the official model docs + live verification):
  * POST {baseUrl}/chat/completions, bearer key, model glm-4-7-flash,
  * JSON mode via response_format, thinking disabled for latency,
  * no tools and no web search for extraction.
@@ -27,13 +28,18 @@ export const DEFAULT_MEMORY_BASE_URL = "https://api.empiriolabs.ai/v1";
 
 export const DEFAULT_MEMORY_MODEL = "glm-4-7-flash";
 
-export const DEFAULT_MAX_REQUESTS_PER_MINUTE = 40;
+/*
+ * The free tier is SHARED across users — observed 429s occur well
+ * below the documented 50/min. Stay conservative: 20/min with a 3s
+ * minimum gap, and honor Retry-After with a global cooldown.
+ */
+export const DEFAULT_MAX_REQUESTS_PER_MINUTE = 20;
 
 export const DEFAULT_MAX_TOKENS_PER_MINUTE = 1_600_000;
 
-export const DEFAULT_MIN_INTERVAL_MS = 1_200;
+export const DEFAULT_MIN_INTERVAL_MS = 3_000;
 
-export const DEFAULT_EXTRACTION_TIMEOUT_MS = 30_000;
+export const DEFAULT_EXTRACTION_TIMEOUT_MS = 45_000;
 
 export const EXTRACTION_MAX_OUTPUT_TOKENS = 2_000;
 
@@ -42,6 +48,10 @@ export const EXTRACTION_MAX_DRAFTS = 12;
 export const EXTRACTION_CONTEXT_TURNS = 12;
 
 export const CONTEXT_TURN_MAX_CHARS = 400;
+
+export const RATE_LIMIT_FALLBACK_MS = 60_000;
+
+export const RETRY_AFTER_MAX_MS = 600_000;
 
 export type ExtractionTurn = {
   id: number;
@@ -167,16 +177,26 @@ WHAT TO EXTRACT:
 - event: notable happenings worth recalling later
 
 RULES:
-1. Extract ONLY from NEW MESSAGES. The CONTEXT block exists to resolve pronouns and fragments ("My name is." / "Or more."). Never extract from CONTEXT, never invent facts.
+1. Extract ONLY from NEW MESSAGES. The CONTEXT block exists to resolve pronouns and fragments ("My name is." / "You can call me Thor."). Never extract from CONTEXT, never invent facts.
 2. Ignore small talk, greetings, news, weather, tool results, and anything transient.
 3. NEVER store secrets or anything marked [REDACTED:...]. Treat redacted values as unknown.
 4. key: short stable english identifier, lowercase, letters/digits/dots/dashes only (e.g. "user.name", "editor", "goal.career", "project.starfire"). Reuse the same key when a later message updates the same fact.
-5. content: ONE concise sentence, third person, grounded ONLY in what was said. Keep the user's language for names and terms. Max ~200 chars.
+5. content: ONE concise sentence, third person, grounded ONLY in what was explicitly said. Keep the user's language for names and terms. Max ~200 chars.
 6. importance: 5 = core identity or major goal, 4 = strong preference or project, 3 = normal fact, 2 = minor, 1 = trivia.
 7. sourceMessageIds: the #ids from NEW MESSAGES this fact came from.
 8. If two messages conflict, use the newest statement.
 9. If nothing is worth remembering return {"memories":[]} — empty is CORRECT for most small talk.
-10. At most 12 memories. Quality over quantity.`;
+10. At most 12 memories. Quality over quantity.
+11. NEVER store absence or uncertainty as a fact ("not yet known", "hasn't said", "no information"). If a detail is missing or unclear, extract nothing for it.
+12. NEVER invent derivations or connections that were not explicitly stated (e.g., what a name "means", why something happened).
+13. Ignore garbled, fragmentary, or unintelligible transcriptions entirely — do not guess what was meant. A name-like fragment alone is NOT a name.
+14. Tool results and assistant replies (weather, search, time, app actions) describe the WORLD, not the user. NEVER infer user attributes like location or city from them.
+15. One greeting or single word in a language does NOT mean the user speaks that language. Record a language only if the user clearly converses in it.
+16. When unsure, return fewer memories or none. A missed fact is better than a wrong one. Empty is always acceptable.
+
+EXAMPLES:
+- "hello" / "what's the weather?" / garbled audio -> {"memories":[]}
+- "my name is Thor" -> {"memories":[{"category":"profile","key":"user.name","content":"The user's name is Thor.","importance":5,"sourceMessageIds":[<that id>]}]}`;
 
 const CONTEXT_HEADER =
   "CONTEXT (older turns, READ-ONLY, for understanding only):";
@@ -218,9 +238,47 @@ const draftSchema = z.object({
   sourceMessageIds: z.array(z.coerce.number().int().positive()).default([]),
 });
 
-const payloadSchema = z.object({
-  memories: z.array(z.unknown()).max(50),
-});
+/*
+ * Backstop against absence-style non-facts slipping through ("the
+ * user's name is not yet known"). The prompt bans these; this catches
+ * the rare model that ignores the ban. Narrow on purpose so real
+ * negative facts ("user doesn't like X") survive.
+ */
+const ABSENCE_CONTENT_PATTERN =
+  /\b(?:not yet (?:known|specified|decided|mentioned|provided|shared)|is unknown|are unknown|remains unknown|not specified|no information)\b/i;
+
+/**
+ * json_object mode guarantees valid JSON, not our exact shape.
+ * Real models sometimes wrap ("{"answer":{"memories":[...]}}") or
+ * return a bare array — unwrap shallowly before validating.
+ */
+function unwrapMemoriesArray(parsed: unknown): unknown[] | null {
+  if (Array.isArray(parsed)) {
+    return parsed;
+  }
+
+  if (typeof parsed !== "object" || parsed === null) {
+    return null;
+  }
+
+  const record = parsed as Record<string, unknown>;
+
+  if (Array.isArray(record.memories)) {
+    return record.memories;
+  }
+
+  for (const value of Object.values(record)) {
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      Array.isArray((value as Record<string, unknown>).memories)
+    ) {
+      return (value as Record<string, unknown>).memories as unknown[];
+    }
+  }
+
+  return null;
+}
 
 function clampImportance(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) {
@@ -249,9 +307,10 @@ export type ParsedPayload =
   | { ok: false; reason: string };
 
 /**
- * Strict-but-fair validation: the whole payload must be a JSON object
- * with a memories array; individual bad items are dropped instead of
- * poisoning the batch. Provenance ids outside the batch are dropped.
+ * Strict-but-fair validation: find a memories array (possibly
+ * wrapped), then drop individual bad items instead of poisoning the
+ * batch. Provenance ids outside the batch are dropped. Redaction
+ * placeholders and absence-style non-facts are NEVER stored.
  */
 export function parseExtractionPayload(
   raw: string,
@@ -271,15 +330,15 @@ export function parseExtractionPayload(
     return { ok: false, reason: "invalid JSON" };
   }
 
-  const payload = payloadSchema.safeParse(parsed);
+  const memories = unwrapMemoriesArray(parsed);
 
-  if (!payload.success) {
-    return { ok: false, reason: 'expected {"memories":[...]}' };
+  if (memories === null) {
+    return { ok: false, reason: "expected a memories array" };
   }
 
   const drafts: ExtractedMemoryDraft[] = [];
 
-  for (const item of payload.data.memories) {
+  for (const item of memories) {
     const checked = draftSchema.safeParse(item);
 
     if (!checked.success) {
@@ -291,6 +350,16 @@ export function parseExtractionPayload(
     const content = checked.data.content.trim().slice(0, MAX_MEMORY_CHARS);
 
     if (key.length === 0 || content.length === 0) {
+      continue;
+    }
+
+    // A redaction placeholder is NOT a fact — storing it would create
+    // garbage like "password is [REDACTED:assignment]".
+    if (/\[REDACTED:/i.test(content)) {
+      continue;
+    }
+
+    if (ABSENCE_CONTENT_PATTERN.test(content)) {
       continue;
     }
 
@@ -334,18 +403,28 @@ function snippet(text: string): string {
   return clean.length > 200 ? `${clean.slice(0, 200)}…` : clean;
 }
 
-function parseRetryAfterMs(header: string | null): number | null {
+/**
+ * Retry-After units are inconsistent in the wild: HTTP says seconds,
+ * but this provider sends milliseconds ("60000" = 60s, not 16.7h).
+ * Heuristic: values > 3600 are treated as milliseconds; everything
+ * is clamped to RETRY_AFTER_MAX_MS.
+ */
+export function parseRetryAfterMs(header: string | null): number | null {
   if (!header) {
     return null;
   }
 
-  const seconds = Number(header.trim());
+  const value = Number(header.trim());
 
-  if (!Number.isFinite(seconds) || seconds <= 0) {
+  if (!Number.isFinite(value) || value <= 0) {
     return null;
   }
 
-  return Math.max(1_000, Math.round(seconds * 1_000));
+  const seconds = value > 3_600 ? value / 1_000 : value;
+
+  const ms = Math.round(seconds * 1_000);
+
+  return Math.min(RETRY_AFTER_MAX_MS, Math.max(1_000, ms));
 }
 
 function readChoiceContent(payload: unknown): string | null {
@@ -454,6 +533,20 @@ export class GlmExtractionProvider {
       );
     }
 
+    // During a provider cooldown, fail fast WITHOUT touching the
+    // network — retries and new jobs must not hammer an overloaded
+    // service. The orchestrator defers the job for the remainder.
+    const cooldownMs = this.limiter.remainingCooldownMs();
+
+    if (cooldownMs > 0) {
+      return failure(
+        "rate_limited",
+        true,
+        cooldownMs,
+        `Provider cooldown active for ${Math.round(cooldownMs / 1000)}s; skipping network call.`,
+      );
+    }
+
     const allowedIds = new Set(input.batch.map((turn) => turn.id));
 
     const redactedBatch = redactTurns(input.batch);
@@ -527,15 +620,19 @@ export class GlmExtractionProvider {
       }
 
       if (response.status === 429) {
-        const retryAfterMs = parseRetryAfterMs(
-          response.headers.get("retry-after"),
-        );
+        const retryAfterMs =
+          parseRetryAfterMs(response.headers.get("retry-after")) ??
+          RATE_LIMIT_FALLBACK_MS;
+
+        // The provider asked EVERYONE to wait — apply a global cooldown
+        // so new jobs and retries back off together.
+        this.limiter.penalty(retryAfterMs);
 
         return failure(
           "rate_limited",
           true,
           retryAfterMs,
-          `Provider rate limit hit (retry-after=${retryAfterMs ?? "unknown"}).`,
+          `Provider rate limit hit (waiting ${Math.round(retryAfterMs / 1000)}s).`,
         );
       }
 
