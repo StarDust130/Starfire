@@ -106,7 +106,6 @@ describe("MemorySearch — memories", () => {
       importance: 3,
     });
 
-    // A correction supersedes the rust statement.
     memories.recordFact({
       category: "project",
       key: "app.language",
@@ -185,6 +184,82 @@ describe("MemorySearch — memories", () => {
   });
 });
 
+describe("MemorySearch — memory privacy & exclusions", () => {
+  it("REDACTS secret-shaped content in memory hits (legacy row protection)", async () => {
+    const { db, search } = await build();
+
+    const now = Date.now();
+
+    db.handle
+      .prepare(
+        "INSERT INTO memories (category, key, content, importance, state, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?)",
+      )
+      .run(
+        "fact",
+        "legacy.token",
+        "saved token sk-abcdefghijklmnopqrstuvwx ok",
+        3,
+        now,
+        now,
+      );
+
+    const hits = search.searchMemories("token");
+
+    expect(hits).toHaveLength(1);
+    expect(hits[0]?.content).not.toContain("sk-abcdefghijklmnopqrstuvwx");
+    expect(hits[0]?.content).toContain("[REDACTED");
+  });
+
+  it("excludeMemoryIds hides exactly those rows", async () => {
+    const { memories, search } = await build();
+
+    const a = memories.recordFact({
+      category: "fact",
+      key: "pick.a",
+      content: "Alpha fact worth finding.",
+    });
+
+    const b = memories.recordFact({
+      category: "fact",
+      key: "pick.b",
+      content: "Beta fact worth finding.",
+    });
+
+    const withExclusion = search.search("worth finding", {
+      excludeMemoryIds: new Set([a.memory.id]),
+    });
+
+    expect(withExclusion.memories.map((hit) => hit.id)).toEqual([b.memory.id]);
+
+    const without = search.search("worth finding");
+
+    expect(without.memories).toHaveLength(2);
+  });
+
+  it("excludeSessionIds hides whole message sessions", async () => {
+    const { messages, search } = await build();
+
+    messages.insertTurn({
+      sessionId: "live",
+      role: "user",
+      content: "secret plan for kyoto",
+    });
+
+    messages.insertTurn({
+      sessionId: "old",
+      role: "user",
+      content: "older kyoto notes",
+    });
+
+    const result = search.search("kyoto", {
+      excludeSessionIds: new Set(["live"]),
+    });
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]?.sessionId).toBe("old");
+  });
+});
+
 describe("MemorySearch — messages", () => {
   it("finds by token, orders newest first, excludes interrupted", async () => {
     const { messages, search } = await build();
@@ -235,10 +310,6 @@ describe("MemorySearch — messages", () => {
   it("snippet-caps long message content around the match", async () => {
     const { messages, search } = await build();
 
-    /*
-     * Realistic prose (spaces between words): a long UNBROKEN
-     * alphanumeric run would be correctly shredded as secret-shaped.
-     */
     const filler =
       "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod ";
 
