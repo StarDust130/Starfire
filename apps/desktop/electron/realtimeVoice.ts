@@ -644,7 +644,7 @@ export class RealtimeVoiceBridge {
       if (this.active) {
         this.emit({ kind: "input-transcript", text: event.text });
 
-        this.capture?.onUserTranscript(event.text);
+        this.capture?.onUserTranscript(event.text, event.itemId);
       }
 
       return;
