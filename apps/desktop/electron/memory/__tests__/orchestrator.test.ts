@@ -27,11 +27,6 @@ afterEach(async () => {
   await rm(userDataDir, { recursive: true, force: true });
 });
 
-/*
- * Must match the orchestrator's provider contract exactly: readonly
- * arrays, role narrowed to "user" | "assistant". A stub accepting
- * less would violate assignability (contravariance).
- */
 type ExtractInput = {
   context: readonly ExtractionTurn[];
   batch: readonly ExtractionTurn[];
@@ -41,6 +36,12 @@ class StubProvider {
   public calls: ExtractInput[] = [];
 
   public results: ExtractionResult[] = [];
+
+  public configured = true;
+
+  isConfigured(): boolean {
+    return this.configured;
+  }
 
   async extract(input: ExtractInput): Promise<ExtractionResult> {
     this.calls.push(input);
@@ -52,6 +53,22 @@ class StubProvider {
     }
 
     return { ok: true, empty: true, drafts: [], usage: null, redactions: [] };
+  }
+}
+
+/*
+ * A MemoryStore whose writes always fail. Sabotages ONLY the memory
+ * write path — the provider and job bookkeeping keep running against
+ * the real database. This isolates the guarantee under test: a failed
+ * write keeps the job retryable instead of silently losing memories.
+ */
+class FailingMemoryStore extends MemoryStore {
+  public attempts = 0;
+
+  recordFact(): never {
+    this.attempts += 1;
+
+    throw new Error("database is not open (simulated write failure)");
   }
 }
 
@@ -138,33 +155,6 @@ describe("MemoryOrchestrator", () => {
     expect(messages.countUnprocessed()).toBe(0);
   });
 
-  it("fails permanently on non-retryable errors without burning retries", async () => {
-    const { messages, jobs, provider, orchestrator } = await build();
-
-    await seedConversation(messages);
-
-    provider.results.push({
-      ok: false,
-      kind: "auth",
-      retryable: false,
-      retryAfterMs: null,
-      message: "Provider rejected the API key (auth error). Not retrying.",
-    });
-
-    await orchestrator.runNow();
-    await orchestrator.runNow();
-
-    // Exactly one provider call despite two runs — no retry spam.
-    expect(provider.calls).toHaveLength(1);
-    expect(jobs.counts()).toEqual({
-      pending: 0,
-      running: 0,
-      done: 0,
-      failed: 1,
-    });
-    expect(messages.countUnprocessed()).toBe(0);
-  });
-
   it("gives the provider neighbor context including fragments", async () => {
     const { messages, provider, orchestrator } = await build();
 
@@ -181,7 +171,6 @@ describe("MemoryOrchestrator", () => {
       "My name is Thor.",
     ]);
 
-    // No earlier turns exist, so context is empty — shape still correct.
     expect(Array.isArray(call?.context)).toBe(true);
   });
 
@@ -223,7 +212,6 @@ describe("MemoryOrchestrator", () => {
     expect(jobs.counts().pending).toBe(1);
     expect(memories.countActive()).toBe(0);
 
-    // Simulate the backoff window fully elapsing.
     db.handle
       .prepare("UPDATE memory_jobs SET run_after = ? WHERE status = 'pending'")
       .run(Date.now() - 1);
@@ -242,6 +230,58 @@ describe("MemoryOrchestrator", () => {
     expect(jobs.counts().done).toBe(1);
   });
 
+  it("keeps the job retryable when a memory write fails", async () => {
+    const { db, messages, jobs, provider } = await build();
+
+    await seedConversation(messages);
+
+    provider.results.push({
+      ok: true,
+      empty: false,
+      drafts: [draft({})],
+      usage: null,
+      redactions: [],
+    });
+
+    /*
+     * Sabotage ONLY the memory-write path. Provider and job
+     * bookkeeping keep running against the real database, so the
+     * failure is scoped exactly to where it matters.
+     */
+    const sabotaged = new MemoryOrchestrator({
+      db,
+      messages,
+      jobs,
+      memories: new FailingMemoryStore(db),
+      provider,
+      debounceMs: 5,
+      shutdownBudgetMs: 2_000,
+    });
+
+    await sabotaged.runNow();
+
+    expect(provider.calls).toHaveLength(1);
+
+    /*
+     * Extraction succeeded but the write failed: the job must be
+     * PENDING again (retryable with backoff) — never "done", which
+     * would silently lose the memory. A later retry re-applies the
+     * same drafts safely (recordFact is idempotent).
+     */
+    expect(jobs.counts()).toEqual({
+      pending: 1,
+      running: 0,
+      done: 0,
+      failed: 0,
+    });
+
+    const job = jobs.get(1);
+
+    expect(job?.status).toBe("pending");
+    expect(job?.attempts).toBe(1);
+    expect(job?.lastError).toContain("memory write failed");
+  });
+
   it("honors Retry-After from a 429 by pushing run_after out", async () => {
     const { messages, jobs, provider, orchestrator } = await build();
 
@@ -257,7 +297,6 @@ describe("MemoryOrchestrator", () => {
 
     await orchestrator.runNow();
 
-    // The job must be invisible until its Retry-After delay passes.
     expect(jobs.nextRunnable()).toBeNull();
     expect(jobs.counts().pending).toBe(1);
   });
@@ -282,10 +321,6 @@ describe("MemoryOrchestrator", () => {
 
     await seedConversation(messages);
 
-    /*
-     * Simulate a crash mid-claim: the job existed and was running, and
-     * the atomic claim had already marked the messages processed.
-     */
     const ids = messages.listUnprocessed(10).map((turn) => turn.id);
 
     db.withTransaction(() => {
@@ -299,7 +334,6 @@ describe("MemoryOrchestrator", () => {
 
     expect(jobs.markRunning(jobId)).toBe(true);
 
-    // With a 0ms threshold, everything running counts as stale.
     expect(jobs.recoverStaleRunning(0)).toBe(1);
 
     provider.results.push({
@@ -320,6 +354,72 @@ describe("MemoryOrchestrator", () => {
       failed: 0,
     });
     expect(messages.countUnprocessed()).toBe(0);
+  });
+
+  it("does not claim batches while the provider is unconfigured", async () => {
+    const { messages, jobs, provider, orchestrator } = await build();
+
+    provider.configured = false;
+
+    await seedConversation(messages);
+
+    await orchestrator.runNow();
+    await orchestrator.runNow();
+
+    expect(provider.calls).toHaveLength(0);
+    expect(jobs.counts().pending).toBe(0);
+    expect(jobs.counts().failed).toBe(0);
+
+    // Messages stay unprocessed — extractable later, never lost.
+    expect(messages.countUnprocessed()).toBe(4);
+
+    provider.configured = true; // the key was added
+
+    await orchestrator.runNow();
+
+    expect(provider.calls).toHaveLength(1);
+    expect(messages.countUnprocessed()).toBe(0);
+    expect(jobs.counts().done).toBe(1);
+  });
+
+  it("requeues permanently failed jobs on startup when configured", async () => {
+    const { messages, memories, jobs, provider, orchestrator } = await build();
+
+    await seedConversation(messages);
+
+    provider.results.push({
+      ok: false,
+      kind: "auth",
+      retryable: false,
+      retryAfterMs: null,
+      message: "Provider rejected the API key (auth error). Not retrying.",
+    });
+
+    await orchestrator.runNow();
+
+    expect(jobs.counts().failed).toBe(1);
+    expect(provider.calls).toHaveLength(1);
+
+    // "Fixed the key, restarted the app."
+    provider.results.push({
+      ok: true,
+      empty: false,
+      drafts: [draft({})],
+      usage: null,
+      redactions: [],
+    });
+
+    orchestrator.recover();
+
+    await orchestrator.runNow();
+
+    expect(memories.countActive()).toBe(1);
+    expect(jobs.counts()).toEqual({
+      pending: 0,
+      running: 0,
+      done: 1,
+      failed: 0,
+    });
   });
 
   it("excludes interrupted turns from batches", async () => {
@@ -364,5 +464,31 @@ describe("MemoryOrchestrator", () => {
     await orchestrator.runNow(); // no-op
 
     expect(orchestrator).toBeDefined();
+  });
+
+  it("fails permanently on non-retryable errors without burning retries", async () => {
+    const { messages, jobs, provider, orchestrator } = await build();
+
+    await seedConversation(messages);
+
+    provider.results.push({
+      ok: false,
+      kind: "auth",
+      retryable: false,
+      retryAfterMs: null,
+      message: "Provider rejected the API key (auth error). Not retrying.",
+    });
+
+    await orchestrator.runNow();
+    await orchestrator.runNow();
+
+    expect(provider.calls).toHaveLength(1);
+    expect(jobs.counts()).toEqual({
+      pending: 0,
+      running: 0,
+      done: 0,
+      failed: 1,
+    });
+    expect(messages.countUnprocessed()).toBe(0);
   });
 });
