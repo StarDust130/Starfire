@@ -1,10 +1,16 @@
 /*
  * Memory V1.1 — public entry point.
  *
- * Everything outside electron/memory imports from this door. The
- * orchestrator slice will hang its exports here too.
+ * Everything outside electron/memory imports from this door. main.ts
+ * uses dynamic import(...) on this module so a broken database
+ * backend can never take Starfire down at startup.
  */
 
+export {
+  type VoiceCaptureHooks,
+  type VoiceTranscriptCapture,
+  VoiceTranscriptRecorder,
+} from "./capture.js";
 export {
   MEMORY_DB_FILE_NAME,
   MEMORY_DB_PATH_ENV,
@@ -13,6 +19,13 @@ export {
   type MemoryConfig,
   resolveMemoryConfig,
 } from "./config.js";
+
+export {
+  CORE_MEMORY_MAX_CHARS,
+  CORE_MEMORY_MAX_MEMORIES,
+  CoreMemoryProvider,
+  formatCoreMemory,
+} from "./core-memory.js";
 
 export {
   DEFAULT_BUSY_TIMEOUT_MS,
@@ -87,13 +100,21 @@ export {
   type Migration,
   runMigrations,
 } from "./migrations.js";
-
+export {
+  CONTEXT_BEFORE_BATCH,
+  DRAIN_CONTINUATION_DELAY_MS,
+  MAX_DRAIN_JOBS_PER_TICK,
+  MemoryOrchestrator,
+  type MemoryOrchestratorOptions,
+  SESSION_END_FLUSH_MS,
+  SHUTDOWN_FLUSH_BUDGET_MS,
+  TICK_DEBOUNCE_MS,
+} from "./orchestrator.js";
 export {
   ExtractionRateLimiter,
   estimateTokens,
   WINDOW_MS,
 } from "./rate-limit.js";
-
 export {
   type RedactionResult,
   redactSecrets,
