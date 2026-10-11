@@ -89,6 +89,24 @@ describe("MemoryJobs", () => {
     expect(job?.lastError).toBeNull();
   });
 
+  it("failImmediately marks a running job failed in one step", async () => {
+    const { jobs } = await openAll();
+
+    const id = jobs.enqueue([1]) as number;
+
+    expect(jobs.markRunning(id)).toBe(true);
+
+    expect(jobs.failImmediately(id, "bad api key")).toBe(true);
+
+    const job = jobs.get(id);
+
+    expect(job?.status).toBe("failed");
+    expect(job?.attempts).toBe(1);
+    expect(job?.lastError).toBe("bad api key");
+    expect(jobs.nextRunnable()).toBeNull();
+    expect(jobs.failImmediately(id, "again")).toBe(false);
+  });
+
   it("returns runnable jobs FIFO and respects run_after", async () => {
     const { jobs } = await openAll();
 
