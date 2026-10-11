@@ -9,11 +9,13 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  LATEST_SCHEMA_VERSION,
   MEMORY_DB_FILE_NAME,
   MEMORY_DB_PATH_ENV,
   MEMORY_DIR_NAME,
   MEMORY_DISABLED_ENV,
   type MemoryDatabase,
+  MIGRATIONS,
   openMemoryDatabase,
 } from "../index.js";
 
@@ -68,7 +70,7 @@ describe("openMemoryDatabase", () => {
   it("creates the database, enables WAL, and applies migrations", async () => {
     const memory = openOrThrow(await openMemoryDatabase({ userDataDir }));
 
-    expect(memory.schemaVersion).toBe(1);
+    expect(memory.schemaVersion).toBe(LATEST_SCHEMA_VERSION);
     expect(memory.path).toBe(
       path.join(userDataDir, MEMORY_DIR_NAME, MEMORY_DB_FILE_NAME),
     );
@@ -200,7 +202,7 @@ describe("openMemoryDatabase", () => {
 
     const second = openOrThrow(await openMemoryDatabase({ userDataDir }));
 
-    expect(second.schemaVersion).toBe(1);
+    expect(second.schemaVersion).toBe(LATEST_SCHEMA_VERSION);
 
     const row = second.handle.prepare("SELECT content FROM messages").get();
 
@@ -210,7 +212,7 @@ describe("openMemoryDatabase", () => {
       .prepare("SELECT COUNT(*) AS count FROM schema_version")
       .get();
 
-    expect(Number(versions?.count)).toBe(1);
+    expect(Number(versions?.count)).toBe(MIGRATIONS.length);
 
     second.close();
   });
