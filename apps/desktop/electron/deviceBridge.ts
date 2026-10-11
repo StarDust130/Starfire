@@ -126,7 +126,8 @@ export async function startDeviceBridge(
           return;
         }
 
-        const query = typeof args.query === "string" ? args.query : "";
+        const query =
+          typeof args.query === "string" ? args.query.trim().slice(0, 200) : "";
 
         if (query.trim().length === 0) {
           sendJson(response, 200, {
