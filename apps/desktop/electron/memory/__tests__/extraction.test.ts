@@ -1,0 +1,435 @@
+import { describe, expect, it, vi } from "vitest";
+
+import {
+  buildExtractionMessages,
+  type ExtractionConfig,
+  type ExtractionResult,
+  GlmExtractionProvider,
+  parseExtractionPayload,
+  resolveExtractionConfig,
+} from "../extraction.js";
+
+function testConfig(overrides?: Partial<ExtractionConfig>): ExtractionConfig {
+  return {
+    enabled: true,
+    apiKey: "test-key",
+    baseUrl: "https://provider.test/v1",
+    model: "glm-4-7-flash",
+    maxRequestsPerMinute: 1_000,
+    maxTokensPerMinute: 10_000_000,
+    minIntervalMs: 0,
+    timeoutMs: 1_000,
+    ...overrides,
+  };
+}
+
+type CapturedRequest = { url: string; init: RequestInit };
+
+function makeFetch(responder: () => Response): {
+  fetchFn: typeof fetch;
+  requests: CapturedRequest[];
+} {
+  const requests: CapturedRequest[] = [];
+
+  const fetchFn = (async (
+    url: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    requests.push({ url: String(url), init: init ?? {} });
+
+    return responder();
+  }) as unknown as typeof fetch;
+
+  return { fetchFn, requests };
+}
+
+function okBody(content: string, usage?: Record<string, number>): Response {
+  return new Response(
+    JSON.stringify({
+      choices: [{ message: { role: "assistant", content } }],
+      ...(usage ? { usage } : {}),
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
+async function extractWith(
+  provider: GlmExtractionProvider,
+  batch: Array<{ id: number; role: "user" | "assistant"; content: string }>,
+): Promise<ExtractionResult> {
+  return provider.extract({ context: [], batch });
+}
+
+describe("resolveExtractionConfig", () => {
+  it("is disabled without an API key", () => {
+    const config = resolveExtractionConfig({});
+
+    expect(config.enabled).toBe(false);
+    expect(config.apiKey).toBeNull();
+    expect(config.baseUrl).toBe("https://api.empiriolabs.ai/v1");
+    expect(config.model).toBe("glm-4-7-flash");
+  });
+
+  it("is enabled with a key and honors the kill switch", () => {
+    expect(
+      resolveExtractionConfig({ STARFIRE_MEMORY_API_KEY: " k " }).enabled,
+    ).toBe(true);
+
+    expect(
+      resolveExtractionConfig({
+        STARFIRE_MEMORY_API_KEY: "k",
+        STARFIRE_MEMORY_CLOUD_DISABLED: "1",
+      }).enabled,
+    ).toBe(false);
+  });
+
+  it("honors custom overrides", () => {
+    const config = resolveExtractionConfig({
+      STARFIRE_MEMORY_API_KEY: "k",
+      STARFIRE_MEMORY_MODEL: "glm-4-7-flash",
+      STARFIRE_MEMORY_BASE_URL: "https://mirror.test/v1",
+      STARFIRE_GLM_MAX_RPM: "10",
+    });
+
+    expect(config.baseUrl).toBe("https://mirror.test/v1");
+    expect(config.maxRequestsPerMinute).toBe(10);
+  });
+});
+
+describe("buildExtractionMessages", () => {
+  it("includes ids and roles, keeping batch verbatim and context capped", () => {
+    const context = Array.from({ length: 20 }, (_, index) => ({
+      id: index + 1,
+      role: "user" as const,
+      content: `old ${index + 1}`,
+    }));
+
+    const { user } = buildExtractionMessages({
+      context,
+      batch: [{ id: 99, role: "assistant", content: "The full reply text." }],
+    });
+
+    expect(user).toContain("#99 assistant: The full reply text.");
+    expect(user).not.toContain("#1 user: old 1");
+    expect(user).toContain("#9 user: old 9");
+    expect(user).toContain("READ-ONLY");
+  });
+});
+
+describe("parseExtractionPayload", () => {
+  const allowed = new Set([14, 15]);
+
+  it("parses valid drafts, normalizes keys, filters provenance ids", () => {
+    const result = parseExtractionPayload(
+      JSON.stringify({
+        memories: [
+          {
+            category: "profile",
+            key: "User Name",
+            content: "The user's name is Thor.",
+            importance: 4,
+            sourceMessageIds: ["14", 999],
+          },
+        ],
+      }),
+      allowed,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.drafts[0]?.key).toBe("user-name");
+    expect(result.ok && result.drafts[0]?.sourceMessageIds).toEqual([14]);
+    expect(result.ok && result.drafts[0]?.importance).toBe(4);
+  });
+
+  it("accepts fenced JSON and coerces string numbers", () => {
+    const result = parseExtractionPayload(
+      '```json\n{"memories":[{"category":"fact","key":"Editor","content":"Uses VS Code.","importance":"3","sourceMessageIds":[]}]}\n```',
+      allowed,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.drafts[0]?.importance).toBe(3);
+  });
+
+  it("drops invalid items but keeps valid siblings", () => {
+    const result = parseExtractionPayload(
+      JSON.stringify({
+        memories: [
+          { category: "nonsense", key: "x", content: "bad category" },
+          { category: "fact", key: "editor", content: "Uses VS Code." },
+        ],
+      }),
+      allowed,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.drafts).toHaveLength(1);
+    expect(result.ok && result.drafts[0]?.key).toBe("editor");
+  });
+
+  it("rejects prose and non-memory payloads as malformed", () => {
+    expect(parseExtractionPayload("I found some memories!", allowed).ok).toBe(
+      false,
+    );
+
+    expect(parseExtractionPayload('{"other":1}', allowed).ok).toBe(false);
+  });
+});
+
+describe("GlmExtractionProvider", () => {
+  it("returns disabled without calling fetch when not configured", async () => {
+    const { fetchFn, requests } = makeFetch(() => okBody("{}"));
+
+    const provider = new GlmExtractionProvider(
+      testConfig({ enabled: false }),
+      fetchFn,
+    );
+
+    const result = await extractWith(provider, [
+      { id: 1, role: "user", content: "hi" },
+    ]);
+
+    expect(result.ok).toBe(false);
+    expect(result.ok ? null : result.kind).toBe("disabled");
+    expect(requests).toHaveLength(0);
+  });
+
+  it("sends the documented request shape and parses drafts", async () => {
+    const { fetchFn, requests } = makeFetch(() =>
+      okBody(
+        JSON.stringify({
+          memories: [
+            {
+              category: "profile",
+              key: "user.name",
+              content: "The user's name is Thor.",
+              importance: 5,
+              sourceMessageIds: [14],
+            },
+          ],
+        }),
+        { prompt_tokens: 500, completion_tokens: 40 },
+      ),
+    );
+
+    const provider = new GlmExtractionProvider(testConfig(), fetchFn);
+
+    const result = await extractWith(provider, [
+      { id: 14, role: "user", content: "My name is Thor." },
+    ]);
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.empty).toBe(false);
+    expect(result.ok && result.drafts[0]?.content).toBe(
+      "The user's name is Thor.",
+    );
+    expect(result.ok && result.usage?.inputTokens).toBe(500);
+
+    expect(requests[0]?.url).toBe("https://provider.test/v1/chat/completions");
+
+    const headers = new Headers(requests[0]?.init.headers);
+
+    expect(headers.get("authorization")).toBe("Bearer test-key");
+
+    const body = JSON.parse(String(requests[0]?.init.body));
+
+    expect(body.model).toBe("glm-4-7-flash");
+    expect(body.response_format).toEqual({ type: "json_object" });
+    expect(body.thinking).toEqual({ type: "disabled" });
+    expect(body.tools).toBeUndefined();
+  });
+
+  it("treats a valid empty payload as success with empty=true", async () => {
+    const { fetchFn } = makeFetch(() =>
+      okBody(JSON.stringify({ memories: [] })),
+    );
+
+    const provider = new GlmExtractionProvider(testConfig(), fetchFn);
+
+    const result = await extractWith(provider, [
+      { id: 1, role: "user", content: "hello" },
+    ]);
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.empty).toBe(true);
+    expect(result.ok && result.drafts).toEqual([]);
+  });
+
+  it("never sends unredacted secrets", async () => {
+    const { fetchFn, requests } = makeFetch(() =>
+      okBody(JSON.stringify({ memories: [] })),
+    );
+
+    const provider = new GlmExtractionProvider(testConfig(), fetchFn);
+
+    await extractWith(provider, [
+      {
+        id: 7,
+        role: "user",
+        content: "my password is hunter2 and key sk-abcdefghijklmnopqrstuvwx",
+      },
+    ]);
+
+    const body = String(requests[0]?.init.body);
+
+    expect(body).not.toContain("hunter2");
+    expect(body).not.toContain("sk-abcdefghijklmnopqrstuvwx");
+    expect(body).toContain("[REDACTED");
+  });
+
+  it("classifies auth errors as permanent", async () => {
+    const { fetchFn } = makeFetch(
+      () => new Response("denied", { status: 401 }),
+    );
+
+    const provider = new GlmExtractionProvider(testConfig(), fetchFn);
+
+    const result = await extractWith(provider, [
+      { id: 1, role: "user", content: "hi" },
+    ]);
+
+    expect(result.ok ? null : result.kind).toBe("auth");
+    expect(result.ok ? null : result.retryable).toBe(false);
+  });
+
+  it("classifies 429 as retryable with the Retry-After delay", async () => {
+    const { fetchFn } = makeFetch(
+      () =>
+        new Response("slow down", {
+          status: 429,
+          headers: { "retry-after": "7" },
+        }),
+    );
+
+    const provider = new GlmExtractionProvider(testConfig(), fetchFn);
+
+    const result = await extractWith(provider, [
+      { id: 1, role: "user", content: "hi" },
+    ]);
+
+    expect(result.ok ? null : result.kind).toBe("rate_limited");
+    expect(result.ok ? null : result.retryable).toBe(true);
+    expect(result.ok ? null : result.retryAfterMs).toBe(7_000);
+  });
+
+  it("classifies 5xx as retryable and 4xx as permanent", async () => {
+    const server = new GlmExtractionProvider(
+      testConfig(),
+      makeFetch(() => new Response("boom", { status: 503 })).fetchFn,
+    );
+
+    const serverResult = await extractWith(server, [
+      { id: 1, role: "user", content: "hi" },
+    ]);
+
+    expect(serverResult.ok ? null : serverResult.kind).toBe("server");
+    expect(serverResult.ok ? null : serverResult.retryable).toBe(true);
+
+    const client = new GlmExtractionProvider(
+      testConfig(),
+      makeFetch(() => new Response("bad request", { status: 400 })).fetchFn,
+    );
+
+    const clientResult = await extractWith(client, [
+      { id: 1, role: "user", content: "hi" },
+    ]);
+
+    expect(clientResult.ok ? null : clientResult.kind).toBe("client");
+    expect(clientResult.ok ? null : clientResult.retryable).toBe(false);
+  });
+
+  it("maps aborts to timeout and throws to network, both retryable", async () => {
+    const aborting = async (): Promise<Response> => {
+      throw Object.assign(new Error("aborted"), { name: "AbortError" });
+    };
+
+    const timeoutProvider = new GlmExtractionProvider(
+      testConfig(),
+      aborting as unknown as typeof fetch,
+    );
+
+    const timeoutResult = await extractWith(timeoutProvider, [
+      { id: 1, role: "user", content: "hi" },
+    ]);
+
+    expect(timeoutResult.ok ? null : timeoutResult.kind).toBe("timeout");
+    expect(timeoutResult.ok ? null : timeoutResult.retryable).toBe(true);
+
+    const breaking = async (): Promise<Response> => {
+      throw new Error("ECONNRESET");
+    };
+
+    const networkProvider = new GlmExtractionProvider(
+      testConfig(),
+      breaking as unknown as typeof fetch,
+    );
+
+    const networkResult = await extractWith(networkProvider, [
+      { id: 1, role: "user", content: "hi" },
+    ]);
+
+    expect(networkResult.ok ? null : networkResult.kind).toBe("network");
+    expect(networkResult.ok ? null : networkResult.retryable).toBe(true);
+  });
+
+  it("classifies malformed model output as retryable", async () => {
+    const { fetchFn } = makeFetch(() => okBody("I cannot do that, sorry."));
+
+    const provider = new GlmExtractionProvider(testConfig(), fetchFn);
+
+    const result = await extractWith(provider, [
+      { id: 1, role: "user", content: "hi" },
+    ]);
+
+    expect(result.ok ? null : result.kind).toBe("malformed");
+    expect(result.ok ? null : result.retryable).toBe(true);
+  });
+
+  it("serializes concurrent extracts into one in-flight request", async () => {
+    let inFlight = 0;
+
+    let maxInFlight = 0;
+
+    const fetchFn = (async (): Promise<Response> => {
+      inFlight += 1;
+
+      maxInFlight = Math.max(maxInFlight, inFlight);
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      inFlight -= 1;
+
+      return okBody(JSON.stringify({ memories: [] }));
+    }) as unknown as typeof fetch;
+
+    const provider = new GlmExtractionProvider(testConfig(), fetchFn);
+
+    await Promise.all([
+      extractWith(provider, [{ id: 1, role: "user", content: "a" }]),
+      extractWith(provider, [{ id: 2, role: "user", content: "b" }]),
+      extractWith(provider, [{ id: 3, role: "user", content: "c" }]),
+    ]);
+
+    expect(maxInFlight).toBe(1);
+  });
+
+  it("never logs the API key", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    try {
+      const { fetchFn } = makeFetch(() =>
+        okBody(JSON.stringify({ memories: [] })),
+      );
+
+      const provider = new GlmExtractionProvider(testConfig(), fetchFn);
+
+      await extractWith(provider, [{ id: 1, role: "user", content: "hi" }]);
+
+      const logged = logSpy.mock.calls.map((call) => call.join(" ")).join("\n");
+
+      expect(logged).not.toContain("test-key");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});
