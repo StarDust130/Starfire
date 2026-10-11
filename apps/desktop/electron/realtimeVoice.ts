@@ -19,7 +19,7 @@ import {
 } from "./realtimeProtocol";
 
 const DEFAULT_ENDPOINT = `wss://api.empiriolabs.ai/v1/realtime?model=${REALTIME_MODEL}`;
-const CONNECT_TIMEOUT_MS = 10_000;
+const CONNECT_TIMEOUT_MS = 5_000;
 const CANCEL_TIMEOUT_MS = 1_500;
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 30_000;
