@@ -6,6 +6,8 @@ import {
 import { type BrowserWindow, ipcMain } from "electron";
 import WebSocket from "ws";
 
+import type { VoiceTranscriptCapture } from "./memory/capture";
+
 import {
   buildAudioAppend,
   buildFunctionCallOutput,
@@ -17,7 +19,7 @@ import {
 } from "./realtimeProtocol";
 
 const DEFAULT_ENDPOINT = `wss://api.empiriolabs.ai/v1/realtime?model=${REALTIME_MODEL}`;
-const CONNECT_TIMEOUT_MS = 10_000;
+const CONNECT_TIMEOUT_MS = 5_000;
 const CANCEL_TIMEOUT_MS = 1_500;
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 30_000;
@@ -74,6 +76,7 @@ export class RealtimeVoiceBridge {
   private sessionConfigured = false;
   private sessionAnnounced = false;
   private sessionConfirmedLogged = false;
+  private lastSentCoreMemory: string | null = null;
   private responseInFlight = false;
   private responseStartedAt = 0;
   private firstAudioLogged = false;
@@ -88,6 +91,8 @@ export class RealtimeVoiceBridge {
   constructor(
     private readonly getWindow: () => BrowserWindow | null,
     private readonly ports: AgentPorts,
+    private readonly capture?: VoiceTranscriptCapture,
+    private readonly getCoreMemory?: () => string,
   ) {}
 
   register(): void {
@@ -142,6 +147,8 @@ export class RealtimeVoiceBridge {
     this.disposed = true;
     this.active = false;
     this.activationId += 1;
+
+    this.capture?.onSessionEnd();
 
     ipcMain.removeHandler("starfire-voice:start");
     ipcMain.removeHandler("starfire-voice:stop");
@@ -239,6 +246,26 @@ export class RealtimeVoiceBridge {
     this.pendingToolCalls = [];
     this.toolBatchStarted = false;
     this.pendingSessionEnd = false;
+
+    this.capture?.onSessionStart();
+
+    /*
+     * Core Memory freshness: the realtime socket is reused across
+     * activations, so a session configured hours ago would keep the
+     * old memory block. Resend session.update ONLY when the derived
+     * profile changed — one tiny JSON message, never the audio path.
+     */
+    if (this.sessionConfigured) {
+      const fresh = this.getCoreMemory?.() ?? "";
+
+      if (fresh !== this.lastSentCoreMemory) {
+        this.lastSentCoreMemory = fresh;
+
+        this.send(buildSessionUpdate(STARFIRE_FUNCTION_SPECS, fresh));
+
+        console.log("[Starfire Voice] event=core-memory-refreshed");
+      }
+    }
 
     if (this.sessionEndTimer) {
       clearTimeout(this.sessionEndTimer);
@@ -513,7 +540,11 @@ export class RealtimeVoiceBridge {
             `model=${String(event.info.model ?? REALTIME_MODEL)}`,
         );
 
-        this.send(buildSessionUpdate(STARFIRE_FUNCTION_SPECS));
+        const coreMemory = this.getCoreMemory?.() ?? "";
+
+        this.lastSentCoreMemory = coreMemory;
+
+        this.send(buildSessionUpdate(STARFIRE_FUNCTION_SPECS, coreMemory));
 
         return;
       }
@@ -601,6 +632,8 @@ export class RealtimeVoiceBridge {
     if (event.kind === "transcript-delta") {
       if (this.active) {
         this.emit({ kind: "audio-transcript-delta", delta: event.delta });
+
+        this.capture?.onAssistantDelta(event.delta);
       }
 
       return;
@@ -609,6 +642,8 @@ export class RealtimeVoiceBridge {
     if (event.kind === "input-transcript") {
       if (this.active) {
         this.emit({ kind: "input-transcript", text: event.text });
+
+        this.capture?.onUserTranscript(event.text);
       }
 
       return;
@@ -631,6 +666,8 @@ export class RealtimeVoiceBridge {
     }
 
     if (event.kind === "response-done") {
+      this.capture?.onAssistantDone(false);
+
       this.responseInFlight = false;
       this.settleCancellation();
 
@@ -690,6 +727,8 @@ export class RealtimeVoiceBridge {
     }
 
     if (event.kind === "response-cancelled") {
+      this.capture?.onAssistantDone(true);
+
       this.responseInFlight = false;
       this.responseStartedAt = 0;
       this.settleCancellation();
@@ -908,6 +947,8 @@ export class RealtimeVoiceBridge {
     this.toolBatchCancelled = true;
     this.pendingSessionEnd = false;
 
+    this.capture?.onSessionEnd();
+
     if (this.sessionEndTimer) {
       clearTimeout(this.sessionEndTimer);
       this.sessionEndTimer = null;
@@ -995,6 +1036,7 @@ export class RealtimeVoiceBridge {
     this.socket = null;
     this.sessionConfigured = false;
     this.sessionAnnounced = false;
+    this.lastSentCoreMemory = null;
     this.sessionConfirmedLogged = false;
     this.responseInFlight = false;
     this.responseStartedAt = 0;
@@ -1034,27 +1076,5 @@ export class RealtimeVoiceBridge {
     }, 500);
 
     terminateTimer.unref?.();
-
-    if (this.sessionEndTimer) {
-      clearTimeout(this.sessionEndTimer);
-      this.sessionEndTimer = null;
-    }
-    if (!socket) return;
-
-    console.log(
-      `[Starfire Voice] conn=${this.conn} event=socket-close-requested code=${code}`,
-    );
-    try {
-      socket.close(code);
-    } catch {
-      socket.terminate();
-    }
-    setTimeout(() => {
-      try {
-        socket.terminate();
-      } catch {
-        // The socket is already gone.
-      }
-    }, 500).unref();
   }
 }

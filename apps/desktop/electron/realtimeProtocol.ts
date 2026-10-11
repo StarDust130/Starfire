@@ -266,7 +266,17 @@ export type SessionTool = {
  * threshold 0.30 hears quiet speech sooner, silence 400ms commits
  * the turn ~100ms sooner than 500ms.
  */
-export function buildSessionUpdate(tools: SessionTool[] = []): string {
+export function buildSessionUpdate(
+  tools: SessionTool[] = [],
+  coreMemory = "",
+): string {
+  const memoryBlock = coreMemory.trim();
+
+  const instructions =
+    memoryBlock.length > 0
+      ? `${STARFIRE_INSTRUCTIONS}\n\n${memoryBlock}`
+      : STARFIRE_INSTRUCTIONS;
+
   return JSON.stringify({
     type: "session.update",
 
@@ -277,7 +287,7 @@ export function buildSessionUpdate(tools: SessionTool[] = []): string {
 
       voice: REALTIME_VOICE,
 
-      instructions: STARFIRE_INSTRUCTIONS,
+      instructions,
 
       input_audio_format: "pcm16",
 

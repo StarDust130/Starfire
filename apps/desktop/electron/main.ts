@@ -13,6 +13,8 @@ import {
 import { createElectronPorts } from "./agent/electron-ports.js";
 import { startDeviceBridge } from "./deviceBridge.js";
 import { startEveRuntime, stopEveRuntime } from "./eve-runtime.js";
+import type { MemoryDatabase } from "./memory/database.js";
+import type { MemoryOrchestrator } from "./memory/orchestrator.js";
 import { RealtimeVoiceBridge } from "./realtimeVoice";
 
 const DEV_SERVER_URL =
@@ -33,6 +35,16 @@ let mainWindow: BrowserWindow | null = null;
 let voiceBridge: RealtimeVoiceBridge | null = null;
 
 let stopDeviceBridge: (() => Promise<void>) | null = null;
+
+let memoryDatabase: MemoryDatabase | null = null;
+
+let getCoreMemory: (() => string) | null = null;
+
+let transcriptRecorder: InstanceType<
+  typeof import("./memory/capture.js")["VoiceTranscriptRecorder"]
+> | null = null;
+
+let memoryOrchestrator: MemoryOrchestrator | null = null;
 
 type DragSession = {
   offsetX: number;
@@ -277,7 +289,7 @@ ipcMain.on("starfire:drag-end", () => {
   stopDrag();
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   console.log(`[main] 🖥 platform: ${process.platform}`);
 
   console.log(
@@ -299,13 +311,124 @@ app.whenReady().then(() => {
   registerGlobalShortcut();
 
   /*
+   * Memory V1.1 — one trusted SQLite store owned by this process.
+   * Keep SQLite initialization behind a dynamic import so memory
+   * initialization failures do not prevent Starfire from starting.
+   */
+  try {
+    const memory = await import("./memory/index.js");
+
+    memoryDatabase = await memory.openMemoryDatabase({
+      userDataDir: app.getPath("userData"),
+    });
+
+    if (memoryDatabase) {
+      const provider = new memory.GlmExtractionProvider(
+        memory.resolveExtractionConfig(),
+      );
+
+      const messageStore = new memory.MessageStore(memoryDatabase);
+
+      memoryOrchestrator = new memory.MemoryOrchestrator({
+        db: memoryDatabase,
+        messages: messageStore,
+        jobs: new memory.MemoryJobs(memoryDatabase),
+        memories: new memory.MemoryStore(memoryDatabase),
+        provider,
+      });
+
+      memoryOrchestrator.recover();
+
+      // Core Memory — expose current trusted memories to the voice bridge.
+      const coreMemoryProvider = new memory.CoreMemoryProvider(
+        new memory.MemoryStore(memoryDatabase),
+      );
+
+      getCoreMemory = (): string => coreMemoryProvider.get();
+
+      const explicitStore = new memory.MemoryStore(memoryDatabase);
+
+      transcriptRecorder = new memory.VoiceTranscriptRecorder(
+        new memory.MessageStore(memoryDatabase),
+        {
+          onTurnCaptured: (turn) => {
+            memoryOrchestrator?.notifyTurn();
+
+            /*
+             * Explicit-statement fast path: stored IMMEDIATELY and
+             * locally so a fact survives even if the app closes
+             * seconds later. GLM still refines the wording later —
+             * the stable key means confirm/supersede handles it.
+             */
+            if (turn.role !== "user") {
+              return;
+            }
+
+            const fact = memory.detectExplicitFact(turn.content);
+
+            if (!fact) {
+              return;
+            }
+
+            const safety = memory.redactSecrets(turn.content);
+
+            if (safety.redactions.length > 0) {
+              console.warn(
+                "[Memory] 🔒 explicit fact contained a secret-shaped value — not stored",
+              );
+
+              return;
+            }
+
+            const result = explicitStore.recordFact({
+              category: fact.category,
+              key: fact.key,
+              content: fact.content,
+              importance: fact.importance,
+              sourceMessageIds: [turn.id],
+            });
+
+            if (result.ok) {
+              console.log(
+                `[Memory] ⚡ ${result.action}: ${fact.category}/${fact.key} — ${fact.content}`,
+              );
+            }
+          },
+          onSessionEnded: () => memoryOrchestrator?.notifySessionEnd(),
+        },
+      );
+
+      console.log(
+        `[Memory] ✅ ready v${memoryDatabase.schemaVersion} → ${memoryDatabase.path}`,
+      );
+    } else {
+      console.log("[Memory] ⏸ disabled by configuration");
+    }
+  } catch (error) {
+    memoryDatabase = null;
+    transcriptRecorder = null;
+    memoryOrchestrator = null;
+    getCoreMemory = null;
+
+    console.error(
+      "[Memory] ❌ unavailable:",
+      error instanceof Error ? error.message : error,
+    );
+  }
+
+  /*
    * One ports instance is Starfire's local capability layer, shared
    * by the Eve device bridge and the realtime voice bridge so both
-   * paths see the same state (e.g. apps Starfire launched herself).
+   * paths see the same state.
    */
   const ports = createElectronPorts();
 
-  voiceBridge = new RealtimeVoiceBridge(() => mainWindow, ports);
+  voiceBridge = new RealtimeVoiceBridge(
+    () => mainWindow,
+    ports,
+    transcriptRecorder ?? undefined,
+    getCoreMemory ?? undefined,
+  );
 
   voiceBridge.register();
 
@@ -351,8 +474,8 @@ app.on("second-instance", () => {
 
 app.on("will-quit", (event) => {
   /*
-   * Hold the quit until everything (voice, device bridge, the
-   * in-process Eve runtime) has torn down.
+   * Hold the quit until voice, the device bridge, the Eve runtime,
+   * the memory orchestrator, and the database have been shut down.
    */
   event.preventDefault();
 
@@ -371,6 +494,9 @@ app.on("will-quit", (event) => {
 
     voiceBridge = null;
 
+    transcriptRecorder = null;
+    getCoreMemory = null;
+
     await stopDeviceBridge?.();
 
     stopDeviceBridge = null;
@@ -378,6 +504,20 @@ app.on("will-quit", (event) => {
     console.log("[Starfire Device] event=bridge-stopped");
 
     await stopEveRuntime();
+
+    if (memoryOrchestrator) {
+      await memoryOrchestrator.shutdown();
+
+      memoryOrchestrator = null;
+    }
+
+    if (memoryDatabase) {
+      memoryDatabase.close();
+
+      memoryDatabase = null;
+
+      console.log("[Memory] event=database-closed");
+    }
 
     console.log(
       `[Starfire Device] event=shutdown-complete durationMs=${Date.now() - teardownStartedAt}`,
