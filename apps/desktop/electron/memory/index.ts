@@ -19,14 +19,21 @@ export {
   type MemoryConfig,
   resolveMemoryConfig,
 } from "./config.js";
-
+export {
+  CONTEXT_MAX_CHARS,
+  CONTEXT_MAX_MEMORIES,
+  CONTEXT_MAX_MESSAGES,
+  ContextBuilder,
+  type ContextBuildOptions,
+  formatRelevantContext,
+  type SelectedContext,
+} from "./context.js";
 export {
   CORE_MEMORY_MAX_CHARS,
   CORE_MEMORY_MAX_MEMORIES,
   CoreMemoryProvider,
   formatCoreMemory,
 } from "./core-memory.js";
-
 export {
   DEFAULT_BUSY_TIMEOUT_MS,
   type MemoryDatabase,
@@ -120,7 +127,6 @@ export {
   redactSecrets,
   redactTurns,
 } from "./redaction.js";
-
 export {
   MemorySearch,
   type MemorySearchHit,
