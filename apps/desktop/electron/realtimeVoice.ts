@@ -76,6 +76,7 @@ export class RealtimeVoiceBridge {
   private sessionConfigured = false;
   private sessionAnnounced = false;
   private sessionConfirmedLogged = false;
+  private lastSentCoreMemory: string | null = null;
   private responseInFlight = false;
   private responseStartedAt = 0;
   private firstAudioLogged = false;
@@ -247,6 +248,24 @@ export class RealtimeVoiceBridge {
     this.pendingSessionEnd = false;
 
     this.capture?.onSessionStart();
+
+    /*
+     * Core Memory freshness: the realtime socket is reused across
+     * activations, so a session configured hours ago would keep the
+     * old memory block. Resend session.update ONLY when the derived
+     * profile changed — one tiny JSON message, never the audio path.
+     */
+    if (this.sessionConfigured) {
+      const fresh = this.getCoreMemory?.() ?? "";
+
+      if (fresh !== this.lastSentCoreMemory) {
+        this.lastSentCoreMemory = fresh;
+
+        this.send(buildSessionUpdate(STARFIRE_FUNCTION_SPECS, fresh));
+
+        console.log("[Starfire Voice] event=core-memory-refreshed");
+      }
+    }
 
     if (this.sessionEndTimer) {
       clearTimeout(this.sessionEndTimer);
@@ -520,12 +539,12 @@ export class RealtimeVoiceBridge {
           `[Starfire Voice] conn=${this.conn} event=session-created ` +
             `model=${String(event.info.model ?? REALTIME_MODEL)}`,
         );
-        this.send(
-          buildSessionUpdate(
-            STARFIRE_FUNCTION_SPECS,
-            this.getCoreMemory?.() ?? "",
-          ),
-        );
+
+        const coreMemory = this.getCoreMemory?.() ?? "";
+
+        this.lastSentCoreMemory = coreMemory;
+
+        this.send(buildSessionUpdate(STARFIRE_FUNCTION_SPECS, coreMemory));
 
         return;
       }
@@ -1017,6 +1036,7 @@ export class RealtimeVoiceBridge {
     this.socket = null;
     this.sessionConfigured = false;
     this.sessionAnnounced = false;
+    this.lastSentCoreMemory = null;
     this.sessionConfirmedLogged = false;
     this.responseInFlight = false;
     this.responseStartedAt = 0;
