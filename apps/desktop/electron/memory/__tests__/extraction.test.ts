@@ -600,13 +600,13 @@ describe("GlmExtractionProvider", () => {
     expect(maxInFlight).toBe(1);
   });
 
-  it("enters a cooldown after a 429 and skips the network until it lifts", async () => {
+  it("account-quota 429 applies the shared cooldown and skips the network", async () => {
     let calls = 0;
 
     const fetchFn = (async (): Promise<Response> => {
       calls += 1;
 
-      return new Response("overloaded", {
+      return new Response("rate limit exceeded", {
         status: 429,
         headers: { "retry-after": "60000" },
       });
@@ -628,6 +628,35 @@ describe("GlmExtractionProvider", () => {
 
     expect(second.ok ? null : second.kind).toBe("rate_limited");
     expect(calls).toBe(1); // network NOT touched during cooldown
+  });
+
+  it("overload 429 does NOT apply the account cooldown (fallback stays possible)", async () => {
+    let calls = 0;
+
+    const fetchFn = (async (): Promise<Response> => {
+      calls += 1;
+
+      return new Response("temporarily overloaded", { status: 429 });
+    }) as unknown as typeof fetch;
+
+    const provider = new GlmExtractionProvider(testConfig(), fetchFn);
+
+    const first = await extractWith(provider, [
+      { id: 1, role: "user", content: "hi" },
+    ]);
+
+    expect(first.ok ? null : first.kind).toBe("rate_limited");
+    expect(first.ok ? null : first.modelOverload).toBe(true);
+    expect(first.ok ? null : first.retryAfterMs).toBe(30_000);
+
+    const second = await extractWith(provider, [
+      { id: 2, role: "user", content: "hi" },
+    ]);
+
+    // Overload is model-specific: the limiter must NOT block later
+    // attempts, otherwise the healthy fallback could never be tried.
+    expect(second.ok ? null : second.kind).toBe("rate_limited");
+    expect(calls).toBe(2);
   });
 
   it("never logs the API key", async () => {
