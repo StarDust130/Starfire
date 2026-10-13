@@ -25,16 +25,21 @@ import type { MessageStore } from "./messages.js";
  *
  *   completed turn ──→ arm idle timer (≈2min, reset per turn) ─┐
  *   ≥40 pending turns ──→ immediate ───────────────────────────┼─→ tick:
- *   rate-limit defer ──→ wake timer at run_after ──────────────┘     claim (atomic)
+ *   durable cooldown expiry ──→ wake ──────────────────────────┘     claim (atomic)
  *   startup recover ──→ drain leftovers                              → extract
  *
  * Session endings are NOT triggers: short sessions are parts of one
  * ongoing history.
  *
+ * COOLDOWN INVARIANT: an account-wide rate limit persists a GLOBAL
+ * cooldown in SQLite (memory_state). While it is active, runOne does
+ * NOTHING — no job runs, no batch is claimed, nothing is deferred —
+ * and the drain schedules exactly one wake at expiry. This survives
+ * restarts and makes retry storms structurally impossible.
+ *
  * CRITICAL INVARIANT: whenever the drain loop stops early (failure,
- * deferral, or nothing runnable), it MUST still schedule the next
- * wake from the queue's durable state (nextWakeAt / nextRunnable).
- * Forgetting that is what silently froze the queue after 429s.
+ * deferral, cooldown, or nothing runnable), it MUST still schedule
+ * the next wake from durable state.
  *
  * Observability: "[Memory] 📝 turn captured" = SAVED (durable).
  * "[Memory] ✅ extracted job #N" = memories WRITTEN. Between them,
@@ -121,7 +126,7 @@ export class MemoryOrchestrator {
   /**
    * Startup recovery. Single-instance lock means ANY 'running' job
    * belongs to a dead process — recovered immediately. The first
-   * drain then schedules a wake for any deferred job.
+   * drain then honors any persisted cooldown / deferred wake.
    */
   recover(): number {
     const recovered = this.options.jobs.recoverStaleRunning(0);
@@ -307,11 +312,9 @@ export class MemoryOrchestrator {
       const progressed = await this.runOne();
 
       /*
-       * Any failure or deferral stops this tick — one bad batch can
-       * never burn the whole drain loop. The wake scheduling below
-       * then decides what happens next; that scheduling must run on
-       * EVERY exit path, which is what keeps deferred jobs waking up
-       * automatically (including after restarts).
+       * Any failure, deferral, or cooldown gate stops this tick — one
+       * bad batch can never burn the whole drain loop. The wake
+       * scheduling below runs on EVERY exit path.
        */
       if (!progressed) {
         break;
@@ -322,20 +325,38 @@ export class MemoryOrchestrator {
       return;
     }
 
-    if (this.options.jobs.nextRunnable(this.now())) {
+    this.scheduleNextWake();
+  }
+
+  /**
+   * Decides when the queue next wakes, from DURABLE state only:
+   * 1. A persisted account-wide cooldown → wake exactly at expiry.
+   * 2. A runnable job (backoff/Retry-After elapsed) → continue soon.
+   * 3. A future run_after (deferred/backoff job) → wake at that time.
+   * run_after and the cooldown live in SQLite, so this survives
+   * restarts.
+   */
+  private scheduleNextWake(): void {
+    const now = this.now();
+
+    const cooldownUntil = this.options.jobs.getCooldownUntil(now);
+
+    if (cooldownUntil !== null) {
+      this.scheduleTick(cooldownUntil - now);
+
+      return;
+    }
+
+    if (this.options.jobs.nextRunnable(now)) {
       this.scheduleTick(DRAIN_CONTINUATION_DELAY_MS);
 
       return;
     }
 
-    // Nothing runnable right now — possibly because a job was just
-    // deferred (rate limit) or backed off. Wake when the earliest
-    // pending job becomes runnable; run_after is durable in SQLite,
-    // so this also works across restarts.
-    const wakeAt = this.options.jobs.nextWakeAt(this.now());
+    const jobWake = this.options.jobs.nextWakeAt(now);
 
-    if (wakeAt !== null) {
-      this.scheduleTick(Math.max(0, wakeAt - this.now()));
+    if (jobWake !== null) {
+      this.scheduleTick(Math.max(0, jobWake - now));
     }
   }
 
@@ -344,6 +365,18 @@ export class MemoryOrchestrator {
    * extract, apply. Returns false when there is nothing to do.
    */
   private async runOne(): Promise<boolean> {
+    /*
+     * Durable account-wide cooldown: NO job runs and NOTHING is
+     * claimed while it is active — this is what prevents repeated
+     * claim/defer churn and retry storms. scheduleNextWake wakes us
+     * exactly when it expires.
+     */
+    const cooldownUntil = this.options.jobs.getCooldownUntil(this.now());
+
+    if (cooldownUntil !== null) {
+      return false;
+    }
+
     let job: MemoryJob | null = this.options.jobs.nextRunnable(this.now());
 
     if (!job) {
@@ -457,8 +490,14 @@ export class MemoryOrchestrator {
 
       this.options.jobs.defer(job.id, delayMs, this.now());
 
+      /*
+       * Durable GLOBAL cooldown: every queued job AND fresh-batch
+       * claims now wait until it expires — even across restarts.
+       */
+      this.options.jobs.setCooldownUntil(this.now() + delayMs, this.now());
+
       console.warn(
-        `[Memory] ⏳ job #${job.id} deferred ${Math.round(delayMs / 1000)}s (rate_limited); queue wakes automatically`,
+        `[Memory] ⏳ account cooldown ${Math.round(delayMs / 1000)}s (rate_limited); queue resumes automatically`,
       );
 
       return false;
