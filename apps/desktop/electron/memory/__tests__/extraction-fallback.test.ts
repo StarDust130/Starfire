@@ -124,6 +124,77 @@ describe("GLM → Qwen fallback", () => {
     expect(qwenBody.messages[1]?.content).toContain("#7 user:");
   });
 
+  it("clear model-overload 429 falls back to Qwen (regression)", async () => {
+    const { fetchFn, calls } = makeScriptedFetch([
+      () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message:
+                "The service may be temporarily overloaded, please try again later",
+              code: 429,
+            },
+          }),
+          { status: 429 },
+        ),
+      () => okBody(GOOD_JSON),
+    ]);
+
+    const provider = new GlmExtractionProvider(testConfig(), fetchFn);
+
+    const result = await run(provider);
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.model).toBe("qwen3-5-4b");
+    expect(calls.map((call) => call.model)).toEqual([
+      "glm-4-7-flash",
+      "qwen3-5-4b",
+    ]);
+  });
+
+  it("account-quota 429 body never falls back (regression)", async () => {
+    const { fetchFn, calls } = makeScriptedFetch([
+      () =>
+        new Response(
+          JSON.stringify({
+            error: { message: "rate limit exceeded for account", code: 429 },
+          }),
+          { status: 429 },
+        ),
+    ]);
+
+    const provider = new GlmExtractionProvider(testConfig(), fetchFn);
+
+    const result = await run(provider);
+
+    expect(result.ok).toBe(false);
+    expect(result.ok ? null : result.kind).toBe("rate_limited");
+    expect(result.ok ? null : result.modelOverload).toBeUndefined();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("GLM failure then Qwen 429 preserves the rate_limited cooldown (regression)", async () => {
+    const { fetchFn, calls } = makeScriptedFetch([
+      () => new Response("boom", { status: 503 }),
+      () =>
+        new Response("rate limit exceeded", {
+          status: 429,
+          headers: { "retry-after": "90" },
+        }),
+    ]);
+
+    const provider = new GlmExtractionProvider(testConfig(), fetchFn);
+
+    const result = await run(provider);
+
+    // Qwen's rate_limited (and its Retry-After) must govern — not the
+    // primary's server error, which would burn a retry attempt.
+    expect(result.ok).toBe(false);
+    expect(result.ok ? null : result.kind).toBe("rate_limited");
+    expect(result.ok ? null : result.retryAfterMs).toBe(90_000);
+    expect(calls).toHaveLength(2);
+  });
+
   it("malformed GLM output falls back; malformed Qwen preserves the job", async () => {
     const bothBad = makeScriptedFetch([
       () => okBody("prose, not json"),
@@ -155,10 +226,10 @@ describe("GLM → Qwen fallback", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("429 NEVER falls back (account-wide quota) and applies a shared cooldown", async () => {
+  it("429 quota NEVER falls back and applies a shared cooldown", async () => {
     const { fetchFn, calls } = makeScriptedFetch([
       () =>
-        new Response("overloaded", {
+        new Response("rate limit exceeded", {
           status: 429,
           headers: { "retry-after": "60000" },
         }),
@@ -170,7 +241,8 @@ describe("GLM → Qwen fallback", () => {
 
     expect(first.ok).toBe(false);
     expect(first.ok ? null : first.kind).toBe("rate_limited");
-    expect(calls).toHaveLength(1); // no fallback request
+    expect(first.ok ? null : first.retryAfterMs).toBe(60_000);
+    expect(calls).toHaveLength(1);
 
     const second = await run(provider);
 
