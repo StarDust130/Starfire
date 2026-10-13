@@ -240,7 +240,7 @@ describe("MemoryJobs", () => {
 
 describe("fitBatch", () => {
   it("caps at the message limit and keeps order", () => {
-    const turns = Array.from({ length: 35 }, (_, index) => ({
+    const turns = Array.from({ length: 45 }, (_, index) => ({
       content: `m${index}`,
     }));
 
