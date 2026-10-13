@@ -12,7 +12,7 @@ import type { DatabaseSync } from "node:sqlite";
  * - NEVER edit an applied migration. Add a new one with version + 1.
  */
 
-export const LATEST_SCHEMA_VERSION = 2;
+export const LATEST_SCHEMA_VERSION = 3;
 
 export type Migration = {
   version: number;
@@ -105,6 +105,19 @@ export const MIGRATIONS: readonly Migration[] = [
       -- Superseded/archived rows may share the key freely.
       CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_active_key
         ON memories (category, key) WHERE state = 'active';
+    `,
+  },
+  {
+    version: 3,
+    name: "memory state key-value store",
+    sql: `
+      -- Smallest durable home for cross-restart operational state.
+      -- Currently: the account-wide extraction cooldown
+      -- (key 'cooldown_until', value = epoch milliseconds).
+      CREATE TABLE IF NOT EXISTS memory_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `,
   },
 ];
