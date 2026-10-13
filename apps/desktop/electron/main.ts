@@ -482,16 +482,12 @@ app.whenReady().then(async () => {
 
           onSessionEnded: () => {
             /*
-
-* After a session ends its turns become searchable past
-
-* chats for EVERYONE (including Eve).
-
-*/
-
+             * After a session ends its turns become searchable past
+             * chats for EVERYONE (including Eve). Extraction is NOT
+             * triggered here — short sessions are parts of one ongoing
+             * history; the idle/batch triggers handle extraction.
+             */
             liveVoiceSessionId = null;
-
-            memoryOrchestrator?.notifySessionEnd();
           },
         },
       );
