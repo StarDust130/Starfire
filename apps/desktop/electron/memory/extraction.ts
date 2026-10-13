@@ -14,19 +14,33 @@ import { ExtractionRateLimiter, estimateTokens } from "./rate-limit.js";
 import { redactTurns } from "./redaction.js";
 
 /*
- * GLM extraction provider — the ONLY place Starfire talks to a cloud
- * model about memories. Pure: turns in -> drafts out. No database
- * access, no queue access; the orchestrator owns those.
+ * GLM extraction provider with model fallback — the ONLY place
+ * Starfire talks to a cloud model about memories. Pure: turns in ->
+ * drafts out. No database access, no queue access; the orchestrator
+ * owns those.
  *
  * Provider details (official model docs + live verification):
- * POST {baseUrl}/chat/completions, bearer key, model glm-4-7-flash,
- * JSON mode via response_format, thinking disabled for latency,
- * no tools and no web search for extraction.
+ * POST {baseUrl}/chat/completions, bearer key, JSON mode via
+ * response_format, thinking disabled, no tools/web search.
+ *
+ * FALLBACK RULES (account-wide limits make these critical):
+ * - Primary: config.model (glm-4-7-flash).
+ * - Fallback: config.fallbackModel (qwen3-5-4b) ONLY for
+ *   server/timeout/network/malformed failures — cases where a
+ *   different model can plausibly succeed.
+ * - 429 = ACCOUNT-WIDE shared quota: NEVER fallback (the backup hits
+ *   the same exhausted quota). Cooldown + retry later instead.
+ * - auth/client/disabled: configuration problems — fallback cannot
+ *   help; fail fast without burning attempts.
+ * - The same strict parser, provenance map, and redaction apply to
+ *   both models. Success metadata records WHICH model produced it.
  */
 
 export const DEFAULT_MEMORY_BASE_URL = "https://api.empiriolabs.ai/v1";
 
 export const DEFAULT_MEMORY_MODEL = "glm-4-7-flash";
+
+export const DEFAULT_MEMORY_FALLBACK_MODEL = "qwen3-5-4b";
 
 /*
  * The free tier is SHARED across users — observed 429s occur well
@@ -73,6 +87,8 @@ export type ExtractionSuccess = {
   drafts: ExtractedMemoryDraft[];
   usage: { inputTokens: number; outputTokens: number } | null;
   redactions: string[];
+  /** Which model actually produced this result (safe metadata). */
+  model: string;
 };
 
 export type ExtractionFailureKind =
@@ -100,6 +116,8 @@ export type ExtractionConfig = {
   apiKey: string | null;
   baseUrl: string;
   model: string;
+  /** Fallback model, or null to disable fallback ("none" in env). */
+  fallbackModel: string | null;
   maxRequestsPerMinute: number;
   maxTokensPerMinute: number;
   minIntervalMs: number;
@@ -136,11 +154,21 @@ export function resolveExtractionConfig(
     isTruthy(env.STARFIRE_MEMORY_CLOUD_DISABLED) ||
     isTruthy(env.STARFIRE_MEMORY_DISABLED);
 
+  const fallbackRaw = env.STARFIRE_MEMORY_FALLBACK_MODEL?.trim();
+
+  const fallbackModel =
+    fallbackRaw === undefined || fallbackRaw === ""
+      ? DEFAULT_MEMORY_FALLBACK_MODEL
+      : fallbackRaw.toLowerCase() === "none"
+        ? null
+        : fallbackRaw;
+
   return {
     enabled: !disabled && apiKey !== null,
     apiKey,
     baseUrl: env.STARFIRE_MEMORY_BASE_URL?.trim() || DEFAULT_MEMORY_BASE_URL,
     model: env.STARFIRE_MEMORY_MODEL?.trim() || DEFAULT_MEMORY_MODEL,
+    fallbackModel,
     maxRequestsPerMinute: numberEnv(
       env.STARFIRE_GLM_MAX_RPM,
       DEFAULT_MAX_REQUESTS_PER_MINUTE,
@@ -245,10 +273,6 @@ const draftSchema = z.object({
 const ABSENCE_CONTENT_PATTERN =
   /\b(?:not yet (?:known|specified|decided|mentioned|provided|shared)|is unknown|are unknown|remains unknown|not specified|no information)\b/i;
 
-/**
- * json_object mode guarantees valid JSON, not our exact shape. Real
- * models sometimes wrap or return bare arrays — unwrap shallowly.
- */
 function unwrapMemoriesArray(parsed: unknown): unknown[] | null {
   if (Array.isArray(parsed)) {
     return parsed;
@@ -309,8 +333,7 @@ export type ParsedPayload =
  * - individual bad items are dropped, never poisoning the batch;
  * - source ids must reference USER messages from the batch —
  *   assistant confirmations and foreign ids prove nothing;
- * - a draft with NO valid user-message source id is REJECTED:
- *   unproven "memories" are how wrong facts enter the card box;
+ * - a draft with NO valid user-message source id is REJECTED;
  * - redaction placeholders and absence-style non-facts never store.
  */
 export function parseExtractionPayload(
@@ -479,6 +502,16 @@ function readUsage(
   return { inputTokens: input, outputTokens: output };
 }
 
+/** Failure kinds where a DIFFERENT model can plausibly succeed. */
+function fallbackEligible(kind: ExtractionFailureKind): boolean {
+  return (
+    kind === "server" ||
+    kind === "timeout" ||
+    kind === "network" ||
+    kind === "malformed"
+  );
+}
+
 export class GlmExtractionProvider {
   private readonly limiter: ExtractionRateLimiter;
 
@@ -545,6 +578,51 @@ export class GlmExtractionProvider {
       );
     }
 
+    const primary = await this.attempt(this.config.model, input);
+
+    if (primary.ok) {
+      return primary;
+    }
+
+    const fallbackModel = this.config.fallbackModel;
+
+    const canFallback =
+      typeof fallbackModel === "string" &&
+      fallbackModel.length > 0 &&
+      fallbackModel !== this.config.model &&
+      fallbackEligible(primary.kind);
+
+    if (!canFallback) {
+      return primary;
+    }
+
+    console.log(
+      `[Memory GLM] fallback to ${fallbackModel} (primary ${primary.kind})`,
+    );
+
+    const fallback = await this.attempt(fallbackModel, input);
+
+    if (fallback.ok) {
+      return fallback;
+    }
+
+    // Both models failed: preserve the job via the primary failure,
+    // enriched with the fallback outcome (kinds only — no bodies).
+    return failure(
+      primary.kind,
+      primary.retryable,
+      primary.retryAfterMs,
+      `primary ${primary.kind}; fallback ${fallback.kind}`,
+    );
+  }
+
+  private async attempt(
+    model: string,
+    input: {
+      context: readonly ExtractionTurn[];
+      batch: readonly ExtractionTurn[];
+    },
+  ): Promise<ExtractionResult> {
     // Provenance map: which batch ids exist, and which role spoke them.
     const provenance = new Map<number, "user" | "assistant">(
       input.batch.map((turn) => [turn.id, turn.role]),
@@ -566,7 +644,7 @@ export class GlmExtractionProvider {
     const estimatedTokens = estimateTokens(system.length + user.length);
 
     const body = JSON.stringify({
-      model: this.config.model,
+      model,
       messages: [
         { role: "system", content: system },
         { role: "user", content: user },
@@ -581,7 +659,8 @@ export class GlmExtractionProvider {
       await this.limiter.acquire(estimatedTokens);
 
       console.log(
-        `[Memory GLM] extract batch=[${[...provenance.keys()].join(",")}] ` +
+        `[Memory GLM] extract model=${model} ` +
+          `batch=[${[...provenance.keys()].join(",")}] ` +
           `ctx=${redactedContext.turns.length} chars=${system.length + user.length}` +
           (redactions.length > 0 ? ` redactions=${redactions.join("|")}` : ""),
       );
@@ -590,8 +669,7 @@ export class GlmExtractionProvider {
 
       /*
        * The timeout spans the ENTIRE exchange: connect, response
-       * headers, AND reading the body. A server that sends headers
-       * and then stalls the body must not hang us forever.
+       * headers, AND reading the body.
        */
       const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
 
@@ -625,8 +703,8 @@ export class GlmExtractionProvider {
             parseRetryAfterMs(response.headers.get("retry-after")) ??
             RATE_LIMIT_FALLBACK_MS;
 
-          // The provider asked EVERYONE to wait — apply a global
-          // cooldown so new jobs and retries back off together.
+          // ACCOUNT-WIDE limit: a global cooldown so EVERY model and
+          // job waits — fallback would hit the same exhausted quota.
           this.limiter.penalty(retryAfterMs);
 
           return failure(
@@ -693,7 +771,7 @@ export class GlmExtractionProvider {
         const usage = readUsage(payload);
 
         console.log(
-          `[Memory GLM] extract ok drafts=${parsedPayload.drafts.length}` +
+          `[Memory GLM] extract ok model=${model} drafts=${parsedPayload.drafts.length}` +
             (usage
               ? ` tokens in=${usage.inputTokens} out=${usage.outputTokens}`
               : ""),
@@ -705,6 +783,7 @@ export class GlmExtractionProvider {
           drafts: parsedPayload.drafts,
           usage,
           redactions,
+          model,
         };
       } finally {
         clearTimeout(timer);
