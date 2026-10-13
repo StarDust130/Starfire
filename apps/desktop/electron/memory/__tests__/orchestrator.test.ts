@@ -1,7 +1,9 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
 import {
   type ExtractedMemoryDraft,
   type ExtractionResult,
@@ -102,7 +104,6 @@ async function build() {
     jobs,
     memories,
     provider,
-    debounceMs: 5,
     idleMs: 60,
     shutdownBudgetMs: 2_000,
   });
@@ -254,7 +255,7 @@ describe("MemoryOrchestrator", () => {
       jobs,
       memories: new FailingMemoryStore(db),
       provider,
-      debounceMs: 5,
+      idleMs: 60,
       shutdownBudgetMs: 2_000,
     });
 
@@ -622,5 +623,49 @@ describe("MemoryOrchestrator", () => {
 
     expect(provider.calls).toHaveLength(2);
     expect(jobs.counts().done).toBe(1);
+  });
+
+  it("many short sessions batch into ONE idle extraction, not one per session", async () => {
+    const { messages, jobs, provider, orchestrator } = await build();
+
+    // Three short voice sessions, two turns each — saved immediately.
+    for (let session = 0; session < 3; session += 1) {
+      const sessionId = `s${session}`;
+
+      messages.insertTurn({
+        sessionId,
+        role: "user",
+        content: `hello ${session}`,
+      });
+
+      messages.insertTurn({
+        sessionId,
+        role: "assistant",
+        content: `hi ${session}`,
+      });
+
+      // One notifyTurn per saved turn — exactly like the capture hooks.
+      for (let index = 0; index < 2; index += 1) {
+        orchestrator.notifyTurn();
+      }
+    }
+
+    // No LLM request while batching, even across session boundaries.
+    expect(provider.calls).toHaveLength(0);
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(provider.calls).toHaveLength(1);
+    expect(jobs.counts().done).toBe(1);
+
+    // The one batch contains exactly the six new turns, in order.
+    expect(provider.calls[0]?.batch.map((turn) => turn.content)).toEqual([
+      "hello 0",
+      "hi 0",
+      "hello 1",
+      "hi 1",
+      "hello 2",
+      "hi 2",
+    ]);
   });
 });
