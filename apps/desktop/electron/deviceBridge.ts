@@ -11,11 +11,12 @@ const DEFAULT_PORT = 17321;
 const MAX_BODY_BYTES = 64 * 1024;
 
 /*
- * Over-limit bodies are DRAINED up to this cap so the client can
- * finish uploading and actually receive our error response — without
- * draining, Node destroys the socket mid-upload and the client sees a
- * transport error instead of our clean 500. Beyond the drain cap
- * (flagrant abuse) we abort; a connection reset is acceptable there.
+ * Bodies are ALWAYS fully consumed before ANY response is sent (up to
+ * this drain cap). This is what makes error responses deterministic:
+ * if we responded while a client was still uploading, Node would
+ * destroy the socket mid-upload and the client would see a transport
+ * error instead of our clean 401/500. Beyond the drain cap (flagrant
+ * abuse) we destroy the connection; a reset is acceptable there.
  */
 const MAX_DRAIN_BYTES = MAX_BODY_BYTES * 8;
 
@@ -40,82 +41,56 @@ export type DeviceBridgeOptions = {
   token?: string;
 };
 
-/** Reads & discards the request body, bounded. Never parses. */
-async function drainBody(request: IncomingMessage): Promise<void> {
-  let drained = 0;
+type BodyRead =
+  | { ok: true; text: string }
+  | { ok: false; tooLarge: true; socketDead: boolean };
 
-  for await (const chunk of request) {
-    drained += Buffer.from(chunk).length;
-
-    if (drained > MAX_DRAIN_BYTES) {
-      // Flagrant abuse: stop reading; a reset is acceptable here.
-      request.destroy();
-
-      return;
-    }
-  }
-}
-
-async function readJson(
-  request: IncomingMessage,
-): Promise<Record<string, unknown>> {
-  /*
-   * Deterministic rejection for bodies that declare their size up
-   * front: drain first (so the client finishes cleanly), then fail.
-   */
-  const declared = request.headers["content-length"];
-
-  const declaredBytes =
-    typeof declared === "string" ? Number(declared) : Number.NaN;
-
-  if (Number.isFinite(declaredBytes) && declaredBytes > MAX_BODY_BYTES) {
-    await drainBody(request);
-
-    throw new Error("Request body is too large.");
-  }
-
+/**
+ * Consumes the ENTIRE request body. Buffers up to MAX_BODY_BYTES;
+ * anything larger is drained-and-discarded (bounded) and flagged.
+ * Never throws for oversize — callers decide.
+ */
+async function readBody(request: IncomingMessage): Promise<BodyRead> {
   const chunks: Buffer[] = [];
 
   let total = 0;
 
   let tooLarge = false;
 
-  for await (const chunk of request) {
-    const buffer = Buffer.from(chunk);
+  try {
+    for await (const chunk of request) {
+      const buffer = Buffer.from(chunk);
 
-    total += buffer.length;
+      total += buffer.length;
 
-    if (total > MAX_DRAIN_BYTES) {
-      // Flagrant abuse (chunked/undeclared): stop reading.
-      throw new Error("Request body is too large.");
+      if (total > MAX_DRAIN_BYTES) {
+        // Flagrant abuse: stop reading; a reset is acceptable here.
+        request.destroy();
+
+        return { ok: false, tooLarge: true, socketDead: true };
+      }
+
+      if (total > MAX_BODY_BYTES) {
+        tooLarge = true; // keep draining so the client finishes cleanly
+
+        continue;
+      }
+
+      chunks.push(buffer);
     }
-
-    if (total > MAX_BODY_BYTES) {
-      tooLarge = true; // keep draining so the client finishes cleanly
-
-      continue;
-    }
-
-    chunks.push(buffer);
+  } catch {
+    // Stream aborted/destroyed mid-read — nothing sane to respond to.
+    return { ok: false, tooLarge: true, socketDead: true };
   }
 
   if (tooLarge) {
-    throw new Error("Request body is too large.");
+    return { ok: false, tooLarge: true, socketDead: false };
   }
 
-  if (chunks.length === 0) {
-    return {};
-  }
-
-  const text = Buffer.concat(chunks).toString("utf8");
-
-  const value: unknown = JSON.parse(text);
-
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("Request body must be an object.");
-  }
-
-  return value as Record<string, unknown>;
+  return {
+    ok: true,
+    text: Buffer.concat(chunks).toString("utf8"),
+  };
 }
 
 function sendJson(
@@ -123,6 +98,11 @@ function sendJson(
   status: number,
   value: unknown,
 ): void {
+  // Never write to a socket the request already destroyed.
+  if (response.socket?.destroyed) {
+    return;
+  }
+
   response.statusCode = status;
   response.setHeader("content-type", "application/json");
   response.end(JSON.stringify(value));
@@ -146,6 +126,13 @@ export async function startDeviceBridge(
 
   const server = createServer(async (request, response) => {
     try {
+      /*
+       * Consume the body BEFORE any response — this ordering is the
+       * guarantee that clients always finish uploading before we
+       * answer, for every status code below.
+       */
+      const body = await readBody(request);
+
       if (request.method !== "POST") {
         sendJson(response, 405, {
           ok: false,
@@ -167,7 +154,6 @@ export async function startDeviceBridge(
       const provided = request.headers["x-starfire-device-token"];
 
       if (provided !== token) {
-        // Auth rejected: the body is never trusted — no drain needed.
         sendJson(response, 401, {
           ok: false,
           error: "Unauthorized device request.",
@@ -176,13 +162,49 @@ export async function startDeviceBridge(
         return;
       }
 
-      const body = await readJson(request);
+      if (!body.ok) {
+        if (body.socketDead) {
+          // The connection is already gone; there is nobody to answer.
+          return;
+        }
 
-      const tool = body.tool;
+        // Bounded drain completed — answer cleanly and close the
+        // connection so the client's pooled socket is not reused.
+        response.setHeader("connection", "close");
+
+        sendJson(response, 500, {
+          ok: false,
+          error: "Request body is too large.",
+        });
+
+        return;
+      }
+
+      let parsed: unknown;
+
+      try {
+        parsed = body.text.length > 0 ? JSON.parse(body.text) : {};
+      } catch {
+        throw new Error("Request body must be valid JSON.");
+      }
+
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        Array.isArray(parsed)
+      ) {
+        throw new Error("Request body must be an object.");
+      }
+
+      const record = parsed as Record<string, unknown>;
+
+      const tool = record.tool;
 
       const args =
-        body.args && typeof body.args === "object" && !Array.isArray(body.args)
-          ? (body.args as Record<string, unknown>)
+        record.args &&
+        typeof record.args === "object" &&
+        !Array.isArray(record.args)
+          ? (record.args as Record<string, unknown>)
           : {};
 
       if (typeof tool !== "string") {
@@ -260,6 +282,12 @@ export async function startDeviceBridge(
 
   return () =>
     new Promise<void>((resolve) => {
+      /*
+       * Kill keep-alive sockets deterministically before closing so
+       * no client ever races a closing server across restarts.
+       */
+      server.closeIdleConnections();
+
       server.close(() => resolve());
     });
 }
