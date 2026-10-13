@@ -21,20 +21,26 @@ import type { MessageStore } from "./messages.js";
 /*
  * The conductor. Owns the whole background pipeline and is the ONLY
  * caller of the provider + MemoryStore. Runs in the trusted main
- * process, one job at a time, never on the voice reply path:
+ * process, one job at a time (single-flight), never on the voice
+ * reply path. Triggers:
  *
- *   new turn ──→ debounce ──┐
- *   ≥30 pending ────────────┼─→ tick: claim batch (atomic) → extract
- *   session end ────────────┤        → apply drafts via recordFact
- *   startup recover ────────┘        → complete / backoff
+ *   completed turn ──→ arm idle timer (≈9s, reset per turn) ─┐
+ *   ≥30 pending turns ──→ immediate ─────────────────────────┼─→ tick:
+ *   session end ──→ short flush ─────────────────────────────┤     claim (atomic)
+ *   rate-limit defer ──→ wake timer after cooldown ──────────┘     → extract
+ *   startup recover ──→ drain leftovers                            → apply
  *
- * All triggers funnel into scheduleTick(); a single `running` flag
- * guarantees one drain at a time (single-flight).
+ * Observability contract: "[Memory] 📝 turn captured" = the
+ * conversation is SAVED (durable, survives crashes). "[Memory] ✅
+ * extracted job #N" = memories were WRITTEN. Between the two, work is
+ * durably queued — never lost, only postponed.
  */
 
 export const CONTEXT_BEFORE_BATCH = 12;
 
 export const TICK_DEBOUNCE_MS = 4_000;
+
+export const IDLE_EXTRACTION_MS = 9_000;
 
 export const SESSION_END_FLUSH_MS = 1_000;
 
@@ -51,6 +57,7 @@ export type MemoryOrchestratorOptions = {
   memories: MemoryStore;
   provider: Pick<GlmExtractionProvider, "extract" | "isConfigured">;
   debounceMs?: number;
+  idleMs?: number;
   shutdownBudgetMs?: number;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -73,6 +80,8 @@ function toExtractionTurns(
 export class MemoryOrchestrator {
   private readonly debounceMs: number;
 
+  private readonly idleMs: number;
+
   private readonly shutdownBudgetMs: number;
 
   private readonly now: () => number;
@@ -83,9 +92,14 @@ export class MemoryOrchestrator {
 
   private scheduledDelayMs = 0;
 
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+
   private running = false;
 
   private disposed = false;
+
+  /** When set, the drain loop pauses and wakes after the cooldown. */
+  private pauseUntil: number | null = null;
 
   private currentRun: Promise<void> = Promise.resolve();
 
@@ -97,19 +111,18 @@ export class MemoryOrchestrator {
     this.sleep =
       options.sleep ??
       ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+
+    const envIdle = Number(process.env.STARFIRE_MEMORY_IDLE_MS);
+
+    this.idleMs =
+      options.idleMs ??
+      (Number.isFinite(envIdle) && envIdle > 0 ? envIdle : IDLE_EXTRACTION_MS);
   }
 
-  /**
-   * Startup recovery: reset jobs orphaned by a crash, give permanently
-   * failed jobs a second chance (configuration may have been fixed),
-   * then drain leftovers.
-   */
   /**
    * Startup recovery. Starfire holds a single-instance lock, so ANY
    * job left 'running' in the database belongs to a dead process —
    * all of them are recovered IMMEDIATELY (staleness window 0).
-   * Waiting out a window would strand recent crashes forever, because
-   * nothing ever re-runs recovery after startup.
    */
   recover(): number {
     const recovered = this.options.jobs.recoverStaleRunning(0);
@@ -131,29 +144,52 @@ export class MemoryOrchestrator {
     return recovered;
   }
 
-  /** Called by the capture hooks after each stored turn. */
+  /**
+   * Called by the capture hooks after each SAVED turn. Arms (or
+   * re-arms) the idle timer so useful facts are extracted after a
+   * natural pause WITHOUT ending the conversation — and never for
+   * fragments, because only completed turns reach this hook. A full
+   * batch still triggers immediately.
+   */
   notifyTurn(): void {
-    /*
-     * NO mid-conversation extraction: it fires constantly while the
-     * user is still talking — it churns the shared rate limit, and
-     * fragments get extracted before their context completes. Triggers
-     * are: session end, shutdown flush, startup recovery, and a full
-     * pending batch.
-     */
+    if (this.disposed) {
+      return;
+    }
+
     const pending = this.options.messages.countUnprocessed();
 
     if (pending >= EXTRACTION_BATCH_MAX_MESSAGES) {
+      this.clearIdleTimer();
+
       this.scheduleTick(0);
+
+      return;
     }
+
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+    }
+
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+
+      this.scheduleTick(0);
+    }, this.idleMs);
+
+    this.idleTimer.unref?.();
   }
 
   /** Called when a voice activation ends (goodbye/idle). */
   notifySessionEnd(): void {
+    this.clearIdleTimer();
+
     this.scheduleTick(SESSION_END_FLUSH_MS);
   }
 
   /** Test/flush seam: cancels the timer and drains synchronously. */
   async runNow(): Promise<void> {
+    this.clearIdleTimer();
+
     if (this.tickTimer) {
       clearTimeout(this.tickTimer);
 
@@ -167,9 +203,8 @@ export class MemoryOrchestrator {
 
   /**
    * Best-effort bounded flush during app shutdown. The in-flight tick
-   * AND the drain loop together can never exceed the budget: when it
-   * expires we proceed with teardown and let unfinished jobs stay
-   * recoverable (stale-running recovery / retryable failure).
+   * AND the drain loop together can never exceed the budget; unfinished
+   * jobs stay recoverable (stale-running recovery / retryable failure).
    */
   async shutdown(): Promise<void> {
     if (this.disposed) {
@@ -177,6 +212,8 @@ export class MemoryOrchestrator {
     }
 
     this.disposed = true;
+
+    this.clearIdleTimer();
 
     if (this.tickTimer) {
       clearTimeout(this.tickTimer);
@@ -210,6 +247,14 @@ export class MemoryOrchestrator {
       `[Memory] 🛑 orchestrator stopped ` +
         `(pending=${counts.pending}, failed=${counts.failed})`,
     );
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+
+      this.idleTimer = null;
+    }
   }
 
   private scheduleTick(delayMs: number): void {
@@ -273,8 +318,25 @@ export class MemoryOrchestrator {
       const progressed = await this.runOne();
 
       if (!progressed) {
-        return;
+        break;
       }
+    }
+
+    if (this.disposed) {
+      return;
+    }
+
+    // Rate-limited: stop touching the queue and WAKE UP after the
+    // cooldown instead of spinning. Earlier (smaller) scheduled ticks
+    // still take precedence.
+    if (this.pauseUntil !== null) {
+      const waitMs = Math.max(0, this.pauseUntil - this.now());
+
+      this.pauseUntil = null;
+
+      this.scheduleTick(waitMs);
+
+      return;
     }
 
     // Cap reached but work remains — continue shortly.
@@ -285,7 +347,8 @@ export class MemoryOrchestrator {
 
   /**
    * One unit of work: pick a runnable job (or claim a fresh batch),
-   * extract, apply. Returns false when there is nothing to do.
+   * extract, apply. Returns false when there is nothing to do (or the
+   * pipeline paused for a rate-limit cooldown).
    */
   private async runOne(): Promise<boolean> {
     let job: MemoryJob | null = this.options.jobs.nextRunnable(this.now());
@@ -317,7 +380,6 @@ export class MemoryOrchestrator {
     const turns = this.options.messages.getTurnsByIds(job.messageIds);
 
     if (turns.length === 0) {
-      // Job references nothing durable — just finish it.
       this.options.jobs.complete(job.id, this.now());
 
       return true;
@@ -358,11 +420,10 @@ export class MemoryOrchestrator {
 
       if (failedCount > 0) {
         /*
-         * Extraction succeeded but a database write failed (lock,
-         * disk, closed handle). Completing here would silently lose
-         * those memories, so the job stays retryable instead.
-         * recordFact is idempotent — already-stored drafts re-apply
-         * as "confirmed" on the retry.
+         * Extraction succeeded but a database write failed. Completing
+         * here would silently lose those memories, so the job stays
+         * retryable. recordFact is idempotent — already-stored drafts
+         * re-apply as "confirmed" on the retry.
          */
         this.options.jobs.fail(
           job.id,
@@ -383,9 +444,9 @@ export class MemoryOrchestrator {
       this.options.jobs.complete(job.id, this.now());
 
       console.log(
-        `[Memory] ✅ job #${job.id} done ` +
+        `[Memory] ✅ extracted job #${job.id} ` +
           `(msgs=${turns.length}, memories=${result.drafts.length}` +
-          `${result.empty ? ", empty" : ""})`,
+          `${result.empty ? ", empty" : ""}${result.ok ? `, model=${result.model}` : ""})`,
       );
 
       return true;
@@ -393,30 +454,23 @@ export class MemoryOrchestrator {
 
     // Failure paths — nothing was applied; the job retries or dies.
     if (result.kind === "rate_limited") {
-      /*
-       * Rate limits are the provider asking for patience, not the job
-       * doing something wrong — defer WITHOUT burning an attempt so a
-       * long shared-tier cooldown can never permanently fail good work.
-       */
       const delayMs = result.retryAfterMs ?? RATE_LIMIT_FALLBACK_MS;
 
       this.options.jobs.defer(job.id, delayMs, this.now());
 
+      // Pause the drain and wake after the cooldown — no retry storm.
+      this.pauseUntil = this.now() + delayMs;
+
       console.warn(
-        `[Memory] ⏳ job #${job.id} deferred ${Math.round(delayMs / 1000)}s (rate_limited)`,
+        `[Memory] ⏳ job #${job.id} deferred ${Math.round(delayMs / 1000)}s (rate_limited); queue wakes automatically`,
       );
 
-      return true;
+      return false;
     }
 
     const error = new Error(`${result.kind}: ${result.message}`);
 
     if (!result.retryable) {
-      /*
-       * Permanent (auth / client): retrying cannot succeed. Fail on
-       * attempt one so a broken key burns exactly one attempt, not
-       * five. recover() requeues these once configuration is fixed.
-       */
       this.options.jobs.failImmediately(job.id, error, this.now());
 
       console.error(
