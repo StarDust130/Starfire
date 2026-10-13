@@ -89,7 +89,7 @@ Starfire is built around **doing**, not just talking.
 | 👀 | **Screen Awareness** | Understand on-screen context to help with the task at hand |
 | 🖱️ | **Computer Use** | Interact with supported application interfaces through controlled actions |
 | ⏰ | **Tasks + Reminders** | Keep track of tasks, reminders and scheduled work |
-| 🤖 | **Proactive Agent ** | Support multi-step workflows and helpful follow-up actions |
+| 🤖 | **Proactive Agent** | Support multi-step workflows and helpful follow-up actions |
 | ❤️ | **Personality + Continuity** | Maintain a consistent personality and carry useful context between conversations |
 | 🏠 | **Local LLM + Model Router** | Route tasks between available local and cloud models |
 | 🧪 | **Massive Eval** | Evaluate tool use, task success, reliability, safety and latency at scale |
