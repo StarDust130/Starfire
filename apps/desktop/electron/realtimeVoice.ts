@@ -5,9 +5,9 @@ import {
 } from "@starfire/contracts";
 import { type BrowserWindow, ipcMain } from "electron";
 import WebSocket from "ws";
+
 import type { VoiceTranscriptCapture } from "./memory/capture";
 import { formatMemorySearchResult } from "./memory/context";
-
 import {
   buildAudioAppend,
   buildFunctionCallOutput,
@@ -17,6 +17,7 @@ import {
   parseServerEvent,
   REALTIME_MODEL,
 } from "./realtimeProtocol";
+import { detectVoiceCommand } from "./voiceCommands";
 
 const DEFAULT_ENDPOINT = `wss://api.empiriolabs.ai/v1/realtime?model=${REALTIME_MODEL}`;
 const CONNECT_TIMEOUT_MS = 5_000;
@@ -55,6 +56,15 @@ type ToolOutcome = {
  *
  * The microphone stays in the renderer/controller. This bridge never
  * opens the microphone and rejects audio unless voice is active.
+ *
+ * Personality + control:
+ * - Core Memory and continuity context are injected when the session
+ *   is configured, and Core Memory is refreshed on re-activation when
+ *   it changed.
+ * - Deterministic voice commands ("be quiet and listen" /
+ *   "you can speak now" / "stop") are handled HERE in the trusted
+ *   process — never sent to the model as conversation.
+ * - memory_search is served from the local memory database.
  */
 export class RealtimeVoiceBridge {
   private socket: WebSocket | null = null;
@@ -76,7 +86,6 @@ export class RealtimeVoiceBridge {
   private sessionConfigured = false;
   private sessionAnnounced = false;
   private sessionConfirmedLogged = false;
-  private lastSentCoreMemory: string | null = null;
   private responseInFlight = false;
   private responseStartedAt = 0;
   private firstAudioLogged = false;
@@ -88,12 +97,19 @@ export class RealtimeVoiceBridge {
   private toolBatchCancelled = false;
   private pendingSessionEnd = false;
 
+  /** Core Memory block actually sent to the current session. */
+  private lastSentCoreMemory: string | null = null;
+
+  /** Silent-listening mode: suppress playback, keep mic + tools. */
+  private silentMode = false;
+
   constructor(
     private readonly getWindow: () => BrowserWindow | null,
     private readonly ports: AgentPorts,
     private readonly capture?: VoiceTranscriptCapture,
     private readonly getCoreMemory?: () => string,
     private readonly searchMemory?: (query: string) => string,
+    private readonly getContinuity?: () => string,
   ) {}
 
   register(): void {
@@ -147,6 +163,7 @@ export class RealtimeVoiceBridge {
 
     this.disposed = true;
     this.active = false;
+    this.silentMode = false;
     this.activationId += 1;
 
     this.capture?.onSessionEnd();
@@ -185,6 +202,9 @@ export class RealtimeVoiceBridge {
   }
 
   private emitAudio(pcm: Buffer): void {
+    // Silent-listening mode suppresses ALL assistant audio.
+    if (this.silentMode) return;
+
     const win = this.getWindow();
 
     if (win && !win.isDestroyed()) {
@@ -248,6 +268,11 @@ export class RealtimeVoiceBridge {
     this.toolBatchStarted = false;
     this.pendingSessionEnd = false;
 
+    if (this.sessionEndTimer) {
+      clearTimeout(this.sessionEndTimer);
+      this.sessionEndTimer = null;
+    }
+
     this.capture?.onSessionStart();
 
     /*
@@ -262,15 +287,16 @@ export class RealtimeVoiceBridge {
       if (fresh !== this.lastSentCoreMemory) {
         this.lastSentCoreMemory = fresh;
 
-        this.send(buildSessionUpdate(STARFIRE_FUNCTION_SPECS, fresh));
+        this.send(
+          buildSessionUpdate(
+            STARFIRE_FUNCTION_SPECS,
+            fresh,
+            this.getContinuity?.() ?? "",
+          ),
+        );
 
         console.log("[Starfire Voice] event=core-memory-refreshed");
       }
-    }
-
-    if (this.sessionEndTimer) {
-      clearTimeout(this.sessionEndTimer);
-      this.sessionEndTimer = null;
     }
 
     console.log(`[Starfire Voice] conn=${this.conn} event=voice-activated`);
@@ -543,9 +569,13 @@ export class RealtimeVoiceBridge {
 
         const coreMemory = this.getCoreMemory?.() ?? "";
 
+        const continuity = this.getContinuity?.() ?? "";
+
         this.lastSentCoreMemory = coreMemory;
 
-        this.send(buildSessionUpdate(STARFIRE_FUNCTION_SPECS, coreMemory));
+        this.send(
+          buildSessionUpdate(STARFIRE_FUNCTION_SPECS, coreMemory, continuity),
+        );
 
         return;
       }
@@ -642,6 +672,52 @@ export class RealtimeVoiceBridge {
 
     if (event.kind === "input-transcript") {
       if (this.active) {
+        /*
+         * Deterministic control intents — handled by the trusted
+         * bridge, never sent to the model as conversation.
+         */
+        const command = detectVoiceCommand(event.text);
+
+        if (command === "silence") {
+          this.silentMode = true;
+
+          // Cut any speech in flight immediately.
+          if (this.responseInFlight) {
+            this.send(buildResponseCancel());
+          }
+
+          this.emit({ kind: "silent-mode", active: true });
+
+          console.log("[Starfire Voice] event=silent-mode-on");
+
+          return;
+        }
+
+        if (command === "resume") {
+          this.silentMode = false;
+
+          this.emit({ kind: "silent-mode", active: false });
+
+          console.log("[Starfire Voice] event=silent-mode-off");
+
+          return;
+        }
+
+        if (command === "stop") {
+          console.log("[Starfire Voice] event=stop-command");
+
+          this.emit({ kind: "input-transcript", text: event.text });
+
+          // Existing proper shutdown flow (cancels in-flight speech,
+          // cleans up, keeps the warm socket) — the renderer returns
+          // to wake-word listening.
+          this.deactivate();
+
+          this.emit({ kind: "session-ended" });
+
+          return;
+        }
+
         this.emit({ kind: "input-transcript", text: event.text });
 
         this.capture?.onUserTranscript(event.text, event.itemId);
@@ -961,18 +1037,19 @@ export class RealtimeVoiceBridge {
     const wasActive = this.active;
 
     this.active = false;
+    this.silentMode = false;
     this.activationId += 1;
     this.pendingToolCalls = [];
     this.toolBatchStarted = false;
     this.toolBatchCancelled = true;
     this.pendingSessionEnd = false;
 
-    this.capture?.onSessionEnd();
-
     if (this.sessionEndTimer) {
       clearTimeout(this.sessionEndTimer);
       this.sessionEndTimer = null;
     }
+
+    this.capture?.onSessionEnd();
 
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
       // Clear any partial utterance so it cannot leak into the next turn.
@@ -1056,7 +1133,6 @@ export class RealtimeVoiceBridge {
     this.socket = null;
     this.sessionConfigured = false;
     this.sessionAnnounced = false;
-    this.lastSentCoreMemory = null;
     this.sessionConfirmedLogged = false;
     this.responseInFlight = false;
     this.responseStartedAt = 0;
@@ -1064,6 +1140,8 @@ export class RealtimeVoiceBridge {
     this.toolBatchStarted = false;
     this.toolBatchCancelled = true;
     this.pendingSessionEnd = false;
+    this.lastSentCoreMemory = null;
+    this.silentMode = false;
 
     this.connectionPromise = null;
 

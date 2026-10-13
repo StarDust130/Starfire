@@ -31,6 +31,13 @@ export {
   type SelectedContext,
 } from "./context.js";
 export {
+  CONTINUITY_LINE_MAX_CHARS,
+  CONTINUITY_MAX_CHARS,
+  CONTINUITY_MAX_TURNS,
+  ContinuityProvider,
+  formatContinuity,
+} from "./continuity.js";
+export {
   CORE_MEMORY_MAX_CHARS,
   CORE_MEMORY_MAX_MEMORIES,
   CoreMemoryProvider,

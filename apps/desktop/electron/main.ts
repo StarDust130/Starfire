@@ -52,6 +52,8 @@ let transcriptRecorder: VoiceTranscriptRecorder | null = null;
 
 let getCoreMemory: (() => string) | null = null;
 
+let getContinuity: (() => string) | null = null;
+
 let searchMemory: ((query: string) => string) | null = null;
 
 let eveSearchMemory: ((query: string) => string) | null = null;
@@ -375,6 +377,16 @@ app.whenReady().then(async () => {
 
       getCoreMemory = (): string => coreMemoryProvider.get();
 
+      const continuityProvider = new memory.ContinuityProvider(
+        new memory.MessageStore(memoryDatabase),
+      );
+
+      // Snapshot semantics: computed when a session starts (the same
+      // moment the bridge assembles instructions) — never re-appended
+      // per turn, and the live session is excluded automatically.
+      getContinuity = (): string =>
+        continuityProvider.get(liveVoiceSessionId ?? undefined);
+
       /*
        * Snapshot of the Core Memory rows actually SENT to the voice
        * model. Refreshed when a session starts (the same moment the
@@ -522,14 +534,11 @@ app.whenReady().then(async () => {
 
   voiceBridge = new RealtimeVoiceBridge(
     () => mainWindow,
-
     ports,
-
     transcriptRecorder ?? undefined,
-
     getCoreMemory ?? undefined,
-
     searchMemory ?? undefined,
+    getContinuity ?? undefined,
   );
 
   voiceBridge.register();

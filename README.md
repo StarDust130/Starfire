@@ -84,6 +84,15 @@ Starfire is built around **doing**, not just talking.
 | 🪟 | **Window Control** | Focus, minimize and close supported application windows |
 | 🎭 | **VRM Companion** | React through a realtime 3D character |
 | ⌨️ | **Global Shortcut** | Quickly interact using `Super + Z` |
+| 🧠 | **Memory** | Remember useful facts and relevant details across conversations |
+| 🧩 | **Context Engine** | Retrieve relevant memories and conversation context when needed |
+| 👀 | **Screen Awareness** | Understand on-screen context to help with the task at hand |
+| 🖱️ | **Computer Use** | Interact with supported application interfaces through controlled actions |
+| ⏰ | **Tasks + Reminders** | Keep track of tasks, reminders and scheduled work |
+| 🤖 | **Proactive Agent ** | Support multi-step workflows and helpful follow-up actions |
+| ❤️ | **Personality + Continuity** | Maintain a consistent personality and carry useful context between conversations |
+| 🏠 | **Local LLM + Model Router** | Route tasks between available local and cloud models |
+| 🧪 | **Massive Eval** | Evaluate tool use, task success, reliability, safety and latency at scale |
 
 ---
 
@@ -94,29 +103,46 @@ Starfire does not receive unrestricted access to your computer.
 Instead, capabilities are exposed through an explicit **tool registry**.
 
 ```text
-┌─────────────────────────────────────────┐
-│             STARFIRE TOOLS              │
-├─────────────────────────────────────────┤
-│                                         │
-│  🖥️  open_app                           │
-│  🖥️  close_app                          │
-│  🎯  focus_app                          │
-│                                         │
-│  📂  open_folder                        │
-│  📄  open_file                          │
-│                                         │
-│  📋  clipboard                          │
-│  💻  system_info                        │
-│                                         │
-│  🌐  web_search                         │
-│  🌦️  get_weather                        │
-│                                         │
-│  🪟  window_control                     │
-│  🕐  current_date_time                  │
-│                                         │
-│  🛑  end_session                        │
-│                                         │
-└─────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    🌌 STARFIRE TOOLS · V1                    │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  🖥️  DESKTOP CONTROL                                         │
+│      open_app · close_app · focus_app · window_control       │
+│                                                              │
+│  📂  FILES & FOLDERS                                         │
+│      open_file · open_folder · list_files · search_files     │
+│                                                              │
+│  🖱️  COMPUTER USE                                            │
+│      capture_screen · click · double_click · type_text       │
+│      press_key · scroll · drag_and_drop                      │
+│                                                              │
+│  🌐  WEB & BROWSER                                           │
+│      web_search · browser_open · browser_navigate            │
+│      browser_click · browser_type · browser_scroll           │
+│      browser_extract_text                                    │
+│                                                              │
+│  📋  CLIPBOARD & SYSTEM                                      │
+│      clipboard_read · clipboard_write · system_info          │
+│      get_active_window · get_weather · current_date_time     │
+│                                                              │
+│  🧠  MEMORY                                                  │
+│      save_memory · search_memory · update_memory             │
+│      forget_memory                                           │
+│                                                              │
+│  ⏰  TASKS & REMINDERS                                       │
+│      create_task · list_tasks · complete_task                │
+│      create_reminder · list_reminders · cancel_reminder      │
+│                                                              │
+│  🤖  AGENT WORKFLOWS                                         │
+│      plan_task · run_step · verify_action · task_status      │
+│                                                              │
+│  🎙️  VOICE & SESSION                                         │
+│      end_session                                             │
+│                                                              │
+├──────────────────────────────────────────────────────────────┤
+│  🔐 Explicit permissions · Validated arguments · Safe tools  │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### 💬 Talk to her like this
@@ -565,9 +591,10 @@ The possibilities don't.
 <h2 align="center">🌌 Starfire</h2>
 
 <p align="center">
-  <strong>A little AI companion for your desktop.</strong>
+  <strong>✨ She lives on your desktop. Rent-free. Obviously.</strong>
   <br>
-  <sub>Built with TypeScript · Electron · React · Three.js</sub>
+  <br><br>
+  <sub>🌌 Stay curious. Automate the boring stuff. Be a little chaotic.</sub>
 </p>
 
 <p align="center">

@@ -197,6 +197,31 @@ export class MessageStore {
       .reverse();
   }
 
+  /**
+   * The most recent complete turns across ALL sessions (oldest
+   * first), optionally excluding one session (the live one — the
+   * model already holds it). Used by continuity restoration.
+   */
+  listRecentTurns(limit: number, excludeSessionId?: string): StoredTurn[] {
+    const capped = Math.max(1, Math.min(limit, 50));
+
+    const rows = excludeSessionId
+      ? this.db.handle
+          .prepare(
+            "SELECT id, session_id, turn_index, role, content, interrupted, created_at FROM messages WHERE interrupted = 0 AND session_id != ? ORDER BY id DESC LIMIT ?",
+          )
+          .all(excludeSessionId, capped)
+      : this.db.handle
+          .prepare(
+            "SELECT id, session_id, turn_index, role, content, interrupted, created_at FROM messages WHERE interrupted = 0 ORDER BY id DESC LIMIT ?",
+          )
+          .all(capped);
+
+    return (rows as Array<Record<string, unknown>>)
+      .map((row) => this.mapRow(row))
+      .reverse();
+  }
+
   private mapRow(row: Record<string, unknown>): StoredTurn {
     return {
       id: Number(row.id),
