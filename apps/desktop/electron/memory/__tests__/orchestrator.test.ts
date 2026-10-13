@@ -1,11 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
-
 import { tmpdir } from "node:os";
-
 import path from "node:path";
-
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import {
   type ExtractedMemoryDraft,
   type ExtractionResult,
@@ -35,9 +31,7 @@ type ExtractInput = {
 
 class StubProvider {
   public calls: ExtractInput[] = [];
-
   public results: ExtractionResult[] = [];
-
   public configured = true;
 
   isConfigured(): boolean {
@@ -53,7 +47,14 @@ class StubProvider {
       return next;
     }
 
-    return { ok: true, empty: true, drafts: [], usage: null, redactions: [] };
+    return {
+      ok: true,
+      empty: true,
+      drafts: [],
+      usage: null,
+      redactions: [],
+      model: "glm-4-7-flash",
+    };
   }
 }
 
@@ -68,7 +69,6 @@ class FailingMemoryStore extends MemoryStore {
 
   recordFact(): never {
     this.attempts += 1;
-
     throw new Error("database is not open (simulated write failure)");
   }
 }
@@ -92,11 +92,8 @@ async function build() {
   }
 
   const messages = new MessageStore(db);
-
   const jobs = new MemoryJobs(db);
-
   const memories = new MemoryStore(db);
-
   const provider = new StubProvider();
 
   const orchestrator = new MemoryOrchestrator({
@@ -106,6 +103,7 @@ async function build() {
     memories,
     provider,
     debounceMs: 5,
+    idleMs: 60,
     shutdownBudgetMs: 2_000,
   });
 
@@ -139,6 +137,7 @@ describe("MemoryOrchestrator", () => {
       ],
       usage: null,
       redactions: [],
+      model: "glm-4-7-flash",
     });
 
     await orchestrator.runNow();
@@ -147,12 +146,14 @@ describe("MemoryOrchestrator", () => {
 
     expect(active).toHaveLength(1);
     expect(active[0]?.content).toBe("The user's name is Thor.");
+
     expect(jobs.counts()).toEqual({
       pending: 0,
       running: 0,
       done: 1,
       failed: 0,
     });
+
     expect(messages.countUnprocessed()).toBe(0);
   });
 
@@ -186,6 +187,7 @@ describe("MemoryOrchestrator", () => {
       drafts: [],
       usage: null,
       redactions: [],
+      model: "glm-4-7-flash",
     });
 
     await orchestrator.runNow();
@@ -223,6 +225,7 @@ describe("MemoryOrchestrator", () => {
       drafts: [draft({})],
       usage: null,
       redactions: [],
+      model: "glm-4-7-flash",
     });
 
     await orchestrator.runNow();
@@ -242,13 +245,9 @@ describe("MemoryOrchestrator", () => {
       drafts: [draft({})],
       usage: null,
       redactions: [],
+      model: "glm-4-7-flash",
     });
 
-    /*
-     * Sabotage ONLY the memory-write path. Provider and job
-     * bookkeeping keep running against the real database, so the
-     * failure is scoped exactly to where it matters.
-     */
     const sabotaged = new MemoryOrchestrator({
       db,
       messages,
@@ -263,12 +262,6 @@ describe("MemoryOrchestrator", () => {
 
     expect(provider.calls).toHaveLength(1);
 
-    /*
-     * Extraction succeeded but the write failed: the job must be
-     * PENDING again (retryable with backoff) — never "done", which
-     * would silently lose the memory. A later retry re-applies the
-     * same drafts safely (recordFact is idempotent).
-     */
     expect(jobs.counts()).toEqual({
       pending: 1,
       running: 0,
@@ -332,9 +325,7 @@ describe("MemoryOrchestrator", () => {
     const jobId = jobs.nextRunnable()?.id ?? 0;
 
     expect(jobId).toBeGreaterThan(0);
-
     expect(jobs.markRunning(jobId)).toBe(true);
-
     expect(jobs.recoverStaleRunning(0)).toBe(1);
 
     provider.results.push({
@@ -343,17 +334,20 @@ describe("MemoryOrchestrator", () => {
       drafts: [draft({})],
       usage: null,
       redactions: [],
+      model: "glm-4-7-flash",
     });
 
     await orchestrator.runNow();
 
     expect(memories.countActive()).toBe(1);
+
     expect(jobs.counts()).toEqual({
       pending: 0,
       running: 0,
       done: 1,
       failed: 0,
     });
+
     expect(messages.countUnprocessed()).toBe(0);
   });
 
@@ -374,8 +368,6 @@ describe("MemoryOrchestrator", () => {
 
     expect(jobs.markRunning(jobId)).toBe(true);
 
-    // No staleness wait: a crash seconds ago must be recovered now,
-    // because startup is the ONLY time recovery runs.
     orchestrator.recover();
 
     provider.results.push({
@@ -384,6 +376,7 @@ describe("MemoryOrchestrator", () => {
       drafts: [draft({})],
       usage: null,
       redactions: [],
+      model: "glm-4-7-flash",
     });
 
     await orchestrator.runNow();
@@ -405,11 +398,9 @@ describe("MemoryOrchestrator", () => {
     expect(provider.calls).toHaveLength(0);
     expect(jobs.counts().pending).toBe(0);
     expect(jobs.counts().failed).toBe(0);
-
-    // Messages stay unprocessed — extractable later, never lost.
     expect(messages.countUnprocessed()).toBe(4);
 
-    provider.configured = true; // the key was added
+    provider.configured = true;
 
     await orchestrator.runNow();
 
@@ -436,13 +427,13 @@ describe("MemoryOrchestrator", () => {
     expect(jobs.counts().failed).toBe(1);
     expect(provider.calls).toHaveLength(1);
 
-    // "Fixed the key, restarted the app."
     provider.results.push({
       ok: true,
       empty: false,
       drafts: [draft({})],
       usage: null,
       redactions: [],
+      model: "glm-4-7-flash",
     });
 
     orchestrator.recover();
@@ -450,6 +441,7 @@ describe("MemoryOrchestrator", () => {
     await orchestrator.runNow();
 
     expect(memories.countActive()).toBe(1);
+
     expect(jobs.counts()).toEqual({
       pending: 0,
       running: 0,
@@ -473,7 +465,6 @@ describe("MemoryOrchestrator", () => {
 
     expect(jobs.requeueFailed()).toBe(0);
 
-    // A young permanent failure (fresh bad key) IS given a second chance.
     const young = jobs.enqueue([2]) as number;
 
     jobs.markRunning(young);
@@ -493,10 +484,10 @@ describe("MemoryOrchestrator", () => {
       drafts: [draft({ content: "Private fact: lives at Privet Drive 4." })],
       usage: null,
       redactions: [],
+      model: "glm-4-7-flash",
     });
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     try {
@@ -551,9 +542,8 @@ describe("MemoryOrchestrator", () => {
 
     await orchestrator.shutdown();
 
-    orchestrator.notifyTurn(); // must be ignored after dispose
-
-    await orchestrator.runNow(); // no-op
+    orchestrator.notifyTurn();
+    await orchestrator.runNow();
 
     expect(orchestrator).toBeDefined();
   });
@@ -575,12 +565,62 @@ describe("MemoryOrchestrator", () => {
     await orchestrator.runNow();
 
     expect(provider.calls).toHaveLength(1);
+
     expect(jobs.counts()).toEqual({
       pending: 0,
       running: 0,
       done: 0,
       failed: 1,
     });
+
     expect(messages.countUnprocessed()).toBe(0);
+  });
+
+  it("extracts after an idle pause WITHOUT ending the session (regression)", async () => {
+    const { messages, jobs, provider, orchestrator } = await build();
+
+    await seedConversation(messages);
+
+    orchestrator.notifyTurn();
+
+    // No session end: extraction must happen after the idle timer.
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    expect(provider.calls).toHaveLength(1);
+    expect(jobs.counts().done).toBe(1);
+  });
+
+  it("wakes the queue automatically after a rate-limit cooldown (regression)", async () => {
+    const { messages, jobs, provider, orchestrator } = await build();
+
+    await seedConversation(messages);
+
+    provider.results.push({
+      ok: false,
+      kind: "rate_limited",
+      retryable: true,
+      retryAfterMs: 60,
+      message: "slow down",
+    });
+
+    await orchestrator.runNow();
+
+    expect(jobs.counts().pending).toBe(1);
+    expect(provider.calls).toHaveLength(1);
+
+    // Only the automatic wake timer should trigger this retry.
+    provider.results.push({
+      ok: true,
+      empty: true,
+      drafts: [],
+      usage: null,
+      redactions: [],
+      model: "glm-4-7-flash",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(provider.calls).toHaveLength(2);
+    expect(jobs.counts().done).toBe(1);
   });
 });
