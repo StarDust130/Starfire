@@ -1,5 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
+
 import { tmpdir } from "node:os";
+
 import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -33,7 +35,9 @@ type ExtractInput = {
 
 class StubProvider {
   public calls: ExtractInput[] = [];
+
   public results: ExtractionResult[] = [];
+
   public configured = true;
 
   isConfigured(): boolean {
@@ -667,5 +671,131 @@ describe("MemoryOrchestrator", () => {
       "hello 2",
       "hi 2",
     ]);
+  });
+
+  it("one account rate limit pauses ALL jobs without burning attempts", async () => {
+    const { db, messages, jobs, provider, orchestrator } = await build();
+
+    await seedConversation(messages);
+
+    provider.results.push({
+      ok: false,
+      kind: "rate_limited",
+      retryable: true,
+      retryAfterMs: 120_000,
+      message: "rate limit exceeded",
+    });
+
+    await orchestrator.runNow();
+
+    expect(provider.calls).toHaveLength(1);
+    expect(jobs.counts().pending).toBe(1);
+    expect(jobs.get(1)?.attempts).toBe(0); // deferral never burns attempts
+
+    // More turns arrive + another drain DURING the cooldown:
+    // nothing claimed, nothing requested, nothing lost.
+    messages.insertTurn({
+      sessionId: "s2",
+      role: "user",
+      content: "more talk during cooldown",
+    });
+
+    await orchestrator.runNow();
+
+    expect(provider.calls).toHaveLength(1);
+    expect(jobs.counts().pending).toBe(1);
+    expect(messages.countUnprocessed()).toBe(1);
+
+    // Cooldown + retry time expire -> the SAME job resumes, and the
+    // turn that arrived during the cooldown is extracted right after
+    // it (the drain legitimately continues while work remains).
+    db.handle
+      .prepare("UPDATE memory_state SET value = ? WHERE key = 'cooldown_until'")
+      .run(String(Date.now() - 1));
+
+    db.handle
+      .prepare("UPDATE memory_jobs SET run_after = ? WHERE status = 'pending'")
+      .run(Date.now() - 1);
+
+    provider.results.push({
+      ok: true,
+      empty: true,
+      drafts: [],
+      usage: null,
+      redactions: [],
+      model: "glm-4-7-flash",
+    });
+
+    await orchestrator.runNow();
+
+    // Call 2 = resumed job #1; call 3 = fresh batch for the new turn.
+    expect(provider.calls).toHaveLength(3);
+    expect(jobs.counts().done).toBe(2);
+    expect(jobs.counts().pending).toBe(0);
+    expect(messages.countUnprocessed()).toBe(0);
+  });
+
+  it("cooldown persists across a restart and resumes automatically", async () => {
+    const { db, messages, jobs, provider, orchestrator } = await build();
+
+    await seedConversation(messages);
+
+    provider.results.push({
+      ok: false,
+      kind: "rate_limited",
+      retryable: true,
+      retryAfterMs: 60_000,
+      message: "rate limit exceeded",
+    });
+
+    await orchestrator.runNow();
+
+    expect(provider.calls).toHaveLength(1);
+
+    /*
+     * Simulate a restart: brand-new orchestrator AND provider (no
+     * in-memory state), SAME database — the durable cooldown must hold.
+     */
+    const restartedProvider = new StubProvider();
+
+    const restarted = new MemoryOrchestrator({
+      db,
+      messages,
+      jobs,
+      memories: new MemoryStore(db),
+      provider: restartedProvider,
+      idleMs: 60,
+      shutdownBudgetMs: 2_000,
+    });
+
+    restarted.recover();
+
+    await restarted.runNow();
+
+    expect(restartedProvider.calls).toHaveLength(0);
+    expect(jobs.counts().done).toBe(0);
+
+    // Cooldown expires -> work resumes without any external trigger.
+    db.handle
+      .prepare("UPDATE memory_state SET value = ? WHERE key = 'cooldown_until'")
+      .run(String(Date.now() - 1));
+
+    db.handle
+      .prepare("UPDATE memory_jobs SET run_after = ? WHERE status = 'pending'")
+      .run(Date.now() - 1);
+
+    restartedProvider.results.push({
+      ok: true,
+      empty: true,
+      drafts: [],
+      usage: null,
+      redactions: [],
+      model: "glm-4-7-flash",
+    });
+
+    await restarted.runNow();
+
+    expect(restartedProvider.calls).toHaveLength(1);
+    expect(jobs.counts().done).toBe(1);
   });
 });
