@@ -19,13 +19,11 @@ import { redactSecrets, redactTurns } from "./redaction.js";
  * POST {baseUrl}/chat/completions, bearer key, JSON mode via
  * response_format, thinking disabled, no tools/web search.
  *
- * FALLBACK RULES (account-wide limits make these critical):
+ * FALLBACK RULES:
  * - Primary: config.model (glm-4-7-flash).
- * - Fallback: config.fallbackModel (qwen3-5-4b) ONLY for
- *   server/timeout/network/malformed failures — cases where a
- *   different model can plausibly succeed.
- * - 429 = ACCOUNT-WIDE shared quota: NEVER fallback (the backup hits
- *   the same exhausted quota). Cooldown + retry later instead.
+ * - Fallback: config.fallbackModel (qwen3-5-4b) for server, timeout,
+ *   network, malformed failures, and clearly identified model overload.
+ * - Account-wide quota and ambiguous 429 failures do NOT trigger fallback.
  * - auth/client/disabled: configuration problems — fallback cannot
  *   help; fail fast without burning attempts.
  * - The same strict parser, provenance map, and redaction apply to
@@ -92,6 +90,12 @@ export type ExtractionFailure = {
   retryable: boolean;
   retryAfterMs: number | null;
   message: string;
+  /**
+   * Set ONLY on rate_limited failures whose body clearly reports a
+   * model-level overload (not account quota). Marks the failure as
+   * fallback-eligible to the secondary model.
+   */
+  modelOverload?: boolean;
 };
 
 export type ExtractionResult = ExtractionSuccess | ExtractionFailure;
@@ -302,9 +306,7 @@ function clampImportance(value: number | undefined): number {
 
 function extractJsonBlock(raw: string): string | null {
   const cleaned = raw.replace(/```(?:json)?/gi, "");
-
   const start = cleaned.indexOf("{");
-
   const end = cleaned.lastIndexOf("}");
 
   if (start === -1 || end <= start) {
@@ -361,7 +363,6 @@ export function parseExtractionPayload(
     }
 
     const key = normalizeKey(checked.data.key);
-
     const content = checked.data.content.trim().slice(0, MAX_MEMORY_CHARS);
 
     if (key.length === 0 || content.length === 0) {
@@ -412,8 +413,11 @@ function failure(
   retryable: boolean,
   retryAfterMs: number | null,
   message: string,
+  modelOverload?: boolean,
 ): ExtractionFailure {
-  return { ok: false, kind, retryable, retryAfterMs, message };
+  return modelOverload
+    ? { ok: false, kind, retryable, retryAfterMs, message, modelOverload: true }
+    : { ok: false, kind, retryable, retryAfterMs, message };
 }
 
 /**
@@ -433,10 +437,46 @@ export function parseRetryAfterMs(header: string | null): number | null {
   }
 
   const seconds = value > 3_600 ? value / 1_000 : value;
-
   const ms = Math.round(seconds * 1_000);
 
   return Math.min(RETRY_AFTER_MAX_MS, Math.max(1_000, ms));
+}
+
+export const OVERLOAD_FALLBACK_MS = 30_000;
+
+export type RateLimitClassification = "overload" | "quota" | "ambiguous";
+
+/**
+ * Inspects the 429 BODY — the account dashboard showed "temporarily
+ * overloaded" while docs describe quota limits; headers alone cannot
+ * tell them apart:
+ * - "overload" only  -> model-level throttle, fallback eligible
+ * - quota wording    -> account-wide, fallback must NOT fire
+ * - anything else    -> ambiguous, treated as account-wide (conservative)
+ */
+export function classifyRateLimitBody(
+  bodyText: string,
+): RateLimitClassification {
+  const lower = bodyText.toLowerCase();
+
+  const saysOverload = lower.includes("overload");
+
+  const saysQuota =
+    lower.includes("quota") ||
+    lower.includes("rate limit") ||
+    lower.includes("too many requests") ||
+    lower.includes("throttl") ||
+    lower.includes("limit exceeded");
+
+  if (saysOverload && !saysQuota) {
+    return "overload";
+  }
+
+  if (saysQuota) {
+    return "quota";
+  }
+
+  return "ambiguous";
 }
 
 function readChoiceContent(payload: unknown): string | null {
@@ -483,7 +523,6 @@ function readUsage(
   const record = usage as Record<string, unknown>;
 
   const input = record.prompt_tokens ?? record.input_tokens;
-
   const output = record.completion_tokens ?? record.output_tokens;
 
   if (typeof input !== "number" || typeof output !== "number") {
@@ -505,7 +544,6 @@ function fallbackEligible(kind: ExtractionFailureKind): boolean {
 
 export class GlmExtractionProvider {
   private readonly limiter: ExtractionRateLimiter;
-
   private chain: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -579,18 +617,28 @@ export class GlmExtractionProvider {
 
     const fallbackModel = this.config.fallbackModel;
 
+    /*
+     * Fallback eligibility: transient per-model failures, AND 429s
+     * whose body clearly says the MODEL is overloaded. Account-quota
+     * and ambiguous 429s never fall back — the backup would hit the
+     * same exhausted quota.
+     */
+    const primaryEligible =
+      fallbackEligible(primary.kind) ||
+      (primary.kind === "rate_limited" && primary.modelOverload === true);
+
     const canFallback =
       typeof fallbackModel === "string" &&
       fallbackModel.length > 0 &&
       fallbackModel !== this.config.model &&
-      fallbackEligible(primary.kind);
+      primaryEligible;
 
     if (!canFallback) {
       return primary;
     }
 
     console.log(
-      `[Memory GLM] fallback to ${fallbackModel} (primary ${primary.kind})`,
+      `[Memory GLM] fallback to ${fallbackModel} (primary ${primary.kind}${primary.modelOverload ? "/overload" : ""})`,
     );
 
     const fallback = await this.attempt(fallbackModel, input);
@@ -599,13 +647,20 @@ export class GlmExtractionProvider {
       return fallback;
     }
 
-    // Both models failed: preserve the job via the primary failure,
-    // enriched with the fallback outcome (kinds only — no bodies).
+    /*
+     * Preserve the GOVERNING failure: if the FALLBACK hit a rate
+     * limit, its kind and Retry-After must drive the queue cooldown.
+     * Collapsing it into the primary's error would misclassify the
+     * quota signal and burn a real retry attempt on it.
+     */
+    const governing = fallback.kind === "rate_limited" ? fallback : primary;
+
     return failure(
-      primary.kind,
-      primary.retryable,
-      primary.retryAfterMs,
+      governing.kind,
+      governing.retryable,
+      governing.retryAfterMs,
       `primary ${primary.kind}; fallback ${fallback.kind}`,
+      governing.modelOverload,
     );
   }
 
@@ -627,7 +682,6 @@ export class GlmExtractionProvider {
     );
 
     const redactedBatch = redactTurns(input.batch);
-
     const redactedContext = redactTurns(input.context);
 
     const redactions = [
@@ -698,19 +752,31 @@ export class GlmExtractionProvider {
         }
 
         if (response.status === 429) {
+          const classification = classifyRateLimitBody(text);
+
           const retryAfterMs =
             parseRetryAfterMs(response.headers.get("retry-after")) ??
-            RATE_LIMIT_FALLBACK_MS;
+            (classification === "overload"
+              ? OVERLOAD_FALLBACK_MS
+              : RATE_LIMIT_FALLBACK_MS);
 
-          // ACCOUNT-WIDE limit: a global cooldown so EVERY model and
-          // job waits — fallback would hit the same exhausted quota.
-          this.limiter.penalty(retryAfterMs);
+          /*
+           * Only account-wide (or ambiguous) throttles get the GLOBAL
+           * in-process cooldown — a model-specific overload must not
+           * block the healthy fallback model.
+           */
+          if (classification !== "overload") {
+            this.limiter.penalty(retryAfterMs);
+          }
 
           return failure(
             "rate_limited",
             true,
             retryAfterMs,
-            `Provider rate limit hit (waiting ${Math.round(retryAfterMs / 1000)}s).`,
+            classification === "overload"
+              ? "Model temporarily overloaded (429)."
+              : `Provider rate limit hit (waiting ${Math.round(retryAfterMs / 1000)}s).`,
+            classification === "overload",
           );
         }
 
