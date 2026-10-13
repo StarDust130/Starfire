@@ -1,36 +1,106 @@
+import { randomUUID } from "node:crypto";
+
 import { createServer, type IncomingMessage } from "node:http";
+
 import type { AgentPorts } from "@starfire/contracts";
+
 import { executeDeviceTool } from "@starfire/contracts";
 
 const DEFAULT_PORT = 17321;
 
-const DEVICE_TOKEN = process.env.STARFIRE_DEVICE_TOKEN;
+const MAX_BODY_BYTES = 64 * 1024;
 
 /*
- * executeDeviceTool is Starfire's shared capability dispatch, re-exported
- * here for the Eve HTTP boundary (and imported by the realtime voice
- * bridge). The dispatch lives in @starfire/contracts so voice and Eve
- * share one execution layer; this file only serves it over HTTP.
+ * Over-limit bodies are DRAINED up to this cap so the client can
+ * finish uploading and actually receive our error response — without
+ * draining, Node destroys the socket mid-upload and the client sees a
+ * transport error instead of our clean 500. Beyond the drain cap
+ * (flagrant abuse) we abort; a connection reset is acceptable there.
  */
-export { executeDeviceTool };
+const MAX_DRAIN_BYTES = MAX_BODY_BYTES * 8;
+
+/*
+ * Local HTTP bridge between Eve agents and Starfire's trusted
+ * capability layer. Loopback-only by binding.
+ *
+ * AUTHENTICATION: a per-launch token is ALWAYS in effect. Resolution
+ * order: explicit option (tests) → STARFIRE_DEVICE_TOKEN env → a
+ * securely generated random token for this launch. The generated
+ * token is written back to process.env so the in-process Eve runtime
+ * inherits it through trusted local configuration — it is never
+ * logged, never rendered, never committed.
+ */
+
+export type DeviceBridgeHandlers = {
+  searchMemory?: (query: string) => string;
+};
+
+export type DeviceBridgeOptions = {
+  /** Overrides env for tests. */
+  token?: string;
+};
+
+/** Reads & discards the request body, bounded. Never parses. */
+async function drainBody(request: IncomingMessage): Promise<void> {
+  let drained = 0;
+
+  for await (const chunk of request) {
+    drained += Buffer.from(chunk).length;
+
+    if (drained > MAX_DRAIN_BYTES) {
+      // Flagrant abuse: stop reading; a reset is acceptable here.
+      request.destroy();
+
+      return;
+    }
+  }
+}
 
 async function readJson(
   request: IncomingMessage,
 ): Promise<Record<string, unknown>> {
+  /*
+   * Deterministic rejection for bodies that declare their size up
+   * front: drain first (so the client finishes cleanly), then fail.
+   */
+  const declared = request.headers["content-length"];
+
+  const declaredBytes =
+    typeof declared === "string" ? Number(declared) : Number.NaN;
+
+  if (Number.isFinite(declaredBytes) && declaredBytes > MAX_BODY_BYTES) {
+    await drainBody(request);
+
+    throw new Error("Request body is too large.");
+  }
+
   const chunks: Buffer[] = [];
 
   let total = 0;
+
+  let tooLarge = false;
 
   for await (const chunk of request) {
     const buffer = Buffer.from(chunk);
 
     total += buffer.length;
 
-    if (total > 64 * 1024) {
+    if (total > MAX_DRAIN_BYTES) {
+      // Flagrant abuse (chunked/undeclared): stop reading.
       throw new Error("Request body is too large.");
     }
 
+    if (total > MAX_BODY_BYTES) {
+      tooLarge = true; // keep draining so the client finishes cleanly
+
+      continue;
+    }
+
     chunks.push(buffer);
+  }
+
+  if (tooLarge) {
+    throw new Error("Request body is too large.");
   }
 
   if (chunks.length === 0) {
@@ -61,8 +131,19 @@ function sendJson(
 export async function startDeviceBridge(
   ports: AgentPorts,
   port = DEFAULT_PORT,
-  handlers: { searchMemory?: (query: string) => string } = {},
+  handlers: DeviceBridgeHandlers = {},
+  options: DeviceBridgeOptions = {},
 ): Promise<() => Promise<void>> {
+  const explicit = options.token ?? process.env.STARFIRE_DEVICE_TOKEN?.trim();
+
+  const token = explicit && explicit.length > 0 ? explicit : randomUUID();
+
+  // Make the effective token visible to the in-process Eve runtime
+  // through trusted local configuration (never logged).
+  if (process.env.STARFIRE_DEVICE_TOKEN !== token) {
+    process.env.STARFIRE_DEVICE_TOKEN = token;
+  }
+
   const server = createServer(async (request, response) => {
     try {
       if (request.method !== "POST") {
@@ -83,17 +164,16 @@ export async function startDeviceBridge(
         return;
       }
 
-      if (DEVICE_TOKEN) {
-        const token = request.headers["x-starfire-device-token"];
+      const provided = request.headers["x-starfire-device-token"];
 
-        if (token !== DEVICE_TOKEN) {
-          sendJson(response, 401, {
-            ok: false,
-            error: "Unauthorized device request.",
-          });
+      if (provided !== token) {
+        // Auth rejected: the body is never trusted — no drain needed.
+        sendJson(response, 401, {
+          ok: false,
+          error: "Unauthorized device request.",
+        });
 
-          return;
-        }
+        return;
       }
 
       const body = await readJson(request);
@@ -111,7 +191,7 @@ export async function startDeviceBridge(
 
       /*
        * memory_search is served from the local memory database in this
-       * trusted process — Eve agents reach it over this HTTP boundary.
+       * trusted process — Eve agents reach it over this boundary.
        */
       if (tool === "memory_search") {
         const search = handlers.searchMemory;
@@ -129,7 +209,7 @@ export async function startDeviceBridge(
         const query =
           typeof args.query === "string" ? args.query.trim().slice(0, 200) : "";
 
-        if (query.trim().length === 0) {
+        if (query.length === 0) {
           sendJson(response, 200, {
             ok: false,
             result: null,
@@ -173,7 +253,10 @@ export async function startDeviceBridge(
     });
   });
 
-  console.log(`[Starfire Device] listening on http://127.0.0.1:${port}`);
+  console.log(
+    `[Starfire Device] listening on http://127.0.0.1:${port} ` +
+      `(auth: ${explicit ? "configured token" : "per-launch token"})`,
+  );
 
   return () =>
     new Promise<void>((resolve) => {
