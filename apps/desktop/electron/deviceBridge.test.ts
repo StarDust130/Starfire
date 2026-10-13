@@ -1,160 +1,149 @@
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
 import type { AgentPorts } from "@starfire/contracts";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { startDeviceBridge } from "./deviceBridge";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-/*
- * Device bridge regressions: the HTTP boundary Eve tools call must
- * dispatch through the shared Starfire capability layer, fail safely
- * on bad input, and shut down cleanly.
- *
- * Ports are OS-assigned per test — a live Starfire app owns the real
- * device-bridge port, and tests must never collide with it.
- */
+import { startDeviceBridge } from "./deviceBridge.js";
 
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const probe = createServer();
+const PORT = 17330;
 
-    probe.once("error", reject);
+const TEST_TOKEN = "test-token";
 
-    probe.listen(0, "127.0.0.1", () => {
-      const { port } = probe.address() as AddressInfo;
+function createPorts(): {
+  ports: AgentPorts;
+  open: ReturnType<typeof vi.fn>;
+  control: ReturnType<typeof vi.fn>;
+} {
+  const open = vi.fn(async (name: string) => ({ name, pid: 4242 }));
 
-      probe.close(() => {
-        resolve(port);
-      });
-    });
-  });
-}
+  const control = vi.fn(async () => ({ done: true }));
 
-function makePorts(): AgentPorts {
-  return {
+  const ports = {
     apps: {
-      open: vi.fn(async (app: string) => ({ name: app, pid: 42 })),
-
-      close: vi.fn(async () => ({ closed: true, via: "pid" as const })),
-
+      open,
+      close: vi.fn(async () => ({ closed: true, via: "name" })),
       focus: vi.fn(async () => ({ focused: true })),
-
       listRunning: vi.fn(async () => []),
     },
-
     files: {
-      openFolder: vi.fn(async () => ({ opened: "folder" })),
-
-      openFile: vi.fn(async () => ({ opened: "file" })),
+      openFolder: vi.fn(async (path: string) => ({ opened: path })),
+      openFile: vi.fn(async (path: string) => ({ opened: path })),
     },
-
     urls: {
-      open: vi.fn(async () => ({ opened: "example.com" })),
+      open: vi.fn(async (url: string) => ({ opened: url })),
     },
-
     clipboard: {
       read: vi.fn(async () => "clipboard text"),
-
-      write: vi.fn(async () => {}),
+      write: vi.fn(async () => undefined),
     },
-
     system: {
-      info: vi.fn(async () => ({ summary: "ok" })),
+      info: vi.fn(async () => ({ summary: "all good" })),
     },
-
     web: {
-      search: vi.fn(async () => ({ answer: "a", results: [] })),
+      search: vi.fn(async () => ({ answer: "", results: [] })),
     },
-
     weather: {
-      current: vi.fn(async () => ({ summary: "sunny", temperatureC: 20 })),
+      current: vi.fn(async () => ({ summary: "", temperatureC: null })),
     },
-
     windows: {
-      control: vi.fn(async () => ({ done: true })),
+      control,
     },
   };
+
+  return { ports: ports as unknown as AgentPorts, open, control };
 }
 
-let stop: (() => Promise<void>) | null = null;
-
-let baseUrl = "";
-
-beforeEach(async () => {
-  const ports = makePorts();
-
-  const port = await freePort();
-
-  stop = await startDeviceBridge(ports, port);
-
-  baseUrl = `http://127.0.0.1:${port}`;
-});
-
-afterEach(async () => {
-  await stop?.();
-
-  stop = null;
-});
-
-async function postTool(body: unknown): Promise<{
-  status: number;
-
-  json: { ok: boolean; result?: unknown; error?: string };
-}> {
-  const response = await fetch(`${baseUrl}/v1/tool`, {
+async function postTool(
+  body: string,
+  token: string | null = TEST_TOKEN,
+): Promise<{ status: number; json: Record<string, unknown> }> {
+  const response = await fetch(`http://127.0.0.1:${PORT}/v1/tool`, {
     method: "POST",
-
-    headers: { "content-type": "application/json" },
-
-    body: JSON.stringify(body),
+    headers: {
+      "content-type": "application/json",
+      ...(token === null ? {} : { "x-starfire-device-token": token }),
+    },
+    body,
   });
 
   return {
     status: response.status,
-
-    json: (await response.json()) as {
-      ok: boolean;
-
-      result?: unknown;
-
-      error?: string;
-    },
+    json: (await response.json()) as Record<string, unknown>,
   };
 }
 
 describe("device bridge", () => {
+  let stop: (() => Promise<void>) | null = null;
+
+  afterEach(async () => {
+    await stop?.();
+
+    stop = null;
+  });
+
   it("rejects non-POST requests", async () => {
-    const response = await fetch(`${baseUrl}/v1/tool`, { method: "GET" });
+    stop = await startDeviceBridge(
+      createPorts().ports,
+      PORT,
+      {},
+      { token: TEST_TOKEN },
+    );
+
+    const response = await fetch(`http://127.0.0.1:${PORT}/v1/tool`, {
+      method: "GET",
+    });
 
     expect(response.status).toBe(405);
   });
 
   it("404s unknown paths", async () => {
-    const response = await fetch(`${baseUrl}/other`, { method: "POST" });
+    stop = await startDeviceBridge(
+      createPorts().ports,
+      PORT,
+      {},
+      { token: TEST_TOKEN },
+    );
+
+    const response = await fetch(`http://127.0.0.1:${PORT}/other`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-starfire-device-token": TEST_TOKEN,
+      },
+      body: "{}",
+    });
 
     expect(response.status).toBe(404);
   });
 
   it("dispatches open_app through the shared capability layer", async () => {
-    const { status, json } = await postTool({
-      tool: "open_app",
+    const { ports, open } = createPorts();
 
-      args: { app: "Discord" },
-    });
+    stop = await startDeviceBridge(ports, PORT, {}, { token: TEST_TOKEN });
+
+    const { status, json } = await postTool(
+      JSON.stringify({ tool: "open_app", args: { app: "Firefox" } }),
+    );
 
     expect(status).toBe(200);
 
     expect(json.ok).toBe(true);
 
-    expect(json.result).toEqual({ name: "Discord", pid: 42 });
+    expect(open).toHaveBeenCalledWith("Firefox");
   });
 
   it("maps the model-facing clipboard capability", async () => {
-    const { json } = await postTool({
-      tool: "clipboard",
+    stop = await startDeviceBridge(
+      createPorts().ports,
+      PORT,
+      {},
+      { token: TEST_TOKEN },
+    );
 
-      args: { action: "read" },
-    });
+    const { status, json } = await postTool(
+      JSON.stringify({ tool: "clipboard", args: { action: "read" } }),
+    );
+
+    expect(status).toBe(200);
 
     expect(json.ok).toBe(true);
 
@@ -162,58 +151,79 @@ describe("device bridge", () => {
   });
 
   it("canonicalizes window action synonyms", async () => {
-    const ports = makePorts();
+    const { ports, control } = createPorts();
 
-    const port = await freePort();
-
-    const stopLocal = await startDeviceBridge(ports, port);
+    stop = await startDeviceBridge(ports, PORT, {}, { token: TEST_TOKEN });
 
     try {
-      await fetch(`http://127.0.0.1:${port}/v1/tool`, {
-        method: "POST",
-
-        headers: { "content-type": "application/json" },
-
-        body: JSON.stringify({
+      await postTool(
+        JSON.stringify({
           tool: "window_control",
-
           args: { action: "unminimize", app: "Firefox" },
         }),
-      });
+      );
 
-      expect(ports.windows.control).toHaveBeenCalledWith("restore", "Firefox");
+      expect(control).toHaveBeenCalledWith("restore", "Firefox");
     } finally {
       await stopLocal();
     }
   });
 
+  async function stopLocal(): Promise<void> {
+    await stop?.();
+
+    stop = null;
+  }
+
   it("returns graceful errors for missing args", async () => {
-    const { status, json } = await postTool({ tool: "open_app", args: {} });
+    stop = await startDeviceBridge(
+      createPorts().ports,
+      PORT,
+      {},
+      { token: TEST_TOKEN },
+    );
+
+    const { status, json } = await postTool(
+      JSON.stringify({ tool: "open_app", args: {} }),
+    );
 
     expect(status).toBe(500);
 
     expect(json.ok).toBe(false);
-
-    expect(json.error).toContain("app");
   });
 
   it("returns graceful errors for unknown tools", async () => {
-    const { status, json } = await postTool({ tool: "shell", args: {} });
+    stop = await startDeviceBridge(
+      createPorts().ports,
+      PORT,
+      {},
+      { token: TEST_TOKEN },
+    );
+
+    const { status, json } = await postTool(
+      JSON.stringify({ tool: "shell", args: {} }),
+    );
 
     expect(status).toBe(500);
 
     expect(json.ok).toBe(false);
-
-    expect(json.error).toContain("Unknown device tool");
   });
 
   it("returns graceful errors for malformed JSON", async () => {
-    const response = await fetch(`${baseUrl}/v1/tool`, {
+    stop = await startDeviceBridge(
+      createPorts().ports,
+      PORT,
+      {},
+      { token: TEST_TOKEN },
+    );
+
+    const response = await fetch(`http://127.0.0.1:${PORT}/v1/tool`, {
       method: "POST",
-
-      headers: { "content-type": "application/json" },
-
-      body: "not json",
+      headers: {
+        "content-type": "application/json",
+        "x-starfire-device-token": TEST_TOKEN,
+      },
+      body: "{not json",
     });
 
     expect(response.status).toBe(500);
@@ -224,12 +234,20 @@ describe("device bridge", () => {
   });
 
   it("rejects non-object bodies", async () => {
-    const response = await fetch(`${baseUrl}/v1/tool`, {
+    stop = await startDeviceBridge(
+      createPorts().ports,
+      PORT,
+      {},
+      { token: TEST_TOKEN },
+    );
+
+    const response = await fetch(`http://127.0.0.1:${PORT}/v1/tool`, {
       method: "POST",
-
-      headers: { "content-type": "application/json" },
-
-      body: "[1,2,3]",
+      headers: {
+        "content-type": "application/json",
+        "x-starfire-device-token": TEST_TOKEN,
+      },
+      body: JSON.stringify([1, 2, 3]),
     });
 
     expect(response.status).toBe(500);

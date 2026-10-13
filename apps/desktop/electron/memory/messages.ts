@@ -50,6 +50,12 @@ export class MessageStore {
   insertTurn(
     input: InsertTurnInput,
     now: number = Date.now(),
+    /**
+     * Time-window replay fallback. Providers WITHOUT stable event ids
+     * need it; providers WITH ids should pass false so legitimate
+     * identical utterances spoken quickly are never dropped.
+     */
+    dedupeWindow = true,
   ): { id: number; turnIndex: number } | null {
     const content = input.content.trim();
 
@@ -67,6 +73,7 @@ export class MessageStore {
         .get(input.sessionId);
 
       const isReplay =
+        dedupeWindow &&
         recent !== undefined &&
         String(recent.role) === input.role &&
         String(recent.content) === safeContent &&

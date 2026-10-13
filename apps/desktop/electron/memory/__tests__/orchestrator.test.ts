@@ -53,7 +53,14 @@ class StubProvider {
       return next;
     }
 
-    return { ok: true, empty: true, drafts: [], usage: null, redactions: [] };
+    return {
+      ok: true,
+      empty: true,
+      drafts: [],
+      usage: null,
+      redactions: [],
+      model: "glm-4-7-flash",
+    };
   }
 }
 
@@ -68,7 +75,6 @@ class FailingMemoryStore extends MemoryStore {
 
   recordFact(): never {
     this.attempts += 1;
-
     throw new Error("database is not open (simulated write failure)");
   }
 }
@@ -92,11 +98,8 @@ async function build() {
   }
 
   const messages = new MessageStore(db);
-
   const jobs = new MemoryJobs(db);
-
   const memories = new MemoryStore(db);
-
   const provider = new StubProvider();
 
   const orchestrator = new MemoryOrchestrator({
@@ -105,7 +108,7 @@ async function build() {
     jobs,
     memories,
     provider,
-    debounceMs: 5,
+    idleMs: 60,
     shutdownBudgetMs: 2_000,
   });
 
@@ -139,6 +142,7 @@ describe("MemoryOrchestrator", () => {
       ],
       usage: null,
       redactions: [],
+      model: "glm-4-7-flash",
     });
 
     await orchestrator.runNow();
@@ -147,12 +151,14 @@ describe("MemoryOrchestrator", () => {
 
     expect(active).toHaveLength(1);
     expect(active[0]?.content).toBe("The user's name is Thor.");
+
     expect(jobs.counts()).toEqual({
       pending: 0,
       running: 0,
       done: 1,
       failed: 0,
     });
+
     expect(messages.countUnprocessed()).toBe(0);
   });
 
@@ -186,6 +192,7 @@ describe("MemoryOrchestrator", () => {
       drafts: [],
       usage: null,
       redactions: [],
+      model: "glm-4-7-flash",
     });
 
     await orchestrator.runNow();
@@ -223,6 +230,7 @@ describe("MemoryOrchestrator", () => {
       drafts: [draft({})],
       usage: null,
       redactions: [],
+      model: "glm-4-7-flash",
     });
 
     await orchestrator.runNow();
@@ -242,20 +250,16 @@ describe("MemoryOrchestrator", () => {
       drafts: [draft({})],
       usage: null,
       redactions: [],
+      model: "glm-4-7-flash",
     });
 
-    /*
-     * Sabotage ONLY the memory-write path. Provider and job
-     * bookkeeping keep running against the real database, so the
-     * failure is scoped exactly to where it matters.
-     */
     const sabotaged = new MemoryOrchestrator({
       db,
       messages,
       jobs,
       memories: new FailingMemoryStore(db),
       provider,
-      debounceMs: 5,
+      idleMs: 60,
       shutdownBudgetMs: 2_000,
     });
 
@@ -263,12 +267,6 @@ describe("MemoryOrchestrator", () => {
 
     expect(provider.calls).toHaveLength(1);
 
-    /*
-     * Extraction succeeded but the write failed: the job must be
-     * PENDING again (retryable with backoff) — never "done", which
-     * would silently lose the memory. A later retry re-applies the
-     * same drafts safely (recordFact is idempotent).
-     */
     expect(jobs.counts()).toEqual({
       pending: 1,
       running: 0,
@@ -332,9 +330,7 @@ describe("MemoryOrchestrator", () => {
     const jobId = jobs.nextRunnable()?.id ?? 0;
 
     expect(jobId).toBeGreaterThan(0);
-
     expect(jobs.markRunning(jobId)).toBe(true);
-
     expect(jobs.recoverStaleRunning(0)).toBe(1);
 
     provider.results.push({
@@ -343,17 +339,20 @@ describe("MemoryOrchestrator", () => {
       drafts: [draft({})],
       usage: null,
       redactions: [],
+      model: "glm-4-7-flash",
     });
 
     await orchestrator.runNow();
 
     expect(memories.countActive()).toBe(1);
+
     expect(jobs.counts()).toEqual({
       pending: 0,
       running: 0,
       done: 1,
       failed: 0,
     });
+
     expect(messages.countUnprocessed()).toBe(0);
   });
 
@@ -374,8 +373,6 @@ describe("MemoryOrchestrator", () => {
 
     expect(jobs.markRunning(jobId)).toBe(true);
 
-    // No staleness wait: a crash seconds ago must be recovered now,
-    // because startup is the ONLY time recovery runs.
     orchestrator.recover();
 
     provider.results.push({
@@ -384,6 +381,7 @@ describe("MemoryOrchestrator", () => {
       drafts: [draft({})],
       usage: null,
       redactions: [],
+      model: "glm-4-7-flash",
     });
 
     await orchestrator.runNow();
@@ -405,11 +403,9 @@ describe("MemoryOrchestrator", () => {
     expect(provider.calls).toHaveLength(0);
     expect(jobs.counts().pending).toBe(0);
     expect(jobs.counts().failed).toBe(0);
-
-    // Messages stay unprocessed — extractable later, never lost.
     expect(messages.countUnprocessed()).toBe(4);
 
-    provider.configured = true; // the key was added
+    provider.configured = true;
 
     await orchestrator.runNow();
 
@@ -436,13 +432,13 @@ describe("MemoryOrchestrator", () => {
     expect(jobs.counts().failed).toBe(1);
     expect(provider.calls).toHaveLength(1);
 
-    // "Fixed the key, restarted the app."
     provider.results.push({
       ok: true,
       empty: false,
       drafts: [draft({})],
       usage: null,
       redactions: [],
+      model: "glm-4-7-flash",
     });
 
     orchestrator.recover();
@@ -450,6 +446,7 @@ describe("MemoryOrchestrator", () => {
     await orchestrator.runNow();
 
     expect(memories.countActive()).toBe(1);
+
     expect(jobs.counts()).toEqual({
       pending: 0,
       running: 0,
@@ -473,7 +470,6 @@ describe("MemoryOrchestrator", () => {
 
     expect(jobs.requeueFailed()).toBe(0);
 
-    // A young permanent failure (fresh bad key) IS given a second chance.
     const young = jobs.enqueue([2]) as number;
 
     jobs.markRunning(young);
@@ -493,10 +489,10 @@ describe("MemoryOrchestrator", () => {
       drafts: [draft({ content: "Private fact: lives at Privet Drive 4." })],
       usage: null,
       redactions: [],
+      model: "glm-4-7-flash",
     });
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     try {
@@ -551,9 +547,8 @@ describe("MemoryOrchestrator", () => {
 
     await orchestrator.shutdown();
 
-    orchestrator.notifyTurn(); // must be ignored after dispose
-
-    await orchestrator.runNow(); // no-op
+    orchestrator.notifyTurn();
+    await orchestrator.runNow();
 
     expect(orchestrator).toBeDefined();
   });
@@ -575,12 +570,232 @@ describe("MemoryOrchestrator", () => {
     await orchestrator.runNow();
 
     expect(provider.calls).toHaveLength(1);
+
     expect(jobs.counts()).toEqual({
       pending: 0,
       running: 0,
       done: 0,
       failed: 1,
     });
+
     expect(messages.countUnprocessed()).toBe(0);
+  });
+
+  it("extracts after an idle pause WITHOUT ending the session (regression)", async () => {
+    const { messages, jobs, provider, orchestrator } = await build();
+
+    await seedConversation(messages);
+
+    orchestrator.notifyTurn();
+
+    // No session end: extraction must happen after the idle timer.
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    expect(provider.calls).toHaveLength(1);
+    expect(jobs.counts().done).toBe(1);
+  });
+
+  it("wakes the queue automatically after a rate-limit cooldown (regression)", async () => {
+    const { messages, jobs, provider, orchestrator } = await build();
+
+    await seedConversation(messages);
+
+    provider.results.push({
+      ok: false,
+      kind: "rate_limited",
+      retryable: true,
+      retryAfterMs: 60,
+      message: "slow down",
+    });
+
+    await orchestrator.runNow();
+
+    expect(jobs.counts().pending).toBe(1);
+    expect(provider.calls).toHaveLength(1);
+
+    // Only the automatic wake timer should trigger this retry.
+    provider.results.push({
+      ok: true,
+      empty: true,
+      drafts: [],
+      usage: null,
+      redactions: [],
+      model: "glm-4-7-flash",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(provider.calls).toHaveLength(2);
+    expect(jobs.counts().done).toBe(1);
+  });
+
+  it("many short sessions batch into ONE idle extraction, not one per session", async () => {
+    const { messages, jobs, provider, orchestrator } = await build();
+
+    // Three short voice sessions, two turns each — saved immediately.
+    for (let session = 0; session < 3; session += 1) {
+      const sessionId = `s${session}`;
+
+      messages.insertTurn({
+        sessionId,
+        role: "user",
+        content: `hello ${session}`,
+      });
+
+      messages.insertTurn({
+        sessionId,
+        role: "assistant",
+        content: `hi ${session}`,
+      });
+
+      // One notifyTurn per saved turn — exactly like the capture hooks.
+      for (let index = 0; index < 2; index += 1) {
+        orchestrator.notifyTurn();
+      }
+    }
+
+    // No LLM request while batching, even across session boundaries.
+    expect(provider.calls).toHaveLength(0);
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(provider.calls).toHaveLength(1);
+    expect(jobs.counts().done).toBe(1);
+
+    // The one batch contains exactly the six new turns, in order.
+    expect(provider.calls[0]?.batch.map((turn) => turn.content)).toEqual([
+      "hello 0",
+      "hi 0",
+      "hello 1",
+      "hi 1",
+      "hello 2",
+      "hi 2",
+    ]);
+  });
+
+  it("one account rate limit pauses ALL jobs without burning attempts", async () => {
+    const { db, messages, jobs, provider, orchestrator } = await build();
+
+    await seedConversation(messages);
+
+    provider.results.push({
+      ok: false,
+      kind: "rate_limited",
+      retryable: true,
+      retryAfterMs: 120_000,
+      message: "rate limit exceeded",
+    });
+
+    await orchestrator.runNow();
+
+    expect(provider.calls).toHaveLength(1);
+    expect(jobs.counts().pending).toBe(1);
+    expect(jobs.get(1)?.attempts).toBe(0); // deferral never burns attempts
+
+    // More turns arrive + another drain DURING the cooldown:
+    // nothing claimed, nothing requested, nothing lost.
+    messages.insertTurn({
+      sessionId: "s2",
+      role: "user",
+      content: "more talk during cooldown",
+    });
+
+    await orchestrator.runNow();
+
+    expect(provider.calls).toHaveLength(1);
+    expect(jobs.counts().pending).toBe(1);
+    expect(messages.countUnprocessed()).toBe(1);
+
+    // Cooldown + retry time expire -> the SAME job resumes, and the
+    // turn that arrived during the cooldown is extracted right after
+    // it (the drain legitimately continues while work remains).
+    db.handle
+      .prepare("UPDATE memory_state SET value = ? WHERE key = 'cooldown_until'")
+      .run(String(Date.now() - 1));
+
+    db.handle
+      .prepare("UPDATE memory_jobs SET run_after = ? WHERE status = 'pending'")
+      .run(Date.now() - 1);
+
+    provider.results.push({
+      ok: true,
+      empty: true,
+      drafts: [],
+      usage: null,
+      redactions: [],
+      model: "glm-4-7-flash",
+    });
+
+    await orchestrator.runNow();
+
+    // Call 2 = resumed job #1; call 3 = fresh batch for the new turn.
+    expect(provider.calls).toHaveLength(3);
+    expect(jobs.counts().done).toBe(2);
+    expect(jobs.counts().pending).toBe(0);
+    expect(messages.countUnprocessed()).toBe(0);
+  });
+
+  it("cooldown persists across a restart and resumes automatically", async () => {
+    const { db, messages, jobs, provider, orchestrator } = await build();
+
+    await seedConversation(messages);
+
+    provider.results.push({
+      ok: false,
+      kind: "rate_limited",
+      retryable: true,
+      retryAfterMs: 60_000,
+      message: "rate limit exceeded",
+    });
+
+    await orchestrator.runNow();
+
+    expect(provider.calls).toHaveLength(1);
+
+    /*
+     * Simulate a restart: brand-new orchestrator AND provider (no
+     * in-memory state), SAME database — the durable cooldown must hold.
+     */
+    const restartedProvider = new StubProvider();
+
+    const restarted = new MemoryOrchestrator({
+      db,
+      messages,
+      jobs,
+      memories: new MemoryStore(db),
+      provider: restartedProvider,
+      idleMs: 60,
+      shutdownBudgetMs: 2_000,
+    });
+
+    restarted.recover();
+
+    await restarted.runNow();
+
+    expect(restartedProvider.calls).toHaveLength(0);
+    expect(jobs.counts().done).toBe(0);
+
+    // Cooldown expires -> work resumes without any external trigger.
+    db.handle
+      .prepare("UPDATE memory_state SET value = ? WHERE key = 'cooldown_until'")
+      .run(String(Date.now() - 1));
+
+    db.handle
+      .prepare("UPDATE memory_jobs SET run_after = ? WHERE status = 'pending'")
+      .run(Date.now() - 1);
+
+    restartedProvider.results.push({
+      ok: true,
+      empty: true,
+      drafts: [],
+      usage: null,
+      redactions: [],
+      model: "glm-4-7-flash",
+    });
+
+    await restarted.runNow();
+
+    expect(restartedProvider.calls).toHaveLength(1);
+    expect(jobs.counts().done).toBe(1);
   });
 });

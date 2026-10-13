@@ -60,7 +60,9 @@ let liveVoiceSessionId: string | null = null;
 
 type DragSession = {
   offsetX: number;
+
   offsetY: number;
+
   timer: ReturnType<typeof setInterval>;
 };
 
@@ -92,10 +94,12 @@ function startDrag(): void {
   const position = mainWindow.getPosition();
 
   const windowX = position[0] ?? 0;
+
   const windowY = position[1] ?? 0;
 
   const session: DragSession = {
     offsetX: cursor.x - windowX,
+
     offsetY: cursor.y - windowY,
 
     timer: setInterval(() => {
@@ -108,6 +112,7 @@ function startDrag(): void {
       const point = screen.getCursorScreenPoint();
 
       const nextX = point.x - dragSession.offsetX;
+
       const nextY = point.y - dragSession.offsetY;
 
       const current = mainWindow.getPosition();
@@ -193,13 +198,16 @@ function createWindow(): void {
   const workArea = display.workArea;
 
   const width = 280;
+
   const height = 350;
 
   const x = workArea.x + workArea.width - width - 24;
+
   const y = workArea.y + workArea.height - height - 24;
 
   mainWindow = new BrowserWindow({
     width,
+
     height,
 
     x,
@@ -275,10 +283,13 @@ function createWindow(): void {
 
   mainWindow.webContents.on(
     "did-fail-load",
+
     (_event, errorCode, errorDescription) => {
       console.error(
         "[main] ❌ renderer load failed:",
+
         errorCode,
+
         errorDescription,
       );
     },
@@ -323,10 +334,15 @@ app.whenReady().then(async () => {
   registerGlobalShortcut();
 
   /*
-   * Memory V1.1 + Context V1.2 — one trusted SQLite store owned by
-   * this process. Dynamic import on purpose: a missing or broken
-   * database backend only disables memory; Starfire itself starts.
-   */
+
+* Memory V1.1 + Context V1.2 — one trusted SQLite store owned by
+
+* this process. Dynamic import on purpose: a missing or broken
+
+* database backend only disables memory; Starfire itself starts.
+
+*/
+
   try {
     const memory = await import("./memory/index.js");
 
@@ -341,9 +357,13 @@ app.whenReady().then(async () => {
 
       memoryOrchestrator = new memory.MemoryOrchestrator({
         db: memoryDatabase,
+
         messages: new memory.MessageStore(memoryDatabase),
+
         jobs: new memory.MemoryJobs(memoryDatabase),
+
         memories: new memory.MemoryStore(memoryDatabase),
+
         provider,
       });
 
@@ -355,22 +375,35 @@ app.whenReady().then(async () => {
 
       getCoreMemory = (): string => coreMemoryProvider.get();
 
+      /*
+       * Snapshot of the Core Memory rows actually SENT to the voice
+       * model. Refreshed when a session starts (the same moment the
+       * bridge sends/refreshes the block) — NOT recomputed per search,
+       * so a memory saved mid-session stays searchable until it has
+       * really been delivered to the model.
+       */
+      let sentCoreMemoryIds = new Set<number>();
+
+      const syncCoreSnapshot = (): void => {
+        sentCoreMemoryIds = new Set(
+          coreMemoryProvider.select().injected.map((entry) => entry.id),
+        );
+      };
+
+      syncCoreSnapshot();
+
       const contextBuilder = new memory.ContextBuilder(
         new memory.MemorySearch(memoryDatabase),
       );
 
       /*
-       * Voice retrieval: excludes EXACTLY the rows Core Memory injected
-       * (budget-aware) and the live voice session. Eve retrieval: no
-       * exclusions — Eve never received Core Memory and is not part of
-       * the live conversation, so hiding anything from her would only
-       * lose relevant information.
+       * Voice retrieval: excludes EXACTLY the rows the model already
+       * received (sent snapshot, budget-aware) plus the live session.
+       * Eve retrieval: no exclusions — Eve never received Core Memory.
        */
       searchMemory = (query: string): string =>
         contextBuilder.build(query, {
-          excludeCoreMemoryIds: new Set(
-            coreMemoryProvider.select().injected.map((entry) => entry.id),
-          ),
+          excludeCoreMemoryIds: sentCoreMemoryIds,
           excludeSessionIds:
             liveVoiceSessionId === null
               ? undefined
@@ -383,19 +416,31 @@ app.whenReady().then(async () => {
 
       transcriptRecorder = new memory.VoiceTranscriptRecorder(
         new memory.MessageStore(memoryDatabase),
+
         {
           onSessionStarted: (sessionId: string) => {
             liveVoiceSessionId = sessionId;
+
+            // The bridge sends/refreshes Core Memory at activation —
+            // keep the sent-snapshot in lockstep.
+            syncCoreSnapshot();
           },
+
           onTurnCaptured: (turn) => {
             memoryOrchestrator?.notifyTurn();
 
             /*
-             * Explicit-statement fast path: stored IMMEDIATELY and
-             * locally so a fact survives even if the app closes
-             * seconds later. GLM still refines the wording later —
-             * the stable key means confirm/supersede handles it.
-             */
+
+* Explicit-statement fast path: stored IMMEDIATELY and
+
+* locally so a fact survives even if the app closes
+
+* seconds later. GLM still refines the wording later —
+
+* the stable key means confirm/supersede handles it.
+
+*/
+
             if (turn.role !== "user") {
               return;
             }
@@ -418,9 +463,13 @@ app.whenReady().then(async () => {
 
             const result = explicitStore.recordFact({
               category: fact.category,
+
               key: fact.key,
+
               content: fact.content,
+
               importance: fact.importance,
+
               sourceMessageIds: [turn.id],
             });
 
@@ -430,14 +479,15 @@ app.whenReady().then(async () => {
               );
             }
           },
+
           onSessionEnded: () => {
             /*
              * After a session ends its turns become searchable past
-             * chats for EVERYONE (including Eve).
+             * chats for EVERYONE (including Eve). Extraction is NOT
+             * triggered here — short sessions are parts of one ongoing
+             * history; the idle/batch triggers handle extraction.
              */
             liveVoiceSessionId = null;
-
-            memoryOrchestrator?.notifySessionEnd();
           },
         },
       );
@@ -453,38 +503,55 @@ app.whenReady().then(async () => {
 
     console.error(
       "[Memory] ❌ unavailable:",
+
       error instanceof Error ? error.message : error,
     );
   }
 
   /*
-   * One ports instance is Starfire's local capability layer, shared
-   * by the Eve device bridge and the realtime voice bridge so both
-   * paths see the same state (e.g. apps Starfire launched herself).
-   */
+
+* One ports instance is Starfire's local capability layer, shared
+
+* by the Eve device bridge and the realtime voice bridge so both
+
+* paths see the same state (e.g. apps Starfire launched herself).
+
+*/
+
   const ports = createElectronPorts();
 
   voiceBridge = new RealtimeVoiceBridge(
     () => mainWindow,
+
     ports,
+
     transcriptRecorder ?? undefined,
+
     getCoreMemory ?? undefined,
+
     searchMemory ?? undefined,
   );
 
   voiceBridge.register();
 
   // Warm the provider connection while idle; no microphone audio is sent.
+
   void voiceBridge.warmUp();
 
   /*
-   * The device bridge MUST be listening before the Eve runtime starts:
-   * Eve tools call it over HTTP, and an early tool call would otherwise
-   * hit a closed port.
-   */
+
+* The device bridge MUST be listening before the Eve runtime starts:
+
+* Eve tools call it over HTTP, and an early tool call would otherwise
+
+* hit a closed port.
+
+*/
+
   startDeviceBridge(ports, undefined, {
     searchMemory: eveSearchMemory ?? undefined,
   })
+
     .then((stop) => {
       stopDeviceBridge = stop;
 
@@ -492,9 +559,11 @@ app.whenReady().then(async () => {
 
       return startEveRuntime();
     })
+
     .catch((error) => {
       console.error(
         "[Starfire Device] event=bridge-start-failed:",
+
         error instanceof Error ? error.message : error,
       );
 
@@ -518,9 +587,13 @@ app.on("second-instance", () => {
 
 app.on("will-quit", (event) => {
   /*
-   * Hold the quit until everything (voice, device bridge, the
-   * in-process Eve runtime, memory) has torn down.
-   */
+
+* Hold the quit until everything (voice, device bridge, the
+
+* in-process Eve runtime, memory) has torn down.
+
+*/
+
   event.preventDefault();
 
   const finish = (): void => {

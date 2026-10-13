@@ -107,7 +107,14 @@ export class VoiceTranscriptRecorder implements VoiceTranscriptCapture {
      */
     this.flushAssistant(true, "user-barge-in");
 
-    this.insert("user", content, false, "transcript");
+    /*
+     * When the provider gave us a stable item_id, exact dedupe is
+     * already handled above — skip the time-window fallback so two
+     * legitimate identical utterances spoken quickly both store.
+     */
+    const providerIdDeduped = typeof itemId === "string" && itemId.length > 0;
+
+    this.insert("user", content, false, "transcript", !providerIdDeduped);
 
     if (typeof itemId === "string" && itemId.length > 0) {
       this.seenItemIds.add(itemId);
@@ -170,6 +177,7 @@ export class VoiceTranscriptRecorder implements VoiceTranscriptCapture {
     content: string,
     interrupted: boolean,
     reason: string,
+    allowWindowDedupe = true,
   ): void {
     const sessionId = this.sessionId;
 
@@ -178,12 +186,16 @@ export class VoiceTranscriptRecorder implements VoiceTranscriptCapture {
     }
 
     try {
-      const stored = this.store.insertTurn({
-        sessionId,
-        role,
-        content,
-        interrupted,
-      });
+      const stored = this.store.insertTurn(
+        {
+          sessionId,
+          role,
+          content,
+          interrupted,
+        },
+        undefined,
+        allowWindowDedupe,
+      );
 
       if (stored) {
         console.log(

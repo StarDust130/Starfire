@@ -8,26 +8,16 @@ import type { MemoryDatabase } from "./database.js";
  *                      `-> failed  (gave up after MAX_JOB_ATTEMPTS)
  *
  * Idempotency across crashes/restarts:
- * - Claiming is atomic: the orchestrator wraps "create job + mark
- *   messages processed" in one database transaction. A crash before
- *   commit leaves both untouched; after commit, exactly one job owns
- *   those messages.
- * - A job lost mid-"running" (app died) is reset to pending by
- *   recoverStaleRunning() on the next start and simply retried.
- *   Retried extraction is safe: MemoryStore.recordFact turns a
- *   repeated fact into a confirm, never a duplicate.
+ * - Claiming is atomic (job + processed-marking in one transaction).
+ * - Jobs lost mid-"running" are recovered on the next start.
+ * - When a job exhausts its attempts, its turns are RELEASED back to
+ *   the unprocessed pool — never silently stranded in a dead job.
  */
 
 export type MemoryJobStatus = "pending" | "running" | "done" | "failed";
 
-/*
- * Dynamic batching under the GLM ceilings (50 req/min, 2M tokens/min):
- * one request carries at most 30 messages and ~16k chars (~4k tokens),
- * so even 50 full-rate requests/min use ~200k tokens/min — 10x
- * headroom. The real ceiling is requests/min; the token budget is
- * enforced again in the provider (Piece 5).
- */
-export const EXTRACTION_BATCH_MAX_MESSAGES = 30;
+/** Extraction batch ceiling: 30–40 new turns per request. */
+export const EXTRACTION_BATCH_MAX_MESSAGES = 40;
 
 export const EXTRACTION_BATCH_MAX_CHARS = 16_000;
 
@@ -85,8 +75,8 @@ function truncateError(error: unknown): string {
 
 /**
  * Exponential backoff with jitter: base * 2^(attempt-1), capped,
- * plus up to RETRY_JITTER_MS of randomness so many failing jobs do
- * not retry in lockstep.
+ * plus up to RETRY_JITTER_MS of randomness so failing jobs do not
+ * retry in lockstep.
  */
 export function nextRetryDelayMs(
   attempts: number,
@@ -103,9 +93,9 @@ export function nextRetryDelayMs(
 
 /**
  * Picks the prefix of `turns` (in order, so neighbors stay together)
- * that fits the payload budget: at most EXTRACTION_BATCH_SIZE items
- * and at most maxChars of content. The first item is always taken —
- * one oversized message must never deadlock the queue.
+ * that fits the payload budget: at most EXTRACTION_BATCH_MAX_MESSAGES
+ * items and at most maxChars of content. The first item is always
+ * taken — one oversized message must never deadlock the queue.
  */
 export function fitBatch<T extends { content: string }>(
   turns: readonly T[],
@@ -172,6 +162,42 @@ export class MemoryJobs {
   }
 
   /**
+   * Earliest future wake-up time among pending jobs (deferred by
+   * rate limits or backoff). Null when nothing is waiting — lets the
+   * orchestrator sleep until the queue can actually make progress,
+   * including across restarts.
+   */
+  nextWakeAt(now: number = Date.now()): number | null {
+    const row = this.db.handle
+      .prepare(
+        "SELECT MIN(run_after) AS wake FROM memory_jobs WHERE status = 'pending' AND run_after > ?",
+      )
+      .get(now);
+
+    const wake = row?.wake;
+
+    return typeof wake === "number" && wake > now ? wake : null;
+  }
+
+  /**
+   * Releases turns back to the unprocessed pool (used when a job
+   * exhausts its attempts, so a future batch can extract them).
+   */
+  releaseMessages(ids: number[]): void {
+    if (ids.length === 0) {
+      return;
+    }
+
+    const placeholders = ids.map(() => "?").join(", ");
+
+    this.db.handle
+      .prepare(
+        `UPDATE messages SET processed_at = NULL WHERE id IN (${placeholders}) AND processed_at IS NOT NULL`,
+      )
+      .run(...ids);
+  }
+
+  /**
    * Claims a pending job for the worker. Returns false when another
    * claim won — the conditional UPDATE is the lock.
    */
@@ -197,8 +223,8 @@ export class MemoryJobs {
 
   /**
    * Records a failure. Schedules a retry with backoff until
-   * MAX_JOB_ATTEMPTS is reached, then marks the job failed for good.
-   * Returns what happened; "ignored" means the job was not running.
+   * MAX_JOB_ATTEMPTS is reached; on exhaustion the job is marked
+   * failed AND its turns are released for a future fresh batch.
    */
   fail(
     id: number,
@@ -206,7 +232,9 @@ export class MemoryJobs {
     now: number = Date.now(),
   ): "pending" | "failed" | "ignored" {
     const row = this.db.handle
-      .prepare("SELECT attempts, status FROM memory_jobs WHERE id = ?")
+      .prepare(
+        "SELECT attempts, status, message_ids FROM memory_jobs WHERE id = ?",
+      )
       .get(id);
 
     if (!row || String(row.status) !== "running") {
@@ -218,11 +246,15 @@ export class MemoryJobs {
     const lastError = truncateError(error);
 
     if (attempts >= MAX_JOB_ATTEMPTS) {
-      this.db.handle
-        .prepare(
-          "UPDATE memory_jobs SET status = 'failed', attempts = ?, last_error = ?, updated_at = ? WHERE id = ? AND status = 'running'",
-        )
-        .run(attempts, lastError, now, id);
+      this.db.withTransaction(() => {
+        this.db.handle
+          .prepare(
+            "UPDATE memory_jobs SET status = 'failed', attempts = ?, last_error = ?, updated_at = ? WHERE id = ? AND status = 'running'",
+          )
+          .run(attempts, lastError, now, id);
+
+        this.releaseMessages(parseMessageIds(row.message_ids));
+      });
 
       return "failed";
     }
@@ -239,21 +271,36 @@ export class MemoryJobs {
   }
 
   /**
-   * Crash recovery: jobs stuck in "running" (app died mid-job) whose
-   * updated_at is older than the staleness threshold go back to
-   * pending so the next start retries them. Returns how many.
+   * Records a failure. Schedules a retry with backoff until
+   * MAX_JOB_ATTEMPTS is reached, then marks the job failed for good.
    */
-  recoverStaleRunning(
-    staleMs: number = STALE_RUNNING_MS,
+  failImmediately(
+    id: number,
+    error: unknown,
     now: number = Date.now(),
-  ): number {
+  ): boolean {
     const result = this.db.handle
       .prepare(
-        "UPDATE memory_jobs SET status = 'pending', run_after = ?, updated_at = ? WHERE status = 'running' AND updated_at <= ?",
+        "UPDATE memory_jobs SET status = 'failed', attempts = attempts + 1, last_error = ?, updated_at = ? WHERE id = ? AND status = 'running'",
       )
-      .run(now, now, now - staleMs);
+      .run(truncateError(error), now, id);
 
-    return Number(result.changes);
+    return Number(result.changes) > 0;
+  }
+
+  /**
+   * Rate-limit deferral: push run_after out WITHOUT burning an
+   * attempt. The provider asked for patience; the job did nothing
+   * wrong, so its real attempts stay intact.
+   */
+  defer(id: number, delayMs: number, now: number = Date.now()): boolean {
+    const result = this.db.handle
+      .prepare(
+        "UPDATE memory_jobs SET status = 'pending', run_after = MAX(run_after, ?), updated_at = ? WHERE id = ? AND status = 'running'",
+      )
+      .run(now + delayMs, now, id);
+
+    return Number(result.changes) > 0;
   }
 
   /** For 429 Retry-After: never let run_after be earlier than now+delay. */
@@ -270,34 +317,51 @@ export class MemoryJobs {
   }
 
   /**
-   * Rate-limit deferral: push run_after out WITHOUT burning an
-   * attempt. The provider asked for patience; the job did nothing
-   * wrong, so its 5 real attempts stay intact.
+   * Durable, GLOBAL cooldown (account-wide rate limit). Persisted in
+   * SQLite so it survives restarts: while active, every queued job
+   * AND fresh-batch claims wait — no claim/defer churn. Extends only:
+   * a later cooldown can push it out, never shorten it.
    */
-  defer(id: number, delayMs: number, now: number = Date.now()): boolean {
+  getCooldownUntil(now: number = Date.now()): number | null {
+    const row = this.db.handle
+      .prepare("SELECT value FROM memory_state WHERE key = 'cooldown_until'")
+      .get();
+
+    const value = Number(row?.value);
+
+    return Number.isFinite(value) && value > now ? value : null;
+  }
+
+  setCooldownUntil(until: number, now: number = Date.now()): void {
+    this.db.handle
+      .prepare(
+        "INSERT INTO memory_state (key, value) VALUES ('cooldown_until', ?) ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
+      )
+      .run(String(Math.max(until, now)));
+  }
+
+  /**
+   * Crash recovery: jobs stuck in "running" (app died mid-job) go
+   * back to pending so the next start retries them.
+   */
+  recoverStaleRunning(
+    staleMs: number = STALE_RUNNING_MS,
+    now: number = Date.now(),
+  ): number {
     const result = this.db.handle
       .prepare(
-        "UPDATE memory_jobs SET status = 'pending', run_after = MAX(run_after, ?), updated_at = ? WHERE id = ? AND status = 'running'",
+        "UPDATE memory_jobs SET status = 'pending', run_after = ?, updated_at = ? WHERE status = 'running' AND updated_at <= ?",
       )
-      .run(now + delayMs, now, id);
+      .run(now, now, now - staleMs);
 
-    return Number(result.changes) > 0;
+    return Number(result.changes);
   }
 
   /**
    * Deliberate recovery path for permanently-failed jobs (e.g. they
-   * died while the API key was missing or broken). Resets them to
-   * pending so the next configured run extracts them. The messages
-   * themselves were never touched — ids still resolve via
-   * getTurnsByIds. Idempotent: only 'failed' rows move.
-   */
-  /**
-   * Deliberate recovery path for permanently-failed jobs (e.g. they
-   * died while the API key was missing). Resets them to pending so the
-   * next configured run extracts them. BOUNDED: only jobs that have
-   * not exhausted MAX_JOB_ATTEMPTS lifetime attempts are requeued, so
-   * a poisoned batch can never loop failed->requeued across restarts
-   * forever.
+   * died while the API key was missing). BOUNDED: only jobs that have
+   * not exhausted MAX_JOB_ATTEMPTS are requeued, so a poisoned batch
+   * can never loop failed->requeued forever.
    */
   requeueFailed(now: number = Date.now()): number {
     const result = this.db.handle
@@ -307,26 +371,6 @@ export class MemoryJobs {
       .run(now, now, MAX_JOB_ATTEMPTS);
 
     return Number(result.changes);
-  }
-
-  /**
-   * Permanent failure (auth, bad request, disabled): mark failed on
-   * the FIRST attempt. Retrying cannot succeed, so no backoff cycles
-   * are burned on configuration problems. The conversation turns stay
-   * in the messages table for a future re-extraction once fixed.
-   */
-  failImmediately(
-    id: number,
-    error: unknown,
-    now: number = Date.now(),
-  ): boolean {
-    const result = this.db.handle
-      .prepare(
-        "UPDATE memory_jobs SET status = 'failed', attempts = attempts + 1, last_error = ?, updated_at = ? WHERE id = ? AND status = 'running'",
-      )
-      .run(truncateError(error), now, id);
-
-    return Number(result.changes) > 0;
   }
 
   counts(): Record<MemoryJobStatus, number> {

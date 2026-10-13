@@ -63,7 +63,7 @@ describe("runMigrations", () => {
     const version = runMigrations(db);
 
     expect(version).toBe(LATEST_SCHEMA_VERSION);
-    expect(version).toBe(2);
+    expect(version).toBe(3);
 
     const tables = tableNames(db);
 
@@ -73,6 +73,7 @@ describe("runMigrations", () => {
         "messages",
         "memories",
         "memory_jobs",
+        "memory_state",
       ]),
     );
 
@@ -145,7 +146,7 @@ describe("runMigrations", () => {
     const oldId = insertMemory(db, "profile", "user-name", "old value");
     const newId = insertMemory(db, "profile", "user-name", "new value");
 
-    expect(runMigrations(db)).toBe(2);
+    expect(runMigrations(db)).toBe(LATEST_SCHEMA_VERSION);
 
     const oldRow = db
       .prepare("SELECT state FROM memories WHERE id = ?")
@@ -167,7 +168,7 @@ describe("runMigrations", () => {
       .prepare("SELECT COUNT(*) AS count FROM schema_version")
       .get();
 
-    expect(Number(versions?.count)).toBe(2);
+    expect(Number(versions?.count)).toBe(MIGRATIONS.length);
 
     db.close();
   });
@@ -186,7 +187,7 @@ describe("runMigrations", () => {
       },
     ];
 
-    expect(() => runMigrations(db, broken)).toThrow(/v3/);
+    expect(() => runMigrations(db, broken)).toThrow(/v4/);
 
     expect(schemaVersion(db)).toBe(LATEST_SCHEMA_VERSION);
 

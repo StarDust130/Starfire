@@ -114,12 +114,13 @@ export {
 export {
   CONTEXT_BEFORE_BATCH,
   DRAIN_CONTINUATION_DELAY_MS,
+  EXTRACTION_KNOWN_MEMORIES,
+  IDLE_EXTRACTION_MS,
+  KNOWN_MEMORY_LINE_MAX_CHARS,
   MAX_DRAIN_JOBS_PER_TICK,
   MemoryOrchestrator,
   type MemoryOrchestratorOptions,
-  SESSION_END_FLUSH_MS,
   SHUTDOWN_FLUSH_BUDGET_MS,
-  TICK_DEBOUNCE_MS,
 } from "./orchestrator.js";
 export {
   ExtractionRateLimiter,

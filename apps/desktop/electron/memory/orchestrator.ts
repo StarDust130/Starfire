@@ -20,23 +20,35 @@ import type { MessageStore } from "./messages.js";
 
 /*
  * The conductor. Owns the whole background pipeline and is the ONLY
- * caller of the provider + MemoryStore. Runs in the trusted main
- * process, one job at a time, never on the voice reply path:
+ * caller of the provider + MemoryStore. Single-flight, trusted main
+ * process, never on the voice reply path. Triggers:
  *
- *   new turn ──→ debounce ──┐
- *   ≥30 pending ────────────┼─→ tick: claim batch (atomic) → extract
- *   session end ────────────┤        → apply drafts via recordFact
- *   startup recover ────────┘        → complete / backoff
+ *   completed turn ──→ arm idle timer (≈2min, reset per turn) ─┐
+ *   ≥40 pending turns ──→ immediate ───────────────────────────┼─→ tick:
+ *   durable cooldown expiry ──→ wake ──────────────────────────┘     claim (atomic)
+ *   startup recover ──→ drain leftovers                              → extract
  *
- * All triggers funnel into scheduleTick(); a single `running` flag
- * guarantees one drain at a time (single-flight).
+ * Session endings are NOT triggers: short sessions are parts of one
+ * ongoing history.
+ *
+ * COOLDOWN INVARIANT: an account-wide rate limit persists a GLOBAL
+ * cooldown in SQLite (memory_state). While it is active, runOne does
+ * NOTHING — no job runs, no batch is claimed, nothing is deferred —
+ * and the drain schedules exactly one wake at expiry. This survives
+ * restarts and makes retry storms structurally impossible.
+ *
+ * CRITICAL INVARIANT: whenever the drain loop stops early (failure,
+ * deferral, cooldown, or nothing runnable), it MUST still schedule
+ * the next wake from durable state.
+ *
+ * Observability: "[Memory] 📝 turn captured" = SAVED (durable).
+ * "[Memory] ✅ extracted job #N" = memories WRITTEN. Between them,
+ * work is durably queued — postponed, never lost.
  */
 
 export const CONTEXT_BEFORE_BATCH = 12;
 
-export const TICK_DEBOUNCE_MS = 4_000;
-
-export const SESSION_END_FLUSH_MS = 1_000;
+export const IDLE_EXTRACTION_MS = 120_000;
 
 export const SHUTDOWN_FLUSH_BUDGET_MS = 6_000;
 
@@ -44,13 +56,18 @@ export const MAX_DRAIN_JOBS_PER_TICK = 5;
 
 export const DRAIN_CONTINUATION_DELAY_MS = 1_000;
 
+/** Compact already-known memories handed to the extractor. */
+export const EXTRACTION_KNOWN_MEMORIES = 20;
+
+export const KNOWN_MEMORY_LINE_MAX_CHARS = 160;
+
 export type MemoryOrchestratorOptions = {
   db: MemoryDatabase;
   messages: MessageStore;
   jobs: MemoryJobs;
   memories: MemoryStore;
   provider: Pick<GlmExtractionProvider, "extract" | "isConfigured">;
-  debounceMs?: number;
+  idleMs?: number;
   shutdownBudgetMs?: number;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -71,7 +88,7 @@ function toExtractionTurns(
 }
 
 export class MemoryOrchestrator {
-  private readonly debounceMs: number;
+  private readonly idleMs: number;
 
   private readonly shutdownBudgetMs: number;
 
@@ -83,6 +100,8 @@ export class MemoryOrchestrator {
 
   private scheduledDelayMs = 0;
 
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+
   private running = false;
 
   private disposed = false;
@@ -90,26 +109,24 @@ export class MemoryOrchestrator {
   private currentRun: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: MemoryOrchestratorOptions) {
-    this.debounceMs = options.debounceMs ?? TICK_DEBOUNCE_MS;
     this.shutdownBudgetMs =
       options.shutdownBudgetMs ?? SHUTDOWN_FLUSH_BUDGET_MS;
     this.now = options.now ?? Date.now;
     this.sleep =
       options.sleep ??
       ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+
+    const envIdle = Number(process.env.STARFIRE_MEMORY_IDLE_MS);
+
+    this.idleMs =
+      options.idleMs ??
+      (Number.isFinite(envIdle) && envIdle > 0 ? envIdle : IDLE_EXTRACTION_MS);
   }
 
   /**
-   * Startup recovery: reset jobs orphaned by a crash, give permanently
-   * failed jobs a second chance (configuration may have been fixed),
-   * then drain leftovers.
-   */
-  /**
-   * Startup recovery. Starfire holds a single-instance lock, so ANY
-   * job left 'running' in the database belongs to a dead process —
-   * all of them are recovered IMMEDIATELY (staleness window 0).
-   * Waiting out a window would strand recent crashes forever, because
-   * nothing ever re-runs recovery after startup.
+   * Startup recovery. Single-instance lock means ANY 'running' job
+   * belongs to a dead process — recovered immediately. The first
+   * drain then honors any persisted cooldown / deferred wake.
    */
   recover(): number {
     const recovered = this.options.jobs.recoverStaleRunning(0);
@@ -131,29 +148,43 @@ export class MemoryOrchestrator {
     return recovered;
   }
 
-  /** Called by the capture hooks after each stored turn. */
+  /**
+   * Called by the capture hooks after each SAVED turn. Arms (or
+   * re-arms) the idle timer; a full batch extracts immediately. Only
+   * completed turns reach this hook — fragments never trigger it.
+   */
   notifyTurn(): void {
-    /*
-     * NO mid-conversation extraction: it fires constantly while the
-     * user is still talking — it churns the shared rate limit, and
-     * fragments get extracted before their context completes. Triggers
-     * are: session end, shutdown flush, startup recovery, and a full
-     * pending batch.
-     */
+    if (this.disposed) {
+      return;
+    }
+
     const pending = this.options.messages.countUnprocessed();
 
     if (pending >= EXTRACTION_BATCH_MAX_MESSAGES) {
-      this.scheduleTick(0);
-    }
-  }
+      this.clearIdleTimer();
 
-  /** Called when a voice activation ends (goodbye/idle). */
-  notifySessionEnd(): void {
-    this.scheduleTick(SESSION_END_FLUSH_MS);
+      this.scheduleTick(0);
+
+      return;
+    }
+
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+    }
+
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+
+      this.scheduleTick(0);
+    }, this.idleMs);
+
+    this.idleTimer.unref?.();
   }
 
   /** Test/flush seam: cancels the timer and drains synchronously. */
   async runNow(): Promise<void> {
+    this.clearIdleTimer();
+
     if (this.tickTimer) {
       clearTimeout(this.tickTimer);
 
@@ -166,10 +197,8 @@ export class MemoryOrchestrator {
   }
 
   /**
-   * Best-effort bounded flush during app shutdown. The in-flight tick
-   * AND the drain loop together can never exceed the budget: when it
-   * expires we proceed with teardown and let unfinished jobs stay
-   * recoverable (stale-running recovery / retryable failure).
+   * Best-effort bounded flush during app shutdown. Unfinished jobs
+   * stay recoverable (stale-running recovery / retryable failure).
    */
   async shutdown(): Promise<void> {
     if (this.disposed) {
@@ -177,6 +206,8 @@ export class MemoryOrchestrator {
     }
 
     this.disposed = true;
+
+    this.clearIdleTimer();
 
     if (this.tickTimer) {
       clearTimeout(this.tickTimer);
@@ -210,6 +241,14 @@ export class MemoryOrchestrator {
       `[Memory] 🛑 orchestrator stopped ` +
         `(pending=${counts.pending}, failed=${counts.failed})`,
     );
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+
+      this.idleTimer = null;
+    }
   }
 
   private scheduleTick(delayMs: number): void {
@@ -272,14 +311,52 @@ export class MemoryOrchestrator {
 
       const progressed = await this.runOne();
 
+      /*
+       * Any failure, deferral, or cooldown gate stops this tick — one
+       * bad batch can never burn the whole drain loop. The wake
+       * scheduling below runs on EVERY exit path.
+       */
       if (!progressed) {
-        return;
+        break;
       }
     }
 
-    // Cap reached but work remains — continue shortly.
-    if (this.options.jobs.nextRunnable()) {
+    if (this.disposed) {
+      return;
+    }
+
+    this.scheduleNextWake();
+  }
+
+  /**
+   * Decides when the queue next wakes, from DURABLE state only:
+   * 1. A persisted account-wide cooldown → wake exactly at expiry.
+   * 2. A runnable job (backoff/Retry-After elapsed) → continue soon.
+   * 3. A future run_after (deferred/backoff job) → wake at that time.
+   * run_after and the cooldown live in SQLite, so this survives
+   * restarts.
+   */
+  private scheduleNextWake(): void {
+    const now = this.now();
+
+    const cooldownUntil = this.options.jobs.getCooldownUntil(now);
+
+    if (cooldownUntil !== null) {
+      this.scheduleTick(cooldownUntil - now);
+
+      return;
+    }
+
+    if (this.options.jobs.nextRunnable(now)) {
       this.scheduleTick(DRAIN_CONTINUATION_DELAY_MS);
+
+      return;
+    }
+
+    const jobWake = this.options.jobs.nextWakeAt(now);
+
+    if (jobWake !== null) {
+      this.scheduleTick(Math.max(0, jobWake - now));
     }
   }
 
@@ -288,17 +365,24 @@ export class MemoryOrchestrator {
    * extract, apply. Returns false when there is nothing to do.
    */
   private async runOne(): Promise<boolean> {
+    /*
+     * Durable account-wide cooldown: NO job runs and NOTHING is
+     * claimed while it is active — this is what prevents repeated
+     * claim/defer churn and retry storms. scheduleNextWake wakes us
+     * exactly when it expires.
+     */
+    const cooldownUntil = this.options.jobs.getCooldownUntil(this.now());
+
+    if (cooldownUntil !== null) {
+      return false;
+    }
+
     let job: MemoryJob | null = this.options.jobs.nextRunnable(this.now());
 
     if (!job) {
       if (!this.options.provider.isConfigured()) {
-        /*
-         * No API key / disabled: do NOT claim new batches. Claiming
-         * would mark messages processed and then permanently fail the
-         * job — losing them until a manual fix. Leaving them
-         * unprocessed means they are extracted automatically once
-         * configuration exists.
-         */
+        // No key / disabled: never claim — claiming would mark turns
+        // processed and then fail them. They wait, extractable later.
         return false;
       }
 
@@ -310,14 +394,12 @@ export class MemoryOrchestrator {
     }
 
     if (!this.options.jobs.markRunning(job.id, this.now())) {
-      // Another claim won; treat as progress and re-check.
       return true;
     }
 
     const turns = this.options.messages.getTurnsByIds(job.messageIds);
 
     if (turns.length === 0) {
-      // Job references nothing durable — just finish it.
       this.options.jobs.complete(job.id, this.now());
 
       return true;
@@ -330,17 +412,33 @@ export class MemoryOrchestrator {
       CONTEXT_BEFORE_BATCH,
     );
 
+    /*
+     * Compact already-known memories: lets the extractor skip facts
+     * it already saved (unless a new message changes them) without
+     * resending the whole database.
+     */
+    const existingMemories = this.options.memories
+      .listActive(EXTRACTION_KNOWN_MEMORIES)
+      .map(
+        (memory) =>
+          `${memory.category}/${memory.key}: ${memory.content.slice(
+            0,
+            KNOWN_MEMORY_LINE_MAX_CHARS,
+          )}`,
+      );
+
     let result: ExtractionResult;
 
     try {
       result = await this.options.provider.extract({
         context: toExtractionTurns(context),
         batch: toExtractionTurns(turns),
+        existingMemories,
       });
     } catch (error) {
       this.options.jobs.fail(job.id, error, this.now());
 
-      return true;
+      return false;
     }
 
     if (result.ok) {
@@ -357,13 +455,8 @@ export class MemoryOrchestrator {
       }
 
       if (failedCount > 0) {
-        /*
-         * Extraction succeeded but a database write failed (lock,
-         * disk, closed handle). Completing here would silently lose
-         * those memories, so the job stays retryable instead.
-         * recordFact is idempotent — already-stored drafts re-apply
-         * as "confirmed" on the retry.
-         */
+        // Write failure: keep the job retryable — recordFact is
+        // idempotent, so already-stored drafts re-apply as confirmed.
         this.options.jobs.fail(
           job.id,
           new Error(
@@ -377,15 +470,15 @@ export class MemoryOrchestrator {
             `${failedCount} draft write(s) failed (${storedCount} stored)`,
         );
 
-        return true;
+        return false;
       }
 
       this.options.jobs.complete(job.id, this.now());
 
       console.log(
-        `[Memory] ✅ job #${job.id} done ` +
+        `[Memory] ✅ extracted job #${job.id} ` +
           `(msgs=${turns.length}, memories=${result.drafts.length}` +
-          `${result.empty ? ", empty" : ""})`,
+          `${result.empty ? ", empty" : ""}, model=${result.model})`,
       );
 
       return true;
@@ -393,30 +486,26 @@ export class MemoryOrchestrator {
 
     // Failure paths — nothing was applied; the job retries or dies.
     if (result.kind === "rate_limited") {
-      /*
-       * Rate limits are the provider asking for patience, not the job
-       * doing something wrong — defer WITHOUT burning an attempt so a
-       * long shared-tier cooldown can never permanently fail good work.
-       */
       const delayMs = result.retryAfterMs ?? RATE_LIMIT_FALLBACK_MS;
 
       this.options.jobs.defer(job.id, delayMs, this.now());
 
+      /*
+       * Durable GLOBAL cooldown: every queued job AND fresh-batch
+       * claims now wait until it expires — even across restarts.
+       */
+      this.options.jobs.setCooldownUntil(this.now() + delayMs, this.now());
+
       console.warn(
-        `[Memory] ⏳ job #${job.id} deferred ${Math.round(delayMs / 1000)}s (rate_limited)`,
+        `[Memory] ⏳ account cooldown ${Math.round(delayMs / 1000)}s (rate_limited); queue resumes automatically`,
       );
 
-      return true;
+      return false;
     }
 
     const error = new Error(`${result.kind}: ${result.message}`);
 
     if (!result.retryable) {
-      /*
-       * Permanent (auth / client): retrying cannot succeed. Fail on
-       * attempt one so a broken key burns exactly one attempt, not
-       * five. recover() requeues these once configuration is fixed.
-       */
       this.options.jobs.failImmediately(job.id, error, this.now());
 
       console.error(
@@ -424,7 +513,7 @@ export class MemoryOrchestrator {
           `will be requeued on next start once fixed: ${result.message}`,
       );
 
-      return true;
+      return false;
     }
 
     this.options.jobs.fail(job.id, error, this.now());
@@ -438,12 +527,12 @@ export class MemoryOrchestrator {
         `retryable=${String(result.retryable)}): ${result.message}`,
     );
 
-    return true;
+    return false;
   }
 
   /**
    * Atomically: create a job for the next fitting batch AND mark those
-   * messages processed. A crash mid-way rolls both back (withTransaction).
+   * messages processed. A crash mid-way rolls both back.
    */
   private claimBatch(): MemoryJob | null {
     const unprocessed = this.options.messages.listUnprocessed(

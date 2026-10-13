@@ -1,9 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
-
 import { tmpdir } from "node:os";
-
 import path from "node:path";
-
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -112,6 +109,27 @@ describe("MessageStore replay deduplication", () => {
     );
 
     expect(assistant).not.toBeNull();
+    expect(messages.listSessionTurns("s1")).toHaveLength(2);
+  });
+
+  it("stores fast identical repeats when the provider ID already deduped", async () => {
+    const { messages } = await openStore();
+
+    messages.insertTurn(
+      { sessionId: "s1", role: "user", content: "bye" },
+      1_000,
+    );
+
+    // Two real provider item IDs represent two actual spoken repetitions.
+    // The provider has already deduplicated event IDs, so disable the
+    // fallback time-window deduplication for this second distinct event.
+    const second = messages.insertTurn(
+      { sessionId: "s1", role: "user", content: "bye" },
+      1_400,
+      false,
+    );
+
+    expect(second).not.toBeNull();
     expect(messages.listSessionTurns("s1")).toHaveLength(2);
   });
 });

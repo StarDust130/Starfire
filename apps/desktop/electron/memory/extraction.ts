@@ -1,32 +1,38 @@
 import { z } from "zod";
-
 import type { MemoryCategory } from "./memories.js";
-
 import {
   MAX_MEMORY_CHARS,
   MAX_SOURCE_IDS,
   MEMORY_CATEGORIES,
   normalizeKey,
 } from "./memories.js";
-
 import { ExtractionRateLimiter, estimateTokens } from "./rate-limit.js";
-
-import { redactTurns } from "./redaction.js";
+import { redactSecrets, redactTurns } from "./redaction.js";
 
 /*
- * GLM extraction provider — the ONLY place Starfire talks to a cloud
- * model about memories. Pure: turns in -> drafts out. No database
- * access, no queue access; the orchestrator owns those.
+ * GLM extraction provider with model fallback — the ONLY place
+ * Starfire talks to a cloud model about memories. Pure: turns in ->
+ * drafts out. No database access, no queue access; the orchestrator
+ * owns those.
  *
  * Provider details (official model docs + live verification):
- * POST {baseUrl}/chat/completions, bearer key, model glm-4-7-flash,
- * JSON mode via response_format, thinking disabled for latency,
- * no tools and no web search for extraction.
+ * POST {baseUrl}/chat/completions, bearer key, JSON mode via
+ * response_format, thinking disabled, no tools/web search.
+ *
+ * FALLBACK RULES:
+ * - Primary: config.model (glm-4-7-flash).
+ * - Fallback: config.fallbackModel (qwen3-5-4b) for server, timeout,
+ *   network, malformed failures, and clearly identified model overload.
+ * - Account-wide quota and ambiguous 429 failures do NOT trigger fallback.
+ * - auth/client/disabled: configuration problems — fallback cannot
+ *   help; fail fast without burning attempts.
+ * - The same strict parser, provenance map, and redaction apply to
+ *   both models. Success metadata records WHICH model produced it.
  */
 
 export const DEFAULT_MEMORY_BASE_URL = "https://api.empiriolabs.ai/v1";
-
 export const DEFAULT_MEMORY_MODEL = "glm-4-7-flash";
+export const DEFAULT_MEMORY_FALLBACK_MODEL = "qwen3-5-4b";
 
 /*
  * The free tier is SHARED across users — observed 429s occur well
@@ -34,23 +40,14 @@ export const DEFAULT_MEMORY_MODEL = "glm-4-7-flash";
  * minimum gap, and honor Retry-After with a global cooldown.
  */
 export const DEFAULT_MAX_REQUESTS_PER_MINUTE = 20;
-
 export const DEFAULT_MAX_TOKENS_PER_MINUTE = 1_600_000;
-
 export const DEFAULT_MIN_INTERVAL_MS = 3_000;
-
 export const DEFAULT_EXTRACTION_TIMEOUT_MS = 45_000;
-
 export const EXTRACTION_MAX_OUTPUT_TOKENS = 2_000;
-
 export const EXTRACTION_MAX_DRAFTS = 12;
-
 export const EXTRACTION_CONTEXT_TURNS = 12;
-
 export const CONTEXT_TURN_MAX_CHARS = 400;
-
 export const RATE_LIMIT_FALLBACK_MS = 60_000;
-
 export const RETRY_AFTER_MAX_MS = 600_000;
 
 export type ExtractionTurn = {
@@ -73,6 +70,8 @@ export type ExtractionSuccess = {
   drafts: ExtractedMemoryDraft[];
   usage: { inputTokens: number; outputTokens: number } | null;
   redactions: string[];
+  /** Which model actually produced this result (safe metadata). */
+  model: string;
 };
 
 export type ExtractionFailureKind =
@@ -91,6 +90,12 @@ export type ExtractionFailure = {
   retryable: boolean;
   retryAfterMs: number | null;
   message: string;
+  /**
+   * Set ONLY on rate_limited failures whose body clearly reports a
+   * model-level overload (not account quota). Marks the failure as
+   * fallback-eligible to the secondary model.
+   */
+  modelOverload?: boolean;
 };
 
 export type ExtractionResult = ExtractionSuccess | ExtractionFailure;
@@ -100,6 +105,8 @@ export type ExtractionConfig = {
   apiKey: string | null;
   baseUrl: string;
   model: string;
+  /** Fallback model, or null to disable fallback ("none" in env). */
+  fallbackModel: string | null;
   maxRequestsPerMinute: number;
   maxTokensPerMinute: number;
   minIntervalMs: number;
@@ -136,11 +143,21 @@ export function resolveExtractionConfig(
     isTruthy(env.STARFIRE_MEMORY_CLOUD_DISABLED) ||
     isTruthy(env.STARFIRE_MEMORY_DISABLED);
 
+  const fallbackRaw = env.STARFIRE_MEMORY_FALLBACK_MODEL?.trim();
+
+  const fallbackModel =
+    fallbackRaw === undefined || fallbackRaw === ""
+      ? DEFAULT_MEMORY_FALLBACK_MODEL
+      : fallbackRaw.toLowerCase() === "none"
+        ? null
+        : fallbackRaw;
+
   return {
     enabled: !disabled && apiKey !== null,
     apiKey,
     baseUrl: env.STARFIRE_MEMORY_BASE_URL?.trim() || DEFAULT_MEMORY_BASE_URL,
     model: env.STARFIRE_MEMORY_MODEL?.trim() || DEFAULT_MEMORY_MODEL,
+    fallbackModel,
     maxRequestsPerMinute: numberEnv(
       env.STARFIRE_GLM_MAX_RPM,
       DEFAULT_MAX_REQUESTS_PER_MINUTE,
@@ -177,7 +194,7 @@ WHAT TO EXTRACT:
 - event: notable happenings worth recalling later
 
 RULES:
-1. Extract ONLY from NEW MESSAGES. The CONTEXT block exists to resolve pronouns and fragments ("My name is." / "You can call me Thor."). Never extract from CONTEXT, never invent facts.
+1. Extract ONLY from NEW MESSAGES. The CONTEXT block and ALREADY-KNOWN MEMORIES exist to resolve pronouns/fragments and to avoid duplicates. Never extract from them, never invent facts.
 2. Ignore small talk, greetings, news, weather, tool results, and anything transient.
 3. NEVER store secrets or anything marked [REDACTED:...]. Treat redacted values as unknown.
 4. key: short stable english identifier, lowercase, letters/digits/dots/dashes only (e.g. "user.name", "editor", "goal.career", "project.starfire"). Reuse the same key when a later message updates the same fact.
@@ -193,6 +210,7 @@ RULES:
 14. Tool results and assistant replies (weather, search, time, app actions) describe the WORLD, not the user. NEVER infer user attributes like location or city from them.
 15. One greeting or single word in a language does NOT mean the user speaks that language. Record a language only if the user clearly converses in it.
 16. When unsure, return fewer memories or none. A missed fact is better than a wrong one. Empty is always acceptable.
+17. ALREADY-KNOWN MEMORIES are facts already saved. Do NOT restate them as new memories unless a NEW MESSAGE explicitly changes or extends one — then extract only the NEW value and cite the changing message id.
 
 EXAMPLES:
 - "hello" / "what's the weather?" / garbled audio -> {"memories":[]}
@@ -212,6 +230,7 @@ function clampChars(text: string, max: number): string {
 export function buildExtractionMessages(input: {
   context: readonly ExtractionTurn[];
   batch: readonly ExtractionTurn[];
+  existingMemories?: readonly string[];
 }): { system: string; user: string } {
   const contextBlock = input.context
     .slice(-EXTRACTION_CONTEXT_TURNS)
@@ -221,11 +240,15 @@ export function buildExtractionMessages(input: {
     )
     .join("\n");
 
+  const knownBlock = (input.existingMemories ?? [])
+    .map((memory) => `- ${clampChars(memory, 160)}`)
+    .join("\n");
+
   const batchBlock = input.batch
     .map((turn) => `#${turn.id} ${turn.role}: ${turn.content}`)
     .join("\n");
 
-  const user = `${CONTEXT_HEADER}\n${contextBlock || "(none)"}\n\n${BATCH_HEADER}\n${batchBlock}\n\n${FOOTER}`;
+  const user = `${CONTEXT_HEADER}\n${contextBlock || "(none)"}\n\nALREADY-KNOWN MEMORIES (do not re-extract unless a NEW MESSAGE changes one):\n${knownBlock || "(none)"}\n\n${BATCH_HEADER}\n${batchBlock}\n\n${FOOTER}`;
 
   return { system: SYSTEM_PROMPT, user };
 }
@@ -245,10 +268,6 @@ const draftSchema = z.object({
 const ABSENCE_CONTENT_PATTERN =
   /\b(?:not yet (?:known|specified|decided|mentioned|provided|shared)|is unknown|are unknown|remains unknown|not specified|no information)\b/i;
 
-/**
- * json_object mode guarantees valid JSON, not our exact shape. Real
- * models sometimes wrap or return bare arrays — unwrap shallowly.
- */
 function unwrapMemoriesArray(parsed: unknown): unknown[] | null {
   if (Array.isArray(parsed)) {
     return parsed;
@@ -287,9 +306,7 @@ function clampImportance(value: number | undefined): number {
 
 function extractJsonBlock(raw: string): string | null {
   const cleaned = raw.replace(/```(?:json)?/gi, "");
-
   const start = cleaned.indexOf("{");
-
   const end = cleaned.lastIndexOf("}");
 
   if (start === -1 || end <= start) {
@@ -309,8 +326,7 @@ export type ParsedPayload =
  * - individual bad items are dropped, never poisoning the batch;
  * - source ids must reference USER messages from the batch —
  *   assistant confirmations and foreign ids prove nothing;
- * - a draft with NO valid user-message source id is REJECTED:
- *   unproven "memories" are how wrong facts enter the card box;
+ * - a draft with NO valid user-message source id is REJECTED;
  * - redaction placeholders and absence-style non-facts never store.
  */
 export function parseExtractionPayload(
@@ -347,7 +363,6 @@ export function parseExtractionPayload(
     }
 
     const key = normalizeKey(checked.data.key);
-
     const content = checked.data.content.trim().slice(0, MAX_MEMORY_CHARS);
 
     if (key.length === 0 || content.length === 0) {
@@ -398,8 +413,11 @@ function failure(
   retryable: boolean,
   retryAfterMs: number | null,
   message: string,
+  modelOverload?: boolean,
 ): ExtractionFailure {
-  return { ok: false, kind, retryable, retryAfterMs, message };
+  return modelOverload
+    ? { ok: false, kind, retryable, retryAfterMs, message, modelOverload: true }
+    : { ok: false, kind, retryable, retryAfterMs, message };
 }
 
 /**
@@ -419,10 +437,46 @@ export function parseRetryAfterMs(header: string | null): number | null {
   }
 
   const seconds = value > 3_600 ? value / 1_000 : value;
-
   const ms = Math.round(seconds * 1_000);
 
   return Math.min(RETRY_AFTER_MAX_MS, Math.max(1_000, ms));
+}
+
+export const OVERLOAD_FALLBACK_MS = 30_000;
+
+export type RateLimitClassification = "overload" | "quota" | "ambiguous";
+
+/**
+ * Inspects the 429 BODY — the account dashboard showed "temporarily
+ * overloaded" while docs describe quota limits; headers alone cannot
+ * tell them apart:
+ * - "overload" only  -> model-level throttle, fallback eligible
+ * - quota wording    -> account-wide, fallback must NOT fire
+ * - anything else    -> ambiguous, treated as account-wide (conservative)
+ */
+export function classifyRateLimitBody(
+  bodyText: string,
+): RateLimitClassification {
+  const lower = bodyText.toLowerCase();
+
+  const saysOverload = lower.includes("overload");
+
+  const saysQuota =
+    lower.includes("quota") ||
+    lower.includes("rate limit") ||
+    lower.includes("too many requests") ||
+    lower.includes("throttl") ||
+    lower.includes("limit exceeded");
+
+  if (saysOverload && !saysQuota) {
+    return "overload";
+  }
+
+  if (saysQuota) {
+    return "quota";
+  }
+
+  return "ambiguous";
 }
 
 function readChoiceContent(payload: unknown): string | null {
@@ -469,7 +523,6 @@ function readUsage(
   const record = usage as Record<string, unknown>;
 
   const input = record.prompt_tokens ?? record.input_tokens;
-
   const output = record.completion_tokens ?? record.output_tokens;
 
   if (typeof input !== "number" || typeof output !== "number") {
@@ -479,9 +532,18 @@ function readUsage(
   return { inputTokens: input, outputTokens: output };
 }
 
+/** Failure kinds where a DIFFERENT model can plausibly succeed. */
+function fallbackEligible(kind: ExtractionFailureKind): boolean {
+  return (
+    kind === "server" ||
+    kind === "timeout" ||
+    kind === "network" ||
+    kind === "malformed"
+  );
+}
+
 export class GlmExtractionProvider {
   private readonly limiter: ExtractionRateLimiter;
-
   private chain: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -508,6 +570,7 @@ export class GlmExtractionProvider {
   extract(input: {
     context: readonly ExtractionTurn[];
     batch: readonly ExtractionTurn[];
+    existingMemories?: readonly string[];
   }): Promise<ExtractionResult> {
     const next = (): Promise<ExtractionResult> => this.runOnce(input);
 
@@ -521,6 +584,7 @@ export class GlmExtractionProvider {
   private async runOnce(input: {
     context: readonly ExtractionTurn[];
     batch: readonly ExtractionTurn[];
+    existingMemories?: readonly string[];
   }): Promise<ExtractionResult> {
     if (!this.isConfigured()) {
       return failure(
@@ -545,13 +609,79 @@ export class GlmExtractionProvider {
       );
     }
 
+    const primary = await this.attempt(this.config.model, input);
+
+    if (primary.ok) {
+      return primary;
+    }
+
+    const fallbackModel = this.config.fallbackModel;
+
+    /*
+     * Fallback eligibility: transient per-model failures, AND 429s
+     * whose body clearly says the MODEL is overloaded. Account-quota
+     * and ambiguous 429s never fall back — the backup would hit the
+     * same exhausted quota.
+     */
+    const primaryEligible =
+      fallbackEligible(primary.kind) ||
+      (primary.kind === "rate_limited" && primary.modelOverload === true);
+
+    const canFallback =
+      typeof fallbackModel === "string" &&
+      fallbackModel.length > 0 &&
+      fallbackModel !== this.config.model &&
+      primaryEligible;
+
+    if (!canFallback) {
+      return primary;
+    }
+
+    console.log(
+      `[Memory GLM] fallback to ${fallbackModel} (primary ${primary.kind}${primary.modelOverload ? "/overload" : ""})`,
+    );
+
+    const fallback = await this.attempt(fallbackModel, input);
+
+    if (fallback.ok) {
+      return fallback;
+    }
+
+    /*
+     * Preserve the GOVERNING failure: if the FALLBACK hit a rate
+     * limit, its kind and Retry-After must drive the queue cooldown.
+     * Collapsing it into the primary's error would misclassify the
+     * quota signal and burn a real retry attempt on it.
+     */
+    const governing = fallback.kind === "rate_limited" ? fallback : primary;
+
+    return failure(
+      governing.kind,
+      governing.retryable,
+      governing.retryAfterMs,
+      `primary ${primary.kind}; fallback ${fallback.kind}`,
+      governing.modelOverload,
+    );
+  }
+
+  private async attempt(
+    model: string,
+    input: {
+      context: readonly ExtractionTurn[];
+      batch: readonly ExtractionTurn[];
+      existingMemories?: readonly string[];
+    },
+  ): Promise<ExtractionResult> {
     // Provenance map: which batch ids exist, and which role spoke them.
     const provenance = new Map<number, "user" | "assistant">(
       input.batch.map((turn) => [turn.id, turn.role]),
     );
 
-    const redactedBatch = redactTurns(input.batch);
+    const knownMemories = (input.existingMemories ?? []).map(
+      (memory) => redactSecrets(memory).text,
+    );
 
+    const redactedBatch = redactTurns(input.batch);
     const redactedContext = redactTurns(input.context);
 
     const redactions = [
@@ -561,12 +691,13 @@ export class GlmExtractionProvider {
     const { system, user } = buildExtractionMessages({
       context: redactedContext.turns,
       batch: redactedBatch.turns,
+      existingMemories: knownMemories,
     });
 
     const estimatedTokens = estimateTokens(system.length + user.length);
 
     const body = JSON.stringify({
-      model: this.config.model,
+      model,
       messages: [
         { role: "system", content: system },
         { role: "user", content: user },
@@ -581,8 +712,9 @@ export class GlmExtractionProvider {
       await this.limiter.acquire(estimatedTokens);
 
       console.log(
-        `[Memory GLM] extract batch=[${[...provenance.keys()].join(",")}] ` +
-          `ctx=${redactedContext.turns.length} chars=${system.length + user.length}` +
+        `[Memory GLM] extract model=${model} ` +
+          `batch=[${[...provenance.keys()].join(",")}] ` +
+          `ctx=${redactedContext.turns.length} known=${knownMemories.length} chars=${system.length + user.length}` +
           (redactions.length > 0 ? ` redactions=${redactions.join("|")}` : ""),
       );
 
@@ -590,8 +722,7 @@ export class GlmExtractionProvider {
 
       /*
        * The timeout spans the ENTIRE exchange: connect, response
-       * headers, AND reading the body. A server that sends headers
-       * and then stalls the body must not hang us forever.
+       * headers, AND reading the body.
        */
       const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
 
@@ -621,19 +752,31 @@ export class GlmExtractionProvider {
         }
 
         if (response.status === 429) {
+          const classification = classifyRateLimitBody(text);
+
           const retryAfterMs =
             parseRetryAfterMs(response.headers.get("retry-after")) ??
-            RATE_LIMIT_FALLBACK_MS;
+            (classification === "overload"
+              ? OVERLOAD_FALLBACK_MS
+              : RATE_LIMIT_FALLBACK_MS);
 
-          // The provider asked EVERYONE to wait — apply a global
-          // cooldown so new jobs and retries back off together.
-          this.limiter.penalty(retryAfterMs);
+          /*
+           * Only account-wide (or ambiguous) throttles get the GLOBAL
+           * in-process cooldown — a model-specific overload must not
+           * block the healthy fallback model.
+           */
+          if (classification !== "overload") {
+            this.limiter.penalty(retryAfterMs);
+          }
 
           return failure(
             "rate_limited",
             true,
             retryAfterMs,
-            `Provider rate limit hit (waiting ${Math.round(retryAfterMs / 1000)}s).`,
+            classification === "overload"
+              ? "Model temporarily overloaded (429)."
+              : `Provider rate limit hit (waiting ${Math.round(retryAfterMs / 1000)}s).`,
+            classification === "overload",
           );
         }
 
@@ -693,7 +836,7 @@ export class GlmExtractionProvider {
         const usage = readUsage(payload);
 
         console.log(
-          `[Memory GLM] extract ok drafts=${parsedPayload.drafts.length}` +
+          `[Memory GLM] extract ok model=${model} drafts=${parsedPayload.drafts.length}` +
             (usage
               ? ` tokens in=${usage.inputTokens} out=${usage.outputTokens}`
               : ""),
@@ -705,6 +848,7 @@ export class GlmExtractionProvider {
           drafts: parsedPayload.drafts,
           usage,
           redactions,
+          model,
         };
       } finally {
         clearTimeout(timer);
