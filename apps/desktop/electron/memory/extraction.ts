@@ -1,17 +1,13 @@
 import { z } from "zod";
-
 import type { MemoryCategory } from "./memories.js";
-
 import {
   MAX_MEMORY_CHARS,
   MAX_SOURCE_IDS,
   MEMORY_CATEGORIES,
   normalizeKey,
 } from "./memories.js";
-
 import { ExtractionRateLimiter, estimateTokens } from "./rate-limit.js";
-
-import { redactTurns } from "./redaction.js";
+import { redactSecrets, redactTurns } from "./redaction.js";
 
 /*
  * GLM extraction provider with model fallback — the ONLY place
@@ -37,9 +33,7 @@ import { redactTurns } from "./redaction.js";
  */
 
 export const DEFAULT_MEMORY_BASE_URL = "https://api.empiriolabs.ai/v1";
-
 export const DEFAULT_MEMORY_MODEL = "glm-4-7-flash";
-
 export const DEFAULT_MEMORY_FALLBACK_MODEL = "qwen3-5-4b";
 
 /*
@@ -48,23 +42,14 @@ export const DEFAULT_MEMORY_FALLBACK_MODEL = "qwen3-5-4b";
  * minimum gap, and honor Retry-After with a global cooldown.
  */
 export const DEFAULT_MAX_REQUESTS_PER_MINUTE = 20;
-
 export const DEFAULT_MAX_TOKENS_PER_MINUTE = 1_600_000;
-
 export const DEFAULT_MIN_INTERVAL_MS = 3_000;
-
 export const DEFAULT_EXTRACTION_TIMEOUT_MS = 45_000;
-
 export const EXTRACTION_MAX_OUTPUT_TOKENS = 2_000;
-
 export const EXTRACTION_MAX_DRAFTS = 12;
-
 export const EXTRACTION_CONTEXT_TURNS = 12;
-
 export const CONTEXT_TURN_MAX_CHARS = 400;
-
 export const RATE_LIMIT_FALLBACK_MS = 60_000;
-
 export const RETRY_AFTER_MAX_MS = 600_000;
 
 export type ExtractionTurn = {
@@ -205,7 +190,7 @@ WHAT TO EXTRACT:
 - event: notable happenings worth recalling later
 
 RULES:
-1. Extract ONLY from NEW MESSAGES. The CONTEXT block exists to resolve pronouns and fragments ("My name is." / "You can call me Thor."). Never extract from CONTEXT, never invent facts.
+1. Extract ONLY from NEW MESSAGES. The CONTEXT block and ALREADY-KNOWN MEMORIES exist to resolve pronouns/fragments and to avoid duplicates. Never extract from them, never invent facts.
 2. Ignore small talk, greetings, news, weather, tool results, and anything transient.
 3. NEVER store secrets or anything marked [REDACTED:...]. Treat redacted values as unknown.
 4. key: short stable english identifier, lowercase, letters/digits/dots/dashes only (e.g. "user.name", "editor", "goal.career", "project.starfire"). Reuse the same key when a later message updates the same fact.
@@ -221,6 +206,7 @@ RULES:
 14. Tool results and assistant replies (weather, search, time, app actions) describe the WORLD, not the user. NEVER infer user attributes like location or city from them.
 15. One greeting or single word in a language does NOT mean the user speaks that language. Record a language only if the user clearly converses in it.
 16. When unsure, return fewer memories or none. A missed fact is better than a wrong one. Empty is always acceptable.
+17. ALREADY-KNOWN MEMORIES are facts already saved. Do NOT restate them as new memories unless a NEW MESSAGE explicitly changes or extends one — then extract only the NEW value and cite the changing message id.
 
 EXAMPLES:
 - "hello" / "what's the weather?" / garbled audio -> {"memories":[]}
@@ -240,6 +226,7 @@ function clampChars(text: string, max: number): string {
 export function buildExtractionMessages(input: {
   context: readonly ExtractionTurn[];
   batch: readonly ExtractionTurn[];
+  existingMemories?: readonly string[];
 }): { system: string; user: string } {
   const contextBlock = input.context
     .slice(-EXTRACTION_CONTEXT_TURNS)
@@ -249,11 +236,15 @@ export function buildExtractionMessages(input: {
     )
     .join("\n");
 
+  const knownBlock = (input.existingMemories ?? [])
+    .map((memory) => `- ${clampChars(memory, 160)}`)
+    .join("\n");
+
   const batchBlock = input.batch
     .map((turn) => `#${turn.id} ${turn.role}: ${turn.content}`)
     .join("\n");
 
-  const user = `${CONTEXT_HEADER}\n${contextBlock || "(none)"}\n\n${BATCH_HEADER}\n${batchBlock}\n\n${FOOTER}`;
+  const user = `${CONTEXT_HEADER}\n${contextBlock || "(none)"}\n\nALREADY-KNOWN MEMORIES (do not re-extract unless a NEW MESSAGE changes one):\n${knownBlock || "(none)"}\n\n${BATCH_HEADER}\n${batchBlock}\n\n${FOOTER}`;
 
   return { system: SYSTEM_PROMPT, user };
 }
@@ -541,6 +532,7 @@ export class GlmExtractionProvider {
   extract(input: {
     context: readonly ExtractionTurn[];
     batch: readonly ExtractionTurn[];
+    existingMemories?: readonly string[];
   }): Promise<ExtractionResult> {
     const next = (): Promise<ExtractionResult> => this.runOnce(input);
 
@@ -554,6 +546,7 @@ export class GlmExtractionProvider {
   private async runOnce(input: {
     context: readonly ExtractionTurn[];
     batch: readonly ExtractionTurn[];
+    existingMemories?: readonly string[];
   }): Promise<ExtractionResult> {
     if (!this.isConfigured()) {
       return failure(
@@ -621,11 +614,16 @@ export class GlmExtractionProvider {
     input: {
       context: readonly ExtractionTurn[];
       batch: readonly ExtractionTurn[];
+      existingMemories?: readonly string[];
     },
   ): Promise<ExtractionResult> {
     // Provenance map: which batch ids exist, and which role spoke them.
     const provenance = new Map<number, "user" | "assistant">(
       input.batch.map((turn) => [turn.id, turn.role]),
+    );
+
+    const knownMemories = (input.existingMemories ?? []).map(
+      (memory) => redactSecrets(memory).text,
     );
 
     const redactedBatch = redactTurns(input.batch);
@@ -639,6 +637,7 @@ export class GlmExtractionProvider {
     const { system, user } = buildExtractionMessages({
       context: redactedContext.turns,
       batch: redactedBatch.turns,
+      existingMemories: knownMemories,
     });
 
     const estimatedTokens = estimateTokens(system.length + user.length);
@@ -661,7 +660,7 @@ export class GlmExtractionProvider {
       console.log(
         `[Memory GLM] extract model=${model} ` +
           `batch=[${[...provenance.keys()].join(",")}] ` +
-          `ctx=${redactedContext.turns.length} chars=${system.length + user.length}` +
+          `ctx=${redactedContext.turns.length} known=${knownMemories.length} chars=${system.length + user.length}` +
           (redactions.length > 0 ? ` redactions=${redactions.join("|")}` : ""),
       );
 
