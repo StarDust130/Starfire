@@ -317,6 +317,30 @@ export class MemoryJobs {
   }
 
   /**
+   * Durable, GLOBAL cooldown (account-wide rate limit). Persisted in
+   * SQLite so it survives restarts: while active, every queued job
+   * AND fresh-batch claims wait — no claim/defer churn. Extends only:
+   * a later cooldown can push it out, never shorten it.
+   */
+  getCooldownUntil(now: number = Date.now()): number | null {
+    const row = this.db.handle
+      .prepare("SELECT value FROM memory_state WHERE key = 'cooldown_until'")
+      .get();
+
+    const value = Number(row?.value);
+
+    return Number.isFinite(value) && value > now ? value : null;
+  }
+
+  setCooldownUntil(until: number, now: number = Date.now()): void {
+    this.db.handle
+      .prepare(
+        "INSERT INTO memory_state (key, value) VALUES ('cooldown_until', ?) ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
+      )
+      .run(String(Math.max(until, now)));
+  }
+
+  /**
    * Crash recovery: jobs stuck in "running" (app died mid-job) go
    * back to pending so the next start retries them.
    */
